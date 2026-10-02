@@ -1,0 +1,36 @@
+{
+  "name": "MonsterFt",
+  "author": "rhodey",
+  "description": "Integrity layer for Raft.",
+  "version": "0.5.0",
+  "license": "AGPL-3.0-only",
+  "type": "module",
+  "main": "src/index.js",
+  "repository": {
+    "type": "git",
+    "url": "git://github.com/rhodey/monsterft.git"
+  },
+  "homepage": "https://github.com/rhodey/monsterft",
+  "engines": {
+    "node": ">=24.15"
+  },
+  "scripts": {
+    "test": "tape test/*.js"
+  },
+  "dependencies": {
+    "libsodium-wrappers": "^0.8.2",
+    "msgpackr": "^1.11.2"
+  },
+  "devDependencies": {
+    "tape": "^5.9.0"
+  },
+  "keywords": [
+    "raft",
+    "monster",
+    "monsterft",
+    "consensus",
+    "replication",
+    "append",
+    "log"
+  ]
+}

@@ -1,0 +1,7 @@
+.env*
+*.swp
+.DS_Store
+node_modules/
+.github/
+test/
+PLAN.md
