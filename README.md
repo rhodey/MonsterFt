@@ -64,7 +64,7 @@ function createNode(id) {
 
 const nodes = nodeIds.map(createNode)
 nodes.forEach((node) => node.open())
-await Promise.all(nodes.map((node) => node.awaitLeader(true)))
+await Promise.all(nodes.map((node) => node.awaitLeader()))
 
 const command = Buffer.from(JSON.stringify({
   type: 'increment',
