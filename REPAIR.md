@@ -2,8 +2,8 @@
 
 Use this procedure when a node reports `REPAIR_QUORUM_IMPOSSIBLE` or
 `REPAIR_OUTSIDE_AGREEMENT`, or when history can no longer catch it up due
-to KEEP. Each node owns a DB pair: the constructor `databasePath` and the
-literal `${databasePath}2`.
+to retention. Each node owns a DB pair: the constructor `databasePath`
+and the literal `${databasePath}2`.
 
 1. Choose the donor whose state you accept. A successful drain closes the donor:
 

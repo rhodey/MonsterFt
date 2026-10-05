@@ -127,24 +127,15 @@ const node = new MonsterFt(id, nodeIds, send, databasePath, {
   apply,
   keepTarget: 1_000,
   keepTrigger: 1_500,
-  keepHalt: 2_000,
 })
 ```
 
-Supply all three options or none. As a distributed system MonsterFt can only
-guarantee best effort and needs bounds. If a node ever reaches `keepHalt` it
-will emit an error with code `KEEP_HALT` and close. The log only grows
-beyond `keepTarget` when nodes succeed with elections, meaning RPC is working,
-and appending the post-election no-op buffer works, and thus grows the log,
-but for whatever reason appending the KEEP protocol buffer fails. This would
-need to cycle 500 times (including 500 elections) to halt.
-
-The author chose to not implement Raft "Log Compaction" and to not implement
-Raft membership changes because both were deemed too complicated to justify
-what they bring. In the case of Log Compaction it also does not play well
-with memory-constrained systems. Readers who consult the [Raft PDF](https://raft.github.io/raft.pdf)
-will agree that both log compaction and membership changes are extensions
-outside of core.
+Supply both options or neither. The author chose to not implement Raft "Log
+Compaction" and to not implement Raft membership changes because both were
+deemed too complicated to justify what they bring. In the case of Log
+Compaction it also does not play well with storage-constrained systems. Readers
+who consult the [Raft PDF](https://raft.github.io/raft.pdf) will agree that
+both log compaction and membership changes are extensions outside of core.
 
 ### Repair
 
@@ -152,7 +143,7 @@ A node requires repair when an error with code `REPAIR_QUORUM_IMPOSSIBLE` or
 `REPAIR_OUTSIDE_AGREEMENT` is thrown or emit. Respectively these represent a
 command for which no quorum can agree (most likely your app failed to use
 SQLite deterministically) and a command in which only a minority of nodes
-disagree. Additionally a node requires repair when it reaches `keepHalt`.
+disagree. A node also requires repair if it falls behind retention.
 
 The MonsterFt repair protocol is an "offline" procedure to be carried out by
 an operator. [REPAIR.md](REPAIR.md) documents the procedure, in summary its
@@ -172,7 +163,7 @@ Without MonsterFt your application uses maybe 2GB of RAM and maybe 100GB of
 HDD. This is the surface area in which things can go wrong even if you are
 using Raft. With MonsterFt: the surface area vulnerable to bad things is on
 the order of 100 bytes. I'm using approximate language here because this
-repo is not MonsterFt in its final form and what I have planned is looking
+repo is not MonsterFt in its final form and what is planned is looking
 like it can be truly fault tolerant in the sense that aerospace and the
 defense industry understand.
 

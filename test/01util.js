@@ -16,7 +16,6 @@ import {
   DRAINING,
   ErrorWithCode,
   FS_ERROR,
-  KEEP_HALT,
   LOG_CORRUPT,
   LOG_NOT_OPEN,
   LOG_OPEN,
@@ -72,12 +71,11 @@ test('public error codes preserve the existing constants', (t) => {
     REPL_FORGOT,
     REPAIR_QUORUM_IMPOSSIBLE,
     REPAIR_OUTSIDE_AGREEMENT,
-    KEEP_HALT,
     DRAINING,
   }
   const values = Object.values(codes)
-  t.deepEqual(values, values.map((_, index) => 10_000 + index),
-    'assigns sequential values beginning at 10,000')
+  t.deepEqual(values, [...Array.from({ length: 21 }, (_, i) => 10_000 + i), 10_022],
+    'preserves numeric values, including DRAINING after the removed code')
   t.deepEqual(Public.ErrorCodes, codes, 'exports exactly the existing names and values')
   t.ok(Object.isFrozen(Public.ErrorCodes), 'the public namespace is frozen')
   t.notOk(Object.hasOwn(Public, 'wrapError'), 'does not expose wrapError at the package root')
@@ -306,27 +304,37 @@ test('normalizeKeepOptions disables or normalizes automatic retention', (t) => {
   const keep = normalizeKeepOptions({
     keepTarget: 2,
     keepTrigger: 3,
-    keepHalt: 6,
   })
-  t.deepEqual(keep, { target: 2n, trigger: 3n, halt: 6n },
+  t.deepEqual(keep, { target: 2n, trigger: 3n },
     'valid options are normalized to bigint boundaries')
   t.notOk(Object.isFrozen(keep), 'normalized boundaries are not frozen')
   t.end()
 })
 
-test('normalizeKeepOptions preserves KEEP validation', (t) => {
+test('normalizeKeepOptions validates both retention boundaries', (t) => {
   const invalid = [
     [{ keepTarget: 2 }, /must be supplied together/,
       'partial configuration'],
-    [{ keepTarget: 2n, keepTrigger: 3, keepHalt: 6 },
+    [{ keepTrigger: 3 }, /must be supplied together/,
+      'missing target'],
+    [{ keepTarget: 2n, keepTrigger: 3 },
       /keepTarget must be a safe integer/, 'non-integer configuration'],
-    [{ keepTarget: 1, keepTrigger: 3, keepHalt: 6 },
+    [{ keepTarget: 1, keepTrigger: 3 },
       /keepTarget must be >= 2/, 'target minimum'],
-    [{ keepTarget: 3, keepTrigger: 3, keepHalt: 6 },
+    [{ keepTarget: 3, keepTrigger: 3 },
       /keepTarget must be < keepTrigger/, 'target ordering'],
-    [{ keepTarget: 2, keepTrigger: 3, keepHalt: 4 },
-      /keepHalt must be >= keepTrigger \+ 2/, 'halt headroom'],
+    [{ keepTarget: 4, keepTrigger: 3 },
+      /keepTarget must be < keepTrigger/, 'reversed ordering'],
   ]
+  for (const value of [null, false, '3', 2n, NaN, Infinity, 2.5,
+    Number.MAX_SAFE_INTEGER + 1]) {
+    invalid.push(
+      [{ keepTarget: value, keepTrigger: 5 },
+        /keepTarget must be a safe integer/, `invalid target ${value}`],
+      [{ keepTarget: 2, keepTrigger: value },
+        /keepTrigger must be a safe integer/, `invalid trigger ${value}`],
+    )
+  }
   for (const [opts, pattern, name] of invalid) {
     let err = null
     try {
