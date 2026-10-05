@@ -135,7 +135,7 @@ Compaction" and to not implement Raft membership changes because both were
 deemed too complicated to justify what they bring. In the case of Log
 Compaction it also does not play well with storage-constrained systems. Readers
 who consult the [Raft PDF](https://raft.github.io/raft.pdf) will agree that
-both log compaction and membership changes are extensions outside of core.
+both Log Compaction and membership changes are extensions outside of core.
 
 ### Repair
 
