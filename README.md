@@ -1,10 +1,10 @@
 # MonsterFt
 
 MonsterFt is a fixed-membership replicated SQLite state machine. For each
-command (request), every available node executes the application callback
-and captures its net database change as an [SQLite Session Extension](https://sqlite.org/sessionintro.html)
+command (request), every available node executes the application and
+captures its database change as an [SQLite Session Extension](https://sqlite.org/sessionintro.html)
 patchset. The command succeeds when a configured quorum agrees on the database
-patchset and the returned value or error.
+change and the result.
 
 MonsterFt is built on top of standard, unmodified Raft. Raft orders commands;
 MonsterFt adds SQLite agreement above it. Why? [Cosmic Ray Bit-flips](https://en.wikipedia.org/wiki/Single-event_upset)
@@ -76,7 +76,7 @@ console.log('count =', value)
 
 `send(to, message)` may be synchronous or async. A real deployment uses
 its transport to deliver the message to `target.onReceive(senderId, message)`.
-`open()` and `close()` are synchronous. A closed node cannot be reopened.
+`open()` and `close()` are synchronous.
 
 ### Application and patchset rules
 
@@ -197,12 +197,11 @@ approx 3X compute and approx 3X storage.
 
 The work is licensed `AGPL-3.0-only` to encourage collaborations while
 leaving open a path for negotiating commercial licenses and support
-packages. Redis chose AGPLv3 and I hope this does well for MonsterFt.
+packages.
 
-I have [Lock Host, Inc](https://lock.host/) on hand that I incorporated
-for some works years ago now and kind of led to this. Write to
-hello@lock.host for commercial licenses and other inquiries. Opening GitHub
-issues is also encouraged.
+I incorporated [Lock Host, Inc](https://lock.host/) for some works years
+ago and they led to this. Write to hello@lock.host for commercial
+licenses and other inquiries. Opening GitHub issues is also encouraged.
 
 ### Install
 
