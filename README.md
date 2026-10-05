@@ -176,7 +176,7 @@ with altitude and orbit and beyond.
 
 The planned work keeps Raft and SQLite and all MonsterFt protocol messages
 while borrowing an architecture from SpaceX: a minimum 3 node cluster
-remains but every node is running two copies of the MonsterFt stack and
+remains but every node is running two copies of the app stack and
 these copies are forced to agree before they can RPC with the cluster.
 
 Actually you could ditch MonsterFt and do Raft core with this architecture
