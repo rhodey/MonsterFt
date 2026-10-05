@@ -4,7 +4,7 @@ MonsterFt is a fixed-membership replicated SQLite state machine. For each
 command (request), every available node executes the application and
 captures its database change as an [SQLite Session Extension](https://sqlite.org/sessionintro.html)
 patchset. The command succeeds when a configured quorum agrees on the database
-change and the result.
+change and the return value.
 
 MonsterFt is built on top of standard, unmodified Raft. Raft orders commands;
 MonsterFt adds SQLite agreement above it. Why? [Cosmic Ray Bit-flips](https://en.wikipedia.org/wiki/Single-event_upset)
