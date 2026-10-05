@@ -6,14 +6,12 @@ import { unpack } from 'msgpackr'
 import {
   APPLY_ERROR,
   ErrorWithCode,
-  KEEP_HALT,
-  NOT_COMMIT,
-  RAFT_ILLEGAL,
+  LOG_CORRUPT,
+  SQLITE_ERROR,
   REPAIR_QUORUM_IMPOSSIBLE,
 } from '../src/error.js'
 import { MonsterFt } from '../src/monsterft.js'
 import { MonsterNode } from '../src/monster.js'
-import { validateKeepEntry } from '../src/utilm.js'
 
 const ids = ['1', '2', '3']
 const noop = () => {}
@@ -117,15 +115,6 @@ const raftTypes = (node) => raftRows(node).map(({ entry }) => {
   return payload.length === 0 ? 'noop' : unpack(payload).type
 })
 
-const raftRecordAt = (node, seq) => {
-  const row = node.log.db.prepare(`
-    SELECT entry FROM raft_log WHERE seq = ?
-  `).get(seq)
-  if (row === undefined) { return null }
-  const payload = Buffer.from(row.entry).subarray(8)
-  return payload.length === 0 ? null : unpack(payload)
-}
-
 const pendingAt = (node) => {
   const row = node.db.prepare(`
     SELECT pending_cmd_seq, pending_local_digest
@@ -138,12 +127,6 @@ const pendingAt = (node) => {
         localDigest: Buffer.from(row.pending_local_digest),
       }
 }
-
-const hasCommandTable = (node) => node.db.prepare(`
-  SELECT COUNT(*) AS count
-  FROM sqlite_schema
-  WHERE type = 'table' AND name = 'monsterft_commands'
-`).get().count !== 0n
 
 const metaAt = (node) => node.db.prepare(`
   SELECT applied_seq, applied_entry_hash, repair_state,
@@ -244,10 +227,11 @@ const electOpen = async (nodes, candidate) => {
   return candidate
 }
 
-const waitApplied = (nodes, seq) => waitFor(
-  () => nodes.every((node) => node._applySeq >= seq),
-  `all nodes apply through ${seq}`,
-)
+const waitApplied = async (nodes, seq) => {
+  await waitFor(() => nodes.every((node) => node._applySeq >= seq),
+    `all nodes apply through ${seq}`)
+  await Promise.all(nodes.map((node) => node._applyPrev))
+}
 
 const nextSync = (node) => new Promise((resolve) => node.once('sync', resolve))
 
@@ -263,972 +247,499 @@ const appendThroughSync = async (node, data, batch=false) => {
   return { cmdSeq, result, syncSeq: sync.syncSeq }
 }
 
-const keepOpts = (keepTarget=3, keepTrigger=5, keepHalt=8) => ({
-  keepTarget,
-  keepTrigger,
-  keepHalt,
+const keepOpts = (keepTarget=3, keepTrigger=5) => ({ keepTarget, keepTrigger })
+
+const readPair = (databasePath) => {
+  const raft = new DatabaseSync(databasePath, { readOnly: true, readBigInts: true })
+  const db = new DatabaseSync(`${databasePath}2`, { readOnly: true, readBigInts: true })
+  try {
+    return {
+      rows: raft.prepare('SELECT seq, entry FROM raft_log ORDER BY seq').all(),
+      meta: metaAt({ db }),
+    }
+  } finally {
+    raft.close()
+    db.close()
+  }
+}
+
+test('omitted retention options preserve history without KEEP records', async (t) => {
+  const fixture = clusterFixture(t, 'disabled')
+  const { nodes } = fixture.build()
+  const leader = await openAndElect(nodes)
+  t.equal(leader._monsterKeep, null, 'retention is disabled by default')
+  t.equal(typeof MonsterNode.prototype.keep, 'undefined', 'no public KEEP method')
+  for (let i = 0; i < 4; i++) {
+    const result = await appendThroughSync(leader, toBuf({ key: 'disabled', value: i }))
+    await waitApplied(nodes, result.syncSeq)
+  }
+  for (const node of nodes) {
+    t.equal(node.log.begin, 0n, `node ${node.id} keeps the entire prefix`)
+    t.deepEqual(raftTypes(node), [
+      'noop', 'cmd', 'sync', 'cmd', 'sync', 'cmd', 'sync', 'cmd', 'sync',
+    ], `node ${node.id} appends only commands, decisions, and election no-ops`)
+  }
+  t.deepEqual(fixture.errors, [], 'disabled retention emits no errors')
 })
 
-test('automatic KEEP validates configuration and removes the public KEEP API',
-  (t) => {
-    t.equal(typeof MonsterNode.prototype.keep, 'undefined',
-      'MonsterNode exposes no public keep method')
-    t.equal(typeof MonsterFt.prototype.keep, 'undefined',
-      'MonsterFt exposes no public keep method')
-
-    const nodes = []
-    const paths = []
-    const makeNode = (name, opts={}) => {
-      const databasePath = uniquePath(`config-${name}`)
-      paths.push(databasePath)
-      const node = new MonsterFt('1', ids, noop, databasePath, {
-        ...opts,
-        apply: applyApp,
-      })
-      nodes.push(node)
-      return node
+test('retention checks use cached state and delete in exact applied batches', async (t) => {
+  const fixture = clusterFixture(t, 'boundaries')
+  const { nodes } = fixture.build({ opts: { ...keepOpts(3, 6), applyMax: 4 } })
+  const leader = await openAndElect(nodes)
+  const deletions = new Map()
+  const refreshes = new Map()
+  for (const node of nodes) {
+    const events = []
+    deletions.set(node.id, events)
+    refreshes.set(node.id, 0)
+    const prepare = node.log.db.prepare.bind(node.log.db)
+    node.log.db.prepare = (sql) => {
+      if (/SELECT/i.test(sql)) {
+        throw new Error('retention must not prepare a query to count rows')
+      }
+      if (/DELETE\s+FROM\s+raft_log\s+WHERE\s+seq\s*</i.test(sql)) {
+        events.push(metaAt(node).applied_seq)
+      }
+      return prepare(sql)
     }
-    t.teardown(() => {
-      closeNodesQuietly(nodes)
-      paths.forEach(removePair)
-    })
-
-    const disabled = makeNode('disabled')
-    t.equal(disabled._monsterKeep, null,
-      'omitting every KEEP option disables automatic retention')
-    let keepEntryErr = null
-    try {
-      validateKeepEntry(disabled, { type: 'keep' }, 0n)
-    } catch (err) {
-      keepEntryErr = err
+    const readHead = node.log._readHead.bind(node.log)
+    node.log._readHead = () => {
+      refreshes.set(node.id, refreshes.get(node.id) + 1)
+      return readHead()
     }
-    t.ok(keepEntryErr instanceof ErrorWithCode,
-      'an unconfigured KEEP entry throws ErrorWithCode')
-    t.equal(keepEntryErr.message, 'KEEP entry KEEP not configured',
-      'an unconfigured KEEP entry uses the normalized message')
-    t.equal(keepEntryErr.code, RAFT_ILLEGAL,
-      'an unconfigured KEEP entry uses RAFT_ILLEGAL')
-    t.equal(keepEntryErr.sqlCode, null,
-      'an unconfigured KEEP entry has no SQLite error code')
-    const enabled = makeNode('enabled', keepOpts(2, 3, 5))
-    t.deepEqual(enabled._monsterKeep, {
-      target: 2n,
-      trigger: 3n,
-      halt: 5n,
-    }, 'the minimum valid boundaries are accepted and normalized')
+  }
 
-    for (const [name, opts] of [
-      ['target-only', { keepTarget: 2 }],
-      ['trigger-only', { keepTrigger: 3 }],
-      ['halt-only', { keepHalt: 6 }],
-      ['target-trigger', { keepTarget: 2, keepTrigger: 3 }],
-      ['target-halt', { keepTarget: 2, keepHalt: 6 }],
-      ['trigger-halt', { keepTrigger: 3, keepHalt: 6 }],
-    ]) {
-      t.throws(() => makeNode(name, opts), /must be supplied together/,
-        `${name} is rejected as a partial configuration`)
-    }
+  await leader._appendToSelfAndFollowers(Array.from({ length: 4 }, () => Buffer.alloc(0)))
+  await waitApplied(nodes, 4n)
+  for (const node of nodes) {
+    t.deepEqual(deletions.get(node.id), [], `node ${node.id} does not delete below trigger`)
+    t.equal(refreshes.get(node.id), 0, `node ${node.id} does not query boundaries below trigger`)
+  }
 
-    for (const [name, value] of [
-      ['bigint', 2n],
-      ['fraction', 2.5],
-      ['nan', Number.NaN],
-      ['infinity', Number.POSITIVE_INFINITY],
-      ['unsafe', Number.MAX_SAFE_INTEGER + 1],
-      ['string', '2'],
-      ['null', null],
-    ]) {
-      t.throws(
-        () => makeNode(`target-${name}`, {
-          keepTarget: value, keepTrigger: 5, keepHalt: 8,
-        }),
-        /keepTarget must be a safe integer/,
-        `${name} keepTarget is rejected`,
-      )
-      t.throws(
-        () => makeNode(`trigger-${name}`, {
-          keepTarget: 2, keepTrigger: value, keepHalt: 8,
-        }),
-        /keepTrigger must be a safe integer/,
-        `${name} keepTrigger is rejected`,
-      )
-      t.throws(
-        () => makeNode(`halt-${name}`, {
-          keepTarget: 2, keepTrigger: 3, keepHalt: value,
-        }),
-        /keepHalt must be a safe integer/,
-        `${name} keepHalt is rejected`,
-      )
-    }
+  await leader._appendToSelfAndFollowers(Array.from({ length: 7 }, () => Buffer.alloc(0)))
+  await waitApplied(nodes, 11n)
+  for (const node of nodes) {
+    t.deepEqual(deletions.get(node.id), [5n, 8n, 11n],
+      `node ${node.id} prunes at the trigger after durable checkpoints`)
+    t.equal(refreshes.get(node.id), 3, `node ${node.id} refreshes only after deletion`)
+    t.equal(node.log.begin, 9n, `node ${node.id} advances the retained floor`)
+    t.equal(retainedCount(node), 3n, `node ${node.id} retains exactly the target`)
+  }
+  t.deepEqual(fixture.errors, [], 'batched application remains healthy')
+})
 
-    t.throws(() => makeNode('target-too-small', keepOpts(1, 3, 6)),
-      /keepTarget must be >= 2/, 'keepTarget has an inclusive minimum of two')
-    t.throws(() => makeNode('equal', keepOpts(3, 3, 6)),
-      /keepTarget must be < keepTrigger/, 'target must be below trigger')
-    t.throws(() => makeNode('reversed', keepOpts(4, 3, 6)),
-      /keepTarget must be < keepTrigger/, 'a reversed target and trigger are rejected')
-    t.throws(() => makeNode('halt-headroom', keepOpts(2, 3, 4)),
-      /keepHalt must be >= keepTrigger \+ 2/,
-      'halt reserves at least two rows beyond trigger')
-    t.throws(() => makeNode('overflow', keepOpts(
-      Number.MAX_SAFE_INTEGER - 1,
-      Number.MAX_SAFE_INTEGER,
-      Number.MAX_SAFE_INTEGER,
-    )), /keepHalt must be >= keepTrigger \+ 2/,
-    'a trigger without representable halt headroom is rejected')
-    t.end()
-  })
-
-test('omitted KEEP configuration never appends KEEP and old KEEP RPC is ignored',
-  async (t) => {
-    const fixture = clusterFixture(t, 'disabled')
-    const cluster = fixture.build()
-    const leader = await openAndElect(cluster.nodes)
-
-    let syncSeq = null
-    for (let index = 0; index < 3; index++) {
-      ({ syncSeq } = await appendThroughSync(leader, toBuf({
-        key: `disabled-${index}`,
-        value: index,
-      })))
-    }
-    await waitApplied(cluster.nodes, syncSeq)
-    t.equal(retainedCount(leader), 7n,
-      'disabled retention allows the retained row count to grow')
-    t.deepEqual(raftTypes(leader), [
-      'noop', 'cmd', 'sync', 'cmd', 'sync', 'cmd', 'sync',
-    ], 'disabled retention emits only ordinary protocol records')
-
-    const follower = cluster.nodes.find((node) => node !== leader)
-    const beforeSeq = leader.seq
-    const beforeMessages = fixture.bus.messages.length
-    await leader.onReceive(follower.id, {
-      type: 'monster_keep_request',
-      term: leader.term,
-      cid: 'removed-keep-rpc',
-      seq: 0n,
-    })
-    await sleep(5)
-    t.equal(leader.seq, beforeSeq, 'the removed KEEP RPC appends no record')
-    t.notOk(fixture.bus.messages.slice(beforeMessages).some(({ msg }) => {
-      return msg.cid === 'removed-keep-rpc'
-    }), 'the removed KEEP RPC receives no protocol response')
-    t.deepEqual(fixture.errors, [], 'disabled retention emits no errors')
-  })
-
-test('election below keepTrigger retains the empty no-op marker', async (t) => {
-  const fixture = clusterFixture(t, 'election-below-trigger')
-  const opts = keepOpts(3, 5, 8)
-  const nullSeqs = []
+test('local, batched, and forwarded commands prune without adding entries', async (t) => {
+  const fixture = clusterFixture(t, 'commands')
+  let commandCalls = 0
   const apply = (db, buf, term, seq) => {
-    if (buf === null) { nullSeqs.push(seq) }
+    if (buf !== null) { commandCalls++ }
     return applyApp(db, buf, term, seq)
   }
-  const seeded = fixture.build({ apply, opts })
-  const seedLeader = await openAndElect(seeded.nodes)
-  await appendThroughSync(seedLeader, toBuf({ key: 'below', value: 1 }))
-  t.equal(retainedCount(seedLeader), 3n,
-    'the seed remains below the retention trigger')
-  t.deepEqual(nullSeqs, [0n, 0n, 0n],
-    'only the initial no-op invokes the application callback')
-  closeNodesQuietly(seeded.nodes)
-
+  const opts = keepOpts()
+  const { nodes } = fixture.build({ apply, opts })
+  const leader = await openAndElect(nodes)
+  const first = await appendThroughSync(leader, toBuf({ key: 'first', value: 10 }))
+  await waitApplied(nodes, first.syncSeq)
+  t.equal(leader.log.begin, 0n, 'the first command remains below trigger')
+  const batch = await appendThroughSync(leader, [
+    toBuf({ key: 'batch-a', value: 20 }),
+    toBuf({ key: 'batch-b', value: 21 }),
+  ], true)
+  await waitApplied(nodes, batch.syncSeq)
+  t.equal(batch.result.length, 2, 'the batch returns both outcomes')
+  t.equal(leader.log.begin, 2n, 'the batch reaches the trigger and prunes')
+  const forwarded = await appendThroughSync(nodes[1], toBuf({ key: 'forwarded', value: 30 }))
+  await waitApplied(nodes, forwarded.syncSeq)
+  t.deepEqual([first.cmdSeq, batch.cmdSeq, forwarded.cmdSeq], [1n, 3n, 5n],
+    'each submission uses just its CMD and SYNC slots')
+  for (const node of nodes) {
+    t.deepEqual(raftSeqs(node), [4n, 5n, 6n], `node ${node.id} prunes locally to target`)
+    t.deepEqual(raftTypes(node), ['sync', 'cmd', 'sync'], 'no retention record is stored')
+    t.deepEqual(['first', 'batch-a', 'batch-b', 'forwarded'].map((key) => valueAt(node, key)),
+      [10, 20, 21, 30], `node ${node.id} preserves application state`)
+  }
+  t.ok(fixture.bus.messages.some(({ msg }) => msg.type === 'fwd_cmd'),
+    'the follower uses ordinary command forwarding')
+  const beforeRestartCalls = commandCalls
+  closeNodesQuietly(nodes)
   const restarted = fixture.build({ apply, opts })
-  const leader = await openAndElect(restarted.nodes, restarted.nodes[1])
-  t.deepEqual(raftTypes(leader), ['noop', 'cmd', 'sync', 'noop'],
-    'below-trigger election appends an actual empty no-op')
-  t.deepEqual(nullSeqs, [0n, 0n, 0n],
-    'the later election no-op does not invoke the application callback')
+  const replacement = await openAndElect(restarted.nodes, restarted.nodes[1])
+  await waitApplied(restarted.nodes, 7n)
+  t.equal(commandCalls, beforeRestartCalls, 'restart does not reapply completed commands')
+  t.deepEqual(raftTypes(replacement), ['sync', 'cmd', 'sync', 'noop'],
+    'the new leader appends an ordinary election no-op')
+  const later = await appendThroughSync(replacement, toBuf({ key: 'later', value: 40 }))
+  await waitApplied(restarted.nodes, later.syncSeq)
+  for (const node of restarted.nodes) {
+    t.deepEqual(raftSeqs(node), [7n, 8n, 9n], 'pruning resumes after leadership changes')
+    t.equal(valueAt(node, 'first'), 10, 'pruned application state survives restart')
+    t.equal(valueAt(node, 'later'), 40, 'the restarted cluster advances')
+  }
+  t.deepEqual(fixture.errors, [], 'retention and restart emit no errors')
 })
 
-test('automatic KEEP hits its exact target before local and forwarded commands',
-  async (t) => {
-    const fixture = clusterFixture(t, 'automatic-success')
-    const opts = keepOpts(3, 5, 8)
-    const nullSeqs = []
-    const apply = (db, buf, term, seq) => {
-      if (buf === null) { nullSeqs.push(seq) }
-      return applyApp(db, buf, term, seq)
-    }
-    const first = fixture.build({ apply, opts })
-    const leader = await openAndElect(first.nodes)
-    nullSeqs.length = 0
-
-    const firstPair = await appendThroughSync(leader, toBuf({
-      key: 'first', value: 10,
-    }))
-    const secondPair = await appendThroughSync(leader, [
-      toBuf({ key: 'batch-a', value: 20 }),
-      toBuf({ key: 'batch-b', value: 21 }),
-    ], true)
-    await waitApplied(first.nodes, secondPair.syncSeq)
-    t.equal(secondPair.result.length, 2,
-      'appendBatch still produces one CMD with ordered item outcomes')
-    t.equal(retainedCount(leader), 5n,
-      'the election no-op and two CMD/SYNC pairs reach the trigger exactly')
-    t.notOk(raftTypes(leader).includes('keep'),
-      'reaching the trigger does not act until the next command boundary')
-
-    const appendEntry = leader._monsterAppendEntry.bind(leader)
-    let keepSeq = null
-    let keepRecord = null
-    let beforeTriggerCmd = null
-    leader._monsterAppendEntry = async (entry) => {
-      if (entry.type === 'cmd' && keepSeq !== null && beforeTriggerCmd === null) {
-        beforeTriggerCmd = {
-          seqs: raftSeqs(leader),
-          count: retainedCount(leader),
-          applySeq: leader._applySeq,
-          pending: pendingAt(leader),
-        }
-      }
-      const result = await appendEntry(entry)
-      if (entry.type === 'keep') {
-        keepSeq = result[0]
-        keepRecord = entry
-      }
-      return result
-    }
-
-    const follower = first.nodes.find((node) => node !== leader)
-    const thirdPair = await appendThroughSync(follower, toBuf({
-      key: 'forwarded', value: 30,
-    }))
-    await waitApplied(first.nodes, thirdPair.syncSeq)
-
-    t.equal(keepSeq, 5n, 'the automatic KEEP occupies predicted index K')
-    t.deepEqual(keepRecord, { type: 'keep' },
-      'the KEEP entry contains only its type')
-    t.deepEqual(raftRecordAt(leader, keepSeq), keepRecord,
-      'the persisted KEEP matches the computed record')
-    t.deepEqual(beforeTriggerCmd, {
-      seqs: [3n, 4n, 5n],
-      count: 3n,
-      applySeq: 5n,
-      pending: null,
-    }, 'KEEP replication, apply, and deletion finish before CMD admission')
-    t.equal(thirdPair.cmdSeq, 6n,
-      'the forwarded CMD joins immediately after the applied KEEP')
-    t.equal(thirdPair.syncSeq, 7n,
-      'the forwarded CMD retains its adjacent SYNC')
-    t.deepEqual(nullSeqs, [],
-      'pre-CMD KEEP does not invoke the application callback')
-    t.ok(fixture.bus.messages.some(({ from, to, msg }) => {
-      return from === follower.id && to === leader.id &&
-        msg.type === 'fwd_cmd'
-    }), 'a forwarded public append uses ordinary command submission')
-    t.notOk(fixture.bus.messages.some(({ msg }) => {
-      return msg.type === 'monster_keep_request'
-    }), 'automatic retention sends no dedicated KEEP request RPC')
-
-    for (const node of first.nodes) {
-      t.deepEqual(raftSeqs(node), [3n, 4n, 5n, 6n, 7n],
-        `node ${node.id} retains the exact floor plus the new CMD/SYNC pair`)
-      t.deepEqual(raftTypes(node), ['cmd', 'sync', 'keep', 'cmd', 'sync'],
-        `node ${node.id} retains the expected record types`)
-      t.equal(pendingAt(node), null,
-        `node ${node.id} has no pending CMD after the later SYNC`)
-      t.notOk(hasCommandTable(node),
-        `node ${node.id} stores no resolved command history`)
-      t.deepEqual(
-        ['first', 'batch-a', 'batch-b', 'forwarded']
-          .map((key) => valueAt(node, key)),
-        [10, 20, 21, 30],
-        `node ${node.id} preserves application state while pruning history`,
-      )
-      t.equal(metaAt(node).repair_state, 0n,
-        `node ${node.id} remains healthy after automatic retention`)
-    }
-    t.equal(firstPair.cmdSeq, 1n, 'the pruned first CMD occupied the expected seq')
-
-    closeNodesQuietly(first.nodes)
-    nullSeqs.length = 0
-    const restarted = fixture.build({ apply, opts })
-    const restartedLeader = await openAndElect(restarted.nodes, restarted.nodes[1])
-    const electionKeepSeq = 8n
-    t.deepEqual(raftSeqs(restartedLeader), [6n, 7n, electionKeepSeq],
-      'election KEEP reduces retained history to the exact target')
-    t.deepEqual(raftTypes(restartedLeader), ['cmd', 'sync', 'keep'],
-      'triggered election uses one KEEP without an adjacent empty entry')
-    t.deepEqual(raftRecordAt(restartedLeader, electionKeepSeq), {
-      type: 'keep',
-    }, 'the sole current-term leader marker is fieldless KEEP')
-    t.equal(restartedLeader._commitTerm, restartedLeader.term,
-      'election KEEP establishes current-term leader readiness')
-    t.deepEqual(nullSeqs, [],
-      'election KEEP does not invoke the application callback')
-    const afterRestart = await appendThroughSync(restartedLeader, toBuf({
-      key: 'after-restart', value: 40,
-    }))
-    await waitApplied(restarted.nodes, afterRestart.syncSeq)
-    for (const node of restarted.nodes) {
-      t.deepEqual(
-        ['first', 'batch-a', 'batch-b', 'forwarded', 'after-restart']
-          .map((key) => valueAt(node, key)),
-        [10, 20, 21, 30, 40],
-        `restarted node ${node.id} preserves and advances application state`,
-      )
-    }
-    t.deepEqual(fixture.errors, [],
-      'automatic retention and a pruned restart emit no errors')
+test('a pending CMD pins history through startup and election until SYNC', async (t) => {
+  const fixture = clusterFixture(t, 'pending')
+  let commandCalls = 0
+  const apply = (db, buf, term, seq) => {
+    if (buf !== null) { commandCalls++ }
+    return applyApp(db, buf, term, seq)
+  }
+  const opts = keepOpts()
+  const first = fixture.build({ apply, opts })
+  const leader = await openAndElect(first.nodes)
+  await leader._appendToSelfAndFollowers(Array.from({ length: 3 }, () => Buffer.alloc(0)))
+  const [cmdSeq] = await leader._monsterAppendEntry({
+    type: 'cmd', items: [toBuf({ key: 'pending', value: 41 })],
   })
+  await leader._appendToSelfAndFollowers(Array.from({ length: 3 }, () => Buffer.alloc(0)))
+  await waitApplied(first.nodes, 7n)
+  t.equal(cmdSeq, 4n, 'the pending command reaches the trigger')
+  t.ok(first.nodes.every((node) => node.log.begin === 0n),
+    'later no-ops cannot prune while the command is pending')
+  const beforeRestartCalls = commandCalls
+  closeNodesQuietly(first.nodes)
 
-test('automatic KEEP waits behind the preceding CMD and SYNC FIFO', async (t) => {
-  const fixture = clusterFixture(t, 'automatic-order')
-  const cluster = fixture.build({ opts: keepOpts(3, 5, 8) })
-  const leader = await openAndElect(cluster.nodes)
-  await appendThroughSync(leader, toBuf({ key: 'warm', value: 1 }))
-
+  const restarted = fixture.build({ apply, opts })
+  const candidate = restarted.nodes[0]
   const syncEntered = deferred()
   const releaseSync = deferred()
   t.teardown(() => releaseSync.resolve())
-  const appendEntry = leader._monsterAppendEntry.bind(leader)
-  let held = false
-  leader._monsterAppendEntry = async (entry) => {
-    if (entry.type === 'sync' && !held) {
-      held = true
+  const appendEntry = candidate._monsterAppendEntry.bind(candidate)
+  candidate._monsterAppendEntry = async (entry) => {
+    if (entry.type === 'sync') {
       syncEntered.resolve()
       await releaseSync.promise
     }
     return appendEntry(entry)
   }
-  const syncEvents = []
-  leader.on('sync', (event) => syncEvents.push(event))
-
-  const active = leader.append(toBuf({ key: 'active', value: 2 }))
-  await withTimeout(syncEntered.promise, 'active SYNC FIFO gate')
-  const activeResult = await withTimeout(active, 'active early result')
-  const follower = cluster.nodes.find((node) => node !== leader)
-  let queuedSettled = false
-  const queued = follower.append(toBuf({
-    key: 'queued', value: 3,
-  })).finally(() => { queuedSettled = true })
-  queued.catch(noop)
-  await sleep(25)
-
-  t.equal(activeResult[0], 3n, 'the active CMD occupies the pre-trigger slot')
-  t.notOk(queuedSettled, 'the later command remains queued behind SYNC')
-  t.deepEqual(raftTypes(leader), ['noop', 'cmd', 'sync', 'cmd'],
-    'neither KEEP nor the queued CMD overtakes the active SYNC')
-  t.equal(valueAt(leader, 'queued'), null,
-    'the queued user transition has not reached application')
-
+  const election = openAndElect(restarted.nodes, candidate)
+  election.catch(noop)
+  await withTimeout(syncEntered.promise, 'inherited command SYNC gate')
+  await waitApplied(restarted.nodes, 8n)
+  for (const node of restarted.nodes) {
+    t.equal(node.log.begin, 0n, 'startup and the election no-op preserve pinned history')
+    t.equal(pendingAt(node)?.cmdSeq, cmdSeq, 'the original pending command survives')
+    t.equal(raftTypes(node).at(-1), 'noop', 'the election uses an empty no-op')
+  }
+  t.equal(commandCalls, beforeRestartCalls, 'the pending command is not reapplied')
   releaseSync.resolve()
-  const queuedResult = await withTimeout(queued, 'queued command after KEEP')
-  await waitFor(() => syncEvents.length === 2, 'both serialized SYNC events')
-  await waitApplied(cluster.nodes, syncEvents[1].syncSeq)
-  t.equal(syncEvents[0].cmdSeq, activeResult[0],
-    'the active CMD receives its SYNC first')
-  t.equal(syncEvents[0].syncSeq, 4n, 'the preceding SYNC reaches the trigger')
-  t.equal(queuedResult[0], 6n, 'KEEP occupies seq 5 before the queued CMD')
-  t.equal(syncEvents[1].cmdSeq, queuedResult[0],
-    'the queued CMD receives the next SYNC')
-  t.deepEqual(raftTypes(leader), ['cmd', 'sync', 'keep', 'cmd', 'sync'],
-    'the serialized order is prior CMD, prior SYNC, KEEP, CMD, SYNC')
-  t.deepEqual(cluster.nodes.map((node) => [
-    valueAt(node, 'warm'), valueAt(node, 'active'), valueAt(node, 'queued'),
-  ]), [[1, 2, 3], [1, 2, 3], [1, 2, 3]],
-  'all serialized application transitions commit')
+  await election
+  await waitApplied(restarted.nodes, 9n)
+  for (const node of restarted.nodes) {
+    t.deepEqual(raftSeqs(node), [7n, 8n, 9n], 'SYNC immediately releases pinned history')
+    t.equal(pendingAt(node), null, 'SYNC clears pending state')
+  }
+  const later = await appendThroughSync(candidate, toBuf({ key: 'later', value: 42 }))
+  await waitApplied(restarted.nodes, later.syncSeq)
+  t.equal(later.cmdSeq, 10n, 'the next command needs no intervening retention entry')
+  t.ok(restarted.nodes.every((node) => node.log.begin === 9n), 'later pruning continues')
 })
 
-test('election KEEP retains a pending CMD until SYNC and later pruning',
-  async (t) => {
-    const fixture = clusterFixture(t, 'election-pending')
-    const opts = keepOpts(3, 5, 10)
+test('a slow follower counts applied history and preserves its unapplied tail', async (t) => {
+  const fixture = clusterFixture(t, 'slow-apply')
+  const { nodes } = fixture.build({ opts: { ...keepOpts(3, 6), applyMax: 4, rpcMax: 32 } })
+  const leader = await openAndElect(nodes)
+  const slow = nodes[2]
+  const entered = [deferred(), deferred()]
+  const release = [deferred(), deferred()]
+  t.teardown(() => release.forEach((gate) => gate.resolve()))
+  const applyNoop = slow._monsterApplyNoop.bind(slow)
+  slow._monsterApplyNoop = async (term, seq, hash) => {
+    const gate = seq === 1n ? 0 : seq === 6n ? 1 : -1
+    if (gate >= 0) {
+      entered[gate].resolve()
+      await release[gate].promise
+    }
+    return applyNoop(term, seq, hash)
+  }
+  await leader._appendToSelfAndFollowers(Array.from({ length: 12 }, () => Buffer.alloc(0)))
+  await withTimeout(entered[0].promise, 'slow follower first entry')
+  await waitFor(() => slow.log.seq === 12n, 'slow follower receives the complete tail')
+  const tail = raftRows(slow).filter(({ seq }) => seq >= 6n)
+  t.equal(slow._applySeq, 0n, 'the follower has applied only genesis')
+  t.equal(slow.log.begin, 0n, 'stored rows alone do not trigger pruning')
+  release[0].resolve()
+  await withTimeout(entered[1].promise, 'slow follower after first pruning batch')
+  t.equal(slow._applySeq, 5n, 'the applied prefix reaches the trigger')
+  t.equal(slow.log.begin, 3n, 'only the oldest applied rows are deleted')
+  t.equal(retainedCount(slow), 10n, 'three applied rows plus seven unapplied rows remain')
+  t.deepEqual(raftRows(slow).filter(({ seq }) => seq >= 6n), tail,
+    'the unapplied tail is byte-for-byte unchanged')
+  release[1].resolve()
+  await waitApplied(nodes, 12n)
+  t.equal(slow.log.begin, 9n, 'catch-up performs further bounded deletion batches')
+  t.equal(retainedCount(slow), 4n, 'the final partial batch stays below trigger')
+  t.deepEqual(fixture.errors, [], 'slow application does not break replication')
+})
+
+test('startup prunes validated applied history while preserving an uncommitted tail', async (t) => {
+  const fixture = clusterFixture(t, 'startup-tail')
+  let commandCalls = 0
+  const apply = (db, buf, term, seq) => {
+    if (buf !== null) { commandCalls++ }
+    return applyApp(db, buf, term, seq)
+  }
+  const first = fixture.build({ apply })
+  const leader = await openAndElect(first.nodes)
+  await appendThroughSync(leader, toBuf({ key: 'first', value: 1 }))
+  const last = await appendThroughSync(leader, toBuf({ key: 'last', value: 2 }))
+  await waitApplied(first.nodes, last.syncSeq)
+  const hashes = first.nodes.map((node) => Buffer.from(metaAt(node).applied_entry_hash))
+  for (const node of first.nodes) {
+    const noopEntry = Buffer.alloc(8)
+    noopEntry.writeBigUInt64LE(node.term)
+    node.log.appendBatch(Array.from({ length: 4 }, () => noopEntry))
+  }
+  closeNodesQuietly(first.nodes)
+  const beforeCalls = commandCalls
+  const restarted = fixture.build({ apply, opts: keepOpts() })
+  restarted.nodes.forEach((node, index) => {
+    node.open()
+    t.deepEqual(raftSeqs(node), [2n, 3n, 4n, 5n, 6n, 7n, 8n],
+      'startup retains the applied target plus the entire uncommitted tail')
+    t.equal(node._applySeq, 4n, 'startup does not advance the checkpoint')
+    t.deepEqual(Buffer.from(metaAt(node).applied_entry_hash), hashes[index],
+      'the validated checkpoint hash stays unchanged')
+  })
+  await openAndElect(restarted.nodes)
+  await waitApplied(restarted.nodes, 9n)
+  t.equal(commandCalls, beforeCalls, 'recovery applies no completed commands again')
+  t.ok(restarted.nodes.every((node) => node.log.begin === 6n),
+    'committing the tail resumes ordinary batched retention')
+})
+
+for (const stage of ['delete', 'refresh']) {
+  test(`retention ${stage} failure closes safely and restarts without command replay`, async (t) => {
+    const fixture = clusterFixture(t, `failure-${stage}`)
     let commandCalls = 0
     const apply = (db, buf, term, seq) => {
       if (buf !== null) { commandCalls++ }
       return applyApp(db, buf, term, seq)
     }
-    const seeded = fixture.build({ apply, opts })
-    const seedLeader = await openAndElect(seeded.nodes)
-    for (let count = 0; count < 3; count++) {
-      await seedLeader._appendToSelfAndFollowers(Buffer.alloc(0))
-    }
-    const [cmdSeq] = await seedLeader._monsterAppendEntry({
-      type: 'cmd',
-      items: [toBuf({ key: 'pending-election', value: 41 })],
-    })
-    await waitApplied(seeded.nodes, cmdSeq)
-    t.equal(retainedCount(seedLeader), 5n,
-      'the unresolved CMD brings retained history to the trigger')
-    t.ok(seeded.nodes.every((node) => pendingAt(node)?.cmdSeq === cmdSeq),
-      'every seed member stores the unresolved CMD')
-    const appliedCommandCalls = commandCalls
-
-    closeNodesQuietly(seeded.nodes)
-    const restarted = fixture.build({ apply, opts })
-    const candidate = restarted.nodes[0]
-    const synced = nextSync(candidate)
-    await openAndElect(restarted.nodes, candidate)
-    const sync = await withTimeout(synced, 'pending election SYNC')
-    await waitApplied(restarted.nodes, sync.syncSeq)
-    const keepSeq = cmdSeq + 1n
-
-    t.equal(sync.cmdSeq, cmdSeq,
-      'leader synchronization resolves the inherited CMD')
-    t.deepEqual(raftTypes(candidate), [
-      'noop', 'noop', 'noop', 'noop', 'cmd', 'keep', 'sync',
-    ], 'ordered recovery applies CMD, election KEEP, then SYNC')
-    t.ok(restarted.nodes.every((node) => node.log.begin === 0n),
-      'election KEEP skips pruning while the CMD is pending')
-    t.ok(restarted.nodes.every((node) => pendingAt(node) === null),
-      'the later SYNC clears pending state on every member')
-    t.equal(commandCalls, appliedCommandCalls,
-      'recovery does not reapply the stored CMD')
-
-    const later = await appendThroughSync(candidate, toBuf({
-      key: 'after-pending-election', value: 42,
-    }))
-    await waitApplied(restarted.nodes, later.syncSeq)
-    t.equal(later.cmdSeq, sync.syncSeq + 2n,
-      'a later automatic KEEP occupies the row before the next CMD')
-    t.ok(restarted.nodes.every((node) => node.log.begin === keepSeq),
-      'a later KEEP prunes after pending state is resolved')
-  })
-
-test('repair state one checkpoints later no-ops and committed KEEP records',
-  async (t) => {
-    const fixture = clusterFixture(t, 'repair-state-one')
-    const nullSeqs = []
-    const apply = (db, buf, term, seq) => {
-      if (buf === null) { nullSeqs.push(seq) }
-      return applyApp(db, buf, term, seq)
-    }
-    const cluster = fixture.build({ apply, opts: keepOpts(4, 5, 7) })
-    const leader = await openAndElect(cluster.nodes)
-    nullSeqs.length = 0
-
-    for (const node of cluster.nodes) {
-      const updated = node.db.prepare(`
-        UPDATE monsterft_meta SET repair_state = 1 WHERE id = 1
-      `).run()
-      t.equal(updated.changes, 1n,
-        `node ${node.id} stores the state-one repair fence`)
-      node._monsterRepairState = 1
-    }
-
-    const [noOpSeq] = await leader._appendToSelfAndFollowers(Buffer.alloc(0))
-    await waitApplied(cluster.nodes, noOpSeq)
-
-    const [keepSeq, keepResult] = await leader._monsterAppendEntry({
-      type: 'keep',
-    })
-    await waitApplied(cluster.nodes, keepSeq)
-
-    t.equal(keepResult, null, 'KEEP has no application result')
-    t.deepEqual(nullSeqs, [],
-      'the later no-op and KEEP do not invoke the application callback')
-    t.ok(leader._commitSeq >= keepSeq,
-      'the state-one leader commits the KEEP record')
-    for (const node of cluster.nodes) {
-      const meta = metaAt(node)
-      t.ok(node.isOpen,
-        `node ${node.id} remains online after no-op and KEEP application`)
-      t.equal(meta.repair_state, 1n,
-        `node ${node.id} preserves repair state one`)
-      t.equal(meta.applied_seq, keepSeq,
-        `node ${node.id} checkpoints the committed KEEP`)
-      t.equal(node.log.begin, 0n,
-        `node ${node.id} clamps the KEEP begin to the genesis entry`)
-      t.deepEqual(raftTypes(node), ['noop', 'noop', 'keep'],
-        `node ${node.id} retains every available entry through KEEP`)
-    }
-  })
-
-test('state-one election KEEP reaches keepHalt and prunes', async (t) => {
-  const fixture = clusterFixture(t, 'state-one-election-keep')
-  const seeded = fixture.build()
-  const seedLeader = await openAndElect(seeded.nodes)
-  for (let count = 0; count < 4; count++) {
-    await seedLeader._appendToSelfAndFollowers(Buffer.alloc(0))
-  }
-  await waitApplied(seeded.nodes, 4n)
-  for (const node of seeded.nodes) {
-    node.db.prepare(`
-      UPDATE monsterft_meta SET repair_state = 1 WHERE id = 1
-    `).run()
-    node._monsterRepairState = 1
-  }
-  t.ok(seeded.nodes.every((node) => retainedCount(node) === 5n),
-    'state-one seed begins one row below keepHalt')
-  closeNodesQuietly(seeded.nodes)
-
-  const restarted = fixture.build({
-    opts: keepOpts(2, 3, 6),
-  })
-  const candidate = await openAndElect(restarted.nodes, restarted.nodes[0])
-  const keepSeq = 5n
-
-  t.deepEqual(raftTypes(candidate), ['noop', 'keep'],
-    'the election KEEP reaches the ceiling and prunes to keepTarget')
-  for (const node of restarted.nodes) {
-    const meta = metaAt(node)
-    t.equal(node.log.begin, 4n,
-      `state-one node ${node.id} prunes at the inclusive ceiling`)
-    t.equal(meta.applied_seq, keepSeq,
-      `state-one node ${node.id} checkpoints the election KEEP`)
-    t.equal(meta.repair_state, 1n,
-      `state-one node ${node.id} preserves its repair state`)
-    t.ok(node.isOpen,
-      `state-one node ${node.id} remains online after election KEEP`)
-  }
-  const fenced = await errorOf(candidate.append(toBuf({
-    key: 'state-one-election-fenced', value: 1,
-  })))
-  t.equal(fenced?.code, REPAIR_QUORUM_IMPOSSIBLE,
-    'the state-one KEEP leader remains command-fenced')
-  t.equal(candidate.state, 'leader',
-    'state-one command fencing preserves KEEP-established leadership')
-})
-
-test('failed persisted KEEP rejects as not committed and steps down',
-  async (t) => {
-    const fixture = clusterFixture(t, 'automatic-ambiguous')
-    const cluster = fixture.build({ opts: keepOpts(3, 5, 8) })
-    const leader = await openAndElect(cluster.nodes)
-    await appendThroughSync(leader, toBuf({ key: 'warm-a', value: 1 }))
-    await appendThroughSync(leader, toBuf({ key: 'warm-b', value: 2 }))
-    t.equal(retainedCount(leader), 5n, 'the failure starts exactly at trigger')
-
-    const injected = new Error('injected KEEP replication failure')
-    const appendToFollowers = leader._appendToFollowers.bind(leader)
-    let failKeep = true
-    leader._appendToFollowers = (...args) => {
-      if (failKeep) {
-        failKeep = false
-        return Promise.reject(injected)
-      }
-      return appendToFollowers(...args)
-    }
-    const appendEntry = leader._monsterAppendEntry.bind(leader)
-    let keepAttempts = 0
-    leader._monsterAppendEntry = (entry) => {
-      if (entry.type === 'keep') { keepAttempts++ }
-      return appendEntry(entry)
-    }
-    const fatals = []
-    leader.on('fatal', (err) => fatals.push(err))
-    const follower = cluster.nodes.find((node) => node !== leader)
-    const failed = await withTimeout(errorOf(follower.append(toBuf({
-      key: 'dropped', value: 3,
-    }))), 'forwarded automatic KEEP failure')
-
-    t.equal(failed?.message, 'auto KEEP failed',
-      'the forwarded caller receives the automatic KEEP failure')
-    t.equal(failed?.code, NOT_COMMIT,
-      'the forwarded caller receives the not-committed error code')
-    t.equal(failed?.sqlCode, null,
-      'the automatic KEEP failure has no SQLite error code')
-    t.equal(keepAttempts, 1, 'the failed leader attempts KEEP exactly once')
-    t.deepEqual(raftTypes(leader), [
-      'noop', 'cmd', 'sync', 'cmd', 'sync', 'keep',
-    ], 'the ambiguous KEEP is locally persisted without a later CMD')
-    t.deepEqual(cluster.nodes.filter((node) => node !== leader)
-      .map(raftTypes), [
-      ['noop', 'cmd', 'sync', 'cmd', 'sync'],
-      ['noop', 'cmd', 'sync', 'cmd', 'sync'],
-    ], 'the rejected replication attempt leaves followers without KEEP')
-    t.equal(leader.state, 'follower', 'the failed KEEP leader steps down')
-    t.equal(leader.leader, null,
-      'the failed KEEP leader no longer identifies itself as leader')
-    t.ok(leader.isOpen && leader.log.isOpen,
-      'KEEP failure does not close either database')
-    t.deepEqual(fatals, [], 'KEEP replication failure is nonfatal')
-    t.notOk(fixture.errors.some(({ id }) => id === leader.id),
-      'KEEP replication failure emits no public error event')
-    t.deepEqual(cluster.nodes.map((node) => valueAt(node, 'dropped')),
-      [null, null, null], 'the triggering user transition is permanently dropped')
-    await sleep(30)
-    t.equal(keepAttempts, 1, 'KEEP is not retried without another command')
-
-    const replacement = cluster.nodes.find((node) => node !== leader)
-    await electOpen(cluster.nodes, replacement)
-    const later = await appendThroughSync(replacement, toBuf({
-      key: 'later-term', value: 4,
-    }))
-    await waitApplied(cluster.nodes, later.syncSeq)
-    t.equal(keepAttempts, 1,
-      'the old leader does not append another KEEP')
-    t.deepEqual(cluster.nodes.map((node) => [
-      valueAt(node, 'dropped'), valueAt(node, 'later-term'),
-    ]), [[null, 4], [null, 4], [null, 4]],
-    'the replacement leader progresses without resurrecting the dropped command')
-  })
-
-test('failed election marker steps down without retry',
-  async (t) => {
-    const fixture = clusterFixture(t, 'election-retry')
-    const opts = keepOpts(3, 5, 8)
-    const seeded = fixture.build({ opts })
-    const seedLeader = await openAndElect(seeded.nodes)
-    await appendThroughSync(seedLeader, toBuf({ key: 'retry-a', value: 1 }))
-    await appendThroughSync(seedLeader, toBuf({ key: 'retry-b', value: 2 }))
-    t.equal(retainedCount(seedLeader), 5n,
-      'election retry seed reaches the retention trigger')
-    closeNodesQuietly(seeded.nodes)
-
-    const restarted = fixture.build({ opts })
-    const candidate = restarted.nodes[0]
-    const injected = new Error('injected election KEEP replication failure')
-    const append = candidate._appendToSelfAndFollowers.bind(candidate)
-    const markers = []
-    candidate._appendToSelfAndFollowers = (data) => {
-      markers.push(data.length === 0 ? 'noop' : unpack(data).type)
-      if (markers.length === 1) { return Promise.reject(injected) }
-      return append(data)
-    }
-
-    restarted.nodes.forEach((node) => node.open())
-    candidate._voteForSelf()
-    await waitFor(() => fixture.warnings.some(({ id, err }) => {
-      return id === candidate.id && err === injected
-    }), 'failed election KEEP warning')
-    await waitFor(() => candidate.state === 'follower',
-      'failed election KEEP stepdown')
-    await sleep(30)
-    t.deepEqual(markers, ['keep'],
-      'the failed marker is not retried in the same term')
-    t.equal(fixture.warnings.filter(({ id, err }) => {
-      return id === candidate.id && err === injected
-    }).length, 1, 'the failed election KEEP emits its original warning once')
-    t.equal(candidate.state, 'follower',
-      'the failed election marker relinquishes leadership')
-    const replacement = restarted.nodes.find((node) => node !== candidate)
-    await electOpen(restarted.nodes, replacement)
-    t.equal(replacement._commitTerm, replacement.term,
-      'a replacement leader establishes readiness')
-    t.deepEqual(raftTypes(replacement), ['cmd', 'sync', 'keep'],
-      'the replacement leader commits one KEEP marker')
-  })
-
-test('term change suppresses an obsolete election KEEP retry', async (t) => {
-  const fixture = clusterFixture(t, 'election-retry-term')
-  const opts = keepOpts(3, 5, 8)
-  const seeded = fixture.build({ opts })
-  const seedLeader = await openAndElect(seeded.nodes)
-  await appendThroughSync(seedLeader, toBuf({ key: 'term-a', value: 1 }))
-  await appendThroughSync(seedLeader, toBuf({ key: 'term-b', value: 2 }))
-  closeNodesQuietly(seeded.nodes)
-
-  const restarted = fixture.build({ opts })
-  const candidate = restarted.nodes[0]
-  candidate._pingFollowers = noop
-  const injected = new Error('injected obsolete election KEEP failure')
-  candidate._appendToFollowers = () => Promise.reject(injected)
-  const append = candidate._appendToSelfAndFollowers.bind(candidate)
-  const markers = []
-  candidate._appendToSelfAndFollowers = (data) => {
-    markers.push(data.length === 0 ? 'noop' : unpack(data).type)
-    return append(data)
-  }
-  restarted.nodes.forEach((node) => node.open())
-  candidate._voteForSelf()
-  await waitFor(() => fixture.warnings.some(({ id, err }) => {
-    return id === candidate.id && err === injected
-  }), 'failed election KEEP warning')
-  const obsoleteTerm = candidate.term
-  candidate._advanceTerm(obsoleteTerm + 1n)
-  await sleep(50)
-
-  t.deepEqual(markers, ['keep'],
-    'the old term appends one KEEP and schedules no replacement marker')
-  t.equal(candidate.term, obsoleteTerm + 1n,
-    'the node retains the newer term')
-  t.equal(candidate.state, 'follower',
-    'the obsolete retry leaves the node in its newer follower role')
-  t.deepEqual(raftTypes(candidate).slice(-1), ['keep'],
-    'the obsolete term leaves no empty no-op fallback')
-})
-
-test('KEEP deletion failure fatally closes and a fresh object replays it',
-  async (t) => {
-    const fixture = clusterFixture(t, 'delete-replay')
-    const opts = keepOpts(3, 5, 8)
-    const first = fixture.build({ opts })
+    const opts = keepOpts()
+    const first = fixture.build({ apply, opts })
     const leader = await openAndElect(first.nodes)
-    const old = await appendThroughSync(leader, toBuf({
-      key: 'old', value: 1,
-    }))
-    const retained = await appendThroughSync(leader, toBuf({
-      key: 'retained', value: 2,
-    }))
-    await waitApplied(first.nodes, retained.syncSeq)
-
-    const beforeMeta = metaAt(leader)
-    const expectedKeep = retained.syncSeq + 1n
-    const failure = new Error('injected DB1 KEEP deletion failure')
+    const warm = await appendThroughSync(leader, toBuf({ key: 'warm', value: 1 }))
+    await waitApplied(first.nodes, warm.syncSeq)
+    const failure = new Error(`injected ${stage} failure`)
     const fatal = deferred()
     leader.once('fatal', fatal.resolve)
-    const raftDb = leader.log.db
-    const prepare = raftDb.prepare.bind(raftDb)
-    raftDb.prepare = (sql) => {
+    if (stage === 'delete') {
+      const prepare = leader.log.db.prepare.bind(leader.log.db)
+      leader.log.db.prepare = (sql) => {
+        if (/DELETE\s+FROM\s+raft_log\s+WHERE\s+seq\s*</i.test(sql)) { throw failure }
+        return prepare(sql)
+      }
+    } else {
+      // Simulate failure after SQLite commits deletion but before cached state refreshes.
+      leader.log._readHead = () => { throw failure }
+    }
+    const appended = errorOf(leader.append(toBuf({ key: 'completed', value: 2 })))
+    const err = await withTimeout(fatal.promise, `${stage} fatal`)
+    await appended
+    t.ok(err instanceof ErrorWithCode, 'the failure is normalized')
+    t.equal(err.code, APPLY_ERROR, 'runtime pruning uses the fatal application path')
+    t.equal(err.message, `(apply) DB1 retention injected ${stage} failure`,
+      'the failure identifies DB1 retention')
+    await waitFor(() => !leader.isOpen, 'failed retention closes the node')
+    await waitApplied(first.nodes.slice(1), 4n)
+    const saved = readPair(fixture.paths.get(leader.id))
+    t.equal(saved.meta.applied_seq, 4n, 'the SYNC checkpoint committed before deletion')
+    t.equal(saved.meta.pending_cmd_seq, null, 'the durable decision cleared pending state')
+    t.deepEqual(saved.rows.map(({ seq }) => seq), stage === 'delete'
+      ? [0n, 1n, 2n, 3n, 4n] : [2n, 3n, 4n],
+    'the persisted prefix reflects whether deletion committed')
+    const beforeCalls = commandCalls
+    closeNodesQuietly(first.nodes)
+    const restarted = fixture.build({ apply, opts })
+    const recovered = restarted.nodes[0]
+    recovered.open()
+    t.deepEqual(raftSeqs(recovered), [2n, 3n, 4n],
+      'startup completes any cleanup left before the failure')
+    t.equal(recovered._applySeq, 4n, 'startup accepts the retained checkpoint entry')
+    t.equal(valueAt(recovered, 'completed'), 2, 'the committed application state survives')
+    await openAndElect(restarted.nodes, recovered)
+    t.equal(commandCalls, beforeCalls, 'recovery does not replay the completed command')
+    const later = await appendThroughSync(recovered, toBuf({ key: 'later', value: 3 }))
+    await waitApplied(restarted.nodes, later.syncSeq)
+    t.ok(restarted.nodes.every((node) => valueAt(node, 'later') === 3),
+      'the recovered cluster accepts further commands')
+  })
+}
+
+test('failed SYNC checkpoint rolls back before pruning and is replayed on restart', async (t) => {
+  const fixture = clusterFixture(t, 'checkpoint-failure')
+  let commandCalls = 0
+  const apply = (db, buf, term, seq) => {
+    if (buf !== null) { commandCalls++ }
+    return applyApp(db, buf, term, seq)
+  }
+  const opts = keepOpts()
+  const first = fixture.build({ apply, opts })
+  const leader = await openAndElect(first.nodes)
+  await appendThroughSync(leader, toBuf({ key: 'warm', value: 1 }))
+  const writeDecision = leader._monsterWriteCmdDecision.bind(leader)
+  leader._monsterWriteCmdDecision = (...args) => {
+    writeDecision(...args)
+    throw new Error('injected checkpoint failure')
+  }
+  const fatal = deferred()
+  leader.once('fatal', fatal.resolve)
+  const appended = errorOf(leader.append(toBuf({ key: 'pending', value: 2 })))
+  const err = await withTimeout(fatal.promise, 'checkpoint failure fatal')
+  await appended
+  t.equal(err.code, APPLY_ERROR, 'checkpoint failure remains fatal')
+  await waitFor(() => !leader.isOpen, 'checkpoint failure close')
+  await waitApplied(first.nodes.slice(1), 4n)
+  const saved = readPair(fixture.paths.get(leader.id))
+  t.equal(saved.meta.applied_seq, 3n, 'the failed SYNC transaction leaves the CMD checkpoint')
+  t.equal(saved.meta.pending_cmd_seq, 3n, 'the failed decision leaves the CMD unresolved')
+  t.deepEqual(saved.rows.map(({ seq }) => seq), [0n, 1n, 2n, 3n, 4n],
+    'no history was pruned before the checkpoint committed')
+  const beforeCalls = commandCalls
+  closeNodesQuietly(first.nodes)
+  const restarted = fixture.build({ apply, opts })
+  const recovered = restarted.nodes[0]
+  recovered.open()
+  t.equal(recovered.log.begin, 0n, 'startup preserves history pinned by the CMD')
+  await openAndElect(restarted.nodes, recovered)
+  await waitApplied(restarted.nodes, 5n)
+  t.equal(commandCalls, beforeCalls, 'recovery replays the decision without reapplying the CMD')
+  t.equal(pendingAt(recovered), null, 'the replayed decision resolves the CMD')
+  t.deepEqual(raftSeqs(recovered), [2n, 3n, 4n, 5n],
+    'pruning follows the recovered SYNC checkpoint')
+})
+
+test('startup deletion failure closes both databases and leaves a recoverable pair', async (t) => {
+  const fixture = clusterFixture(t, 'startup-failure')
+  const first = fixture.build()
+  const leader = await openAndElect(first.nodes)
+  await leader._appendToSelfAndFollowers(Array.from({ length: 4 }, () => Buffer.alloc(0)))
+  await waitApplied(first.nodes, 4n)
+  closeNodesQuietly(first.nodes)
+  const failed = fixture.build({ opts: keepOpts() }).nodes[0]
+  const openLog = failed.log.open.bind(failed.log)
+  failed.log.open = () => {
+    openLog()
+    const prepare = failed.log.db.prepare.bind(failed.log.db)
+    failed.log.db.prepare = (sql) => {
       if (/DELETE\s+FROM\s+raft_log\s+WHERE\s+seq\s*</i.test(sql)) {
-        throw failure
+        throw new Error('injected startup deletion failure')
       }
       return prepare(sql)
     }
-
-    const failed = await withTimeout(errorOf(leader.append(toBuf({
-      key: 'never-appended', value: 3,
-    }))), 'DB1 KEEP deletion failure')
-    t.equal(failed, leader._shutdownError,
-      'the triggering append rejects with the shutdown error')
-    const fatalError = await withTimeout(fatal.promise, 'DB1 KEEP fatal')
-    t.ok(fatalError instanceof ErrorWithCode,
-      'the deletion error is normalized in the fatal path')
-    t.notEqual(fatalError, failure,
-      'the fatal path replaces the original deletion error')
-    t.equal(fatalError.code, APPLY_ERROR,
-      'the deletion failure has APPLY_ERROR code')
-    t.equal(fatalError.message, '(apply) injected DB1 KEEP deletion failure',
-      'the deletion failure has application context')
-    await waitFor(() => !leader.isOpen, 'DB1 failure close')
-
-    const raftPath = fixture.paths.get(leader.id)
-    const failedRaft = new DatabaseSync(raftPath, {
-      readOnly: true,
-      readBigInts: true,
-    })
-    const failedRaftSeqs = failedRaft.prepare(`
-      SELECT seq FROM raft_log ORDER BY seq
-    `).all().map(({ seq }) => seq)
-    failedRaft.close()
-    t.ok(failedRaftSeqs.includes(old.cmdSeq) &&
-      failedRaftSeqs.includes(old.syncSeq) &&
-      failedRaftSeqs.includes(expectedKeep),
-    'failed DB1 deletion retains old rows and the committed KEEP for replay')
-
-    const failedMonster = new DatabaseSync(`${raftPath}2`, {
-      readOnly: true,
-      readBigInts: true,
-    })
-    const failedMeta = failedMonster.prepare(`
-      SELECT applied_seq, applied_entry_hash, repair_state,
-             pending_cmd_seq, pending_local_digest
-      FROM monsterft_meta WHERE id = 1
-    `).get()
-    const failedCommandTables = failedMonster.prepare(`
-      SELECT COUNT(*) AS count
-      FROM sqlite_schema
-      WHERE type = 'table' AND name = 'monsterft_commands'
-    `).get().count
-    failedMonster.close()
-    t.equal(failedCommandTables, 0n,
-      'DB2 has no command-history table for KEEP to mutate')
-    t.equal(failedMeta.applied_seq, beforeMeta.applied_seq,
-      'DB1 failure leaves the DB2 checkpoint unchanged')
-    t.ok(Buffer.from(failedMeta.applied_entry_hash)
-      .equals(Buffer.from(beforeMeta.applied_entry_hash)),
-    'DB1 failure leaves the DB2 checkpoint hash unchanged')
-    t.equal(failedMeta.repair_state, beforeMeta.repair_state,
-      'DB1 failure leaves the DB2 repair fence unchanged')
-    t.equal(failedMeta.pending_cmd_seq, beforeMeta.pending_cmd_seq,
-      'DB1 failure leaves the pending sequence unchanged')
-    t.equal(failedMeta.pending_local_digest,
-      beforeMeta.pending_local_digest,
-      'DB1 failure leaves the pending digest unchanged')
-
-    closeNodesQuietly(first.nodes)
-    const restarted = fixture.build({ opts })
-    const recovered = restarted.nodes.find((node) => node.id === leader.id)
-    await openAndElect(restarted.nodes, recovered)
-    t.equal(pendingAt(recovered), null,
-      'fresh-object apply replays KEEP without creating command history')
-    t.notOk(hasCommandTable(recovered),
-      'fresh-object replay does not recreate command history')
-    t.equal(raftSeqs(recovered)[0], retained.syncSeq,
-      'fresh-object replay completes the deferred DB1 deletion')
-    t.ok(recovered._applySeq > expectedKeep,
-      'the recovered node advances through the later election no-op')
-    t.equal(valueAt(recovered, 'never-appended'), null,
-      'the user CMD behind the failed apply was never appended')
-  })
-
-test('KEEP checkpoint failure fatally closes and a fresh object replays it',
-  async (t) => {
-    const fixture = clusterFixture(t, 'checkpoint-replay')
-    const opts = keepOpts(3, 5, 8)
-    const first = fixture.build({ opts })
-    const leader = await openAndElect(first.nodes)
-    await appendThroughSync(leader, toBuf({
-      key: 'old', value: 1,
-    }))
-    const retained = await appendThroughSync(leader, toBuf({
-      key: 'retained', value: 2,
-    }))
-    await waitApplied(first.nodes, retained.syncSeq)
-
-    const beforeMeta = metaAt(leader)
-    const expectedKeep = retained.syncSeq + 1n
-    const failure = new Error('injected DB2 KEEP checkpoint failure')
-    const fatal = deferred()
-    leader.once('fatal', fatal.resolve)
-    const advanceApplied = leader._monsterAdvanceApplied.bind(leader)
-    leader._monsterAdvanceApplied = (db, seq, entryHash) => {
-      if (seq === expectedKeep) { throw failure }
-      return advanceApplied(db, seq, entryHash)
-    }
-
-    const failed = await withTimeout(errorOf(leader.append(toBuf({
-      key: 'never-appended', value: 3,
-    }))), 'DB2 KEEP checkpoint failure')
-    t.equal(failed, leader._shutdownError,
-      'the triggering append rejects with the shutdown error')
-    const fatalError = await withTimeout(fatal.promise, 'DB2 KEEP fatal')
-    t.ok(fatalError instanceof ErrorWithCode,
-      'the checkpoint error is normalized in the fatal path')
-    t.notEqual(fatalError, failure,
-      'the fatal path replaces the original checkpoint error')
-    t.equal(fatalError.code, APPLY_ERROR,
-      'the checkpoint failure has APPLY_ERROR code')
-    t.equal(fatalError.message, '(apply) injected DB2 KEEP checkpoint failure',
-      'the checkpoint failure has application context')
-    await waitFor(() => !leader.isOpen, 'DB2 KEEP failure close')
-
-    const raftPath = fixture.paths.get(leader.id)
-    const failedRaft = new DatabaseSync(raftPath, {
-      readOnly: true,
-      readBigInts: true,
-    })
-    const failedRaftSeqs = failedRaft.prepare(`
-      SELECT seq FROM raft_log ORDER BY seq
-    `).all().map(({ seq }) => seq)
-    failedRaft.close()
-    t.deepEqual(failedRaftSeqs, [
-      retained.cmdSeq,
-      retained.syncSeq,
-      expectedKeep,
-    ], 'DB1 retains the predecessor checkpoint and committed KEEP after pruning')
-
-    const failedMonster = new DatabaseSync(`${raftPath}2`, {
-      readOnly: true,
-      readBigInts: true,
-    })
-    const failedMeta = failedMonster.prepare(`
-      SELECT applied_seq, applied_entry_hash
-      FROM monsterft_meta WHERE id = 1
-    `).get()
-    failedMonster.close()
-    t.equal(failedMeta.applied_seq, beforeMeta.applied_seq,
-      'the failed write leaves the DB2 checkpoint at its predecessor')
-    t.ok(Buffer.from(failedMeta.applied_entry_hash)
-      .equals(Buffer.from(beforeMeta.applied_entry_hash)),
-    'the failed write leaves the DB2 checkpoint hash unchanged')
-
-    closeNodesQuietly(first.nodes)
-    const restarted = fixture.build({ opts })
-    const recovered = restarted.nodes.find((node) => node.id === leader.id)
-    const applyKeep = recovered._monsterApplyKeep.bind(recovered)
-    const replayed = []
-    recovered._monsterApplyKeep = (record, keepSeq, entryHash) => {
-      replayed.push(keepSeq)
-      return applyKeep(record, keepSeq, entryHash)
-    }
-    await openAndElect(restarted.nodes, recovered)
-    t.deepEqual(replayed, [expectedKeep],
-      'the fresh object replays the committed KEEP exactly once')
-    t.ok(metaAt(recovered).applied_seq > expectedKeep,
-      'recovery checkpoints KEEP before the later election no-op')
-    t.equal(valueAt(recovered, 'never-appended'), null,
-      'the user CMD behind the failed apply was never appended')
-  })
-
-test('keepHalt allows its ceiling and blocks appends beyond it', async (t) => {
-  const fixture = clusterFixture(t, 'halt-before-append')
-  const cluster = fixture.build({ opts: keepOpts(2, 3, 6) })
-  const leader = await openAndElect(cluster.nodes)
-
-  for (let count = 0; count < 4; count++) {
-    await leader._appendToSelfAndFollowers(Buffer.alloc(0))
   }
-  t.equal(retainedCount(leader), 5n,
-    'leader remains open at one row below keepHalt')
-  t.ok(leader.isOpen, 'the halt check is not premature')
-
-  await leader._appendToSelfAndFollowers(Buffer.alloc(0))
-  t.equal(retainedCount(leader), 6n,
-    'an append may reach the inclusive keepHalt ceiling')
-  t.ok(leader.isOpen, 'reaching keepHalt leaves the leader open')
-
-  const fatal = deferred()
-  const fatals = []
-  leader.on('fatal', (err) => {
-    fatals.push(err)
-    fatal.resolve(err)
-  })
-  const failed = await errorOf(
-    leader._appendToSelfAndFollowers(Buffer.alloc(0)),
-  )
-  const halt = await withTimeout(fatal.promise, 'pre-append keepHalt fatal')
-  t.equal(halt.message, 'KEEP halt reached',
-    'the inclusive ceiling reports the KEEP halt')
-  t.equal(halt.code, KEEP_HALT,
-    'the inclusive ceiling has its dedicated fatal code')
-  t.equal(failed?.code, KEEP_HALT,
-    'the blocked local append rejects with the halt error')
-  const persisted = new DatabaseSync(fixture.paths.get(leader.id), {
-    readOnly: true,
-    readBigInts: true,
-  })
-  const persistedCount = persisted.prepare(`
-    SELECT COUNT(*) AS count FROM raft_log
-  `).get().count
-  persisted.close()
-  t.equal(persistedCount, 6n,
-    'the rejected append persists no row beyond keepHalt')
-  t.equal(fatals.length, 1, 'the boundary emits fatal exactly once')
-  t.notOk(leader.isOpen, 'keepHalt closes the leader')
-  t.ok(cluster.nodes.filter((node) => node !== leader)
-    .every((node) => node.isOpen), 'other members remain open')
+  t.throws(() => failed.open(), (err) => err instanceof ErrorWithCode &&
+    err.code === SQLITE_ERROR && /DB1 retention/.test(err.message),
+  'startup reports a normalized retention error')
+  t.notOk(failed.isOpen || failed.log.isOpen || failed.db !== null,
+    'startup failure closes both connections')
+  const saved = readPair(fixture.paths.get(failed.id))
+  t.deepEqual(saved.rows.map(({ seq }) => seq), [0n, 1n, 2n, 3n, 4n], 'failed deletion preserves history')
+  t.equal(saved.meta.applied_seq, 4n, 'startup preserves the durable checkpoint')
+  const recovered = fixture.build({ opts: keepOpts() }).nodes[0]
+  recovered.open()
+  t.deepEqual(raftSeqs(recovered), [2n, 3n, 4n], 'a fresh instance completes cleanup')
 })
 
-test('a leader acquisition at keepHalt closes before another marker', async (t) => {
-  const fixture = clusterFixture(t, 'halt-on-election')
-  const seed = fixture.build()
-  const seedLeader = await openAndElect(seed.nodes)
-  await appendThroughSync(seedLeader, toBuf({ key: 'seed-a', value: 1 }))
-  await appendThroughSync(seedLeader, toBuf({ key: 'seed-b', value: 2 }))
-  await seedLeader._appendToSelfAndFollowers(Buffer.alloc(0))
-  await waitApplied(seed.nodes, 5n)
-  t.ok(seed.nodes.every((node) => retainedCount(node) === 6n),
-    'the restart seed is exactly at the future halt ceiling')
-  closeNodesQuietly(seed.nodes)
+test('startup validates the checkpoint before deleting any history', async (t) => {
+  const fixture = clusterFixture(t, 'invalid-checkpoint')
+  const first = fixture.build()
+  const leader = await openAndElect(first.nodes)
+  await leader._appendToSelfAndFollowers(Array.from({ length: 4 }, () => Buffer.alloc(0)))
+  await waitApplied(first.nodes, 4n)
+  leader.db.prepare('UPDATE monsterft_meta SET applied_entry_hash = ? WHERE id = 1')
+    .run(Buffer.alloc(32))
+  closeNodesQuietly(first.nodes)
+  const restarted = fixture.build({ opts: keepOpts() }).nodes[0]
+  t.throws(() => restarted.open(), (err) => err.code === LOG_CORRUPT,
+    'a checkpoint mismatch rejects startup')
+  t.deepEqual(readPair(fixture.paths.get(leader.id)).rows.map(({ seq }) => seq),
+    [0n, 1n, 2n, 3n, 4n], 'checkpoint validation fails before deletion')
+})
 
-  const restarted = fixture.build({ opts: keepOpts(2, 3, 6) })
-  const candidate = restarted.nodes[0]
-  const fatals = []
-  candidate.on('fatal', (err) => fatals.push(err))
-  restarted.nodes.forEach((node) => node.open())
-  const beforeSeq = candidate.seq
+test('repair state one retains its fence while no-ops continue local pruning', async (t) => {
+  const fixture = clusterFixture(t, 'repair-state-one')
+  const { nodes } = fixture.build({ opts: keepOpts() })
+  const leader = await openAndElect(nodes)
+  for (const node of nodes) {
+    node.db.prepare('UPDATE monsterft_meta SET repair_state = 1 WHERE id = 1').run()
+    node._monsterRepairState = 1
+  }
+  await leader._appendToSelfAndFollowers(Array.from({ length: 8 }, () => Buffer.alloc(0)))
+  await waitApplied(nodes, 8n)
+  for (const node of nodes) {
+    t.ok(node.isOpen, 'repair state one remains online')
+    t.equal(metaAt(node).repair_state, 1n, 'retention preserves the repair fence')
+    t.equal(metaAt(node).applied_seq, 8n, 'later no-ops advance the durable checkpoint')
+    t.deepEqual(raftSeqs(node), [6n, 7n, 8n], 'no-ops still prune applied history')
+  }
+  const err = await errorOf(leader.append(toBuf({ key: 'fenced', value: 1 })))
+  t.equal(err?.code, REPAIR_QUORUM_IMPOSSIBLE, 'the leader remains command-fenced')
+})
+
+test('failed election no-op steps down without retrying in the same term', async (t) => {
+  const fixture = clusterFixture(t, 'election-failure')
+  const { nodes } = fixture.build({ opts: keepOpts() })
+  const candidate = nodes[0]
+  const failure = new Error('injected election replication failure')
+  const markers = []
+  candidate._appendToSelfAndFollowers = (data) => {
+    markers.push(data)
+    return Promise.reject(failure)
+  }
+  nodes.forEach((node) => node.open())
   candidate._voteForSelf()
-  await waitFor(() => !candidate.isOpen, 'halted leader acquisition')
-  await waitFor(() => fatals.length > 0, 'leader acquisition fatal event')
-
-  t.equal(fatals.length, 1, 'leader acquisition emits one halt fatal')
-  t.equal(fatals[0].code, KEEP_HALT,
-    'leader acquisition uses the halt error code')
-  const persisted = new DatabaseSync(fixture.paths.get(candidate.id), {
-    readOnly: true,
-    readBigInts: true,
-  })
-  const persistedHead = persisted.prepare(`
-    SELECT MAX(seq) AS seq FROM raft_log
-  `).get().seq
-  persisted.close()
-  t.equal(persistedHead, beforeSeq,
-    'the pre-append halt check prevents another election marker')
-  t.notOk(candidate.isOpen, 'the over-limit leader candidate closes')
-  t.ok(restarted.nodes.slice(1).every((node) => node.isOpen),
-    'the other restarted members remain available')
+  await waitFor(() => fixture.warnings.some(({ err }) => err === failure), 'election warning')
+  await waitFor(() => candidate.state === 'follower', 'failed election stepdown')
+  await sleep(50)
+  t.deepEqual(markers, [Buffer.alloc(0)], 'one ordinary election no-op is attempted')
+  t.ok(candidate.isOpen, 'the failed election is nonfatal')
+  const replacement = await electOpen(nodes, nodes[1])
+  await waitApplied(nodes, 0n)
+  t.equal(replacement._commitTerm, replacement.term, 'a replacement leader becomes ready')
+  t.deepEqual(raftTypes(replacement), ['noop'], 'the replacement also uses an ordinary no-op')
 })
 
-test('automatic KEEP cancels a lagging replica while its healthy quorum progresses',
+test('failed CMD replication preserves history and steps down without retry', async (t) => {
+  const fixture = clusterFixture(t, 'command-failure')
+  const { nodes } = fixture.build({ opts: keepOpts() })
+  const leader = await openAndElect(nodes)
+  await appendThroughSync(leader, toBuf({ key: 'warm', value: 1 }))
+  const warm = await appendThroughSync(leader, toBuf({ key: 'warm', value: 2 }))
+  await waitApplied(nodes, warm.syncSeq)
+  const replicate = leader._appendToFollowers.bind(leader)
+  let attempts = 0
+  leader._appendToFollowers = (...args) => {
+    attempts++
+    if (attempts === 1) { return Promise.reject(new Error('injected CMD replication failure')) }
+    return replicate(...args)
+  }
+  const err = await errorOf(leader.append(toBuf({ key: 'uncommitted', value: 3 })))
+  t.match(err.message, /injected CMD replication failure/, 'the caller receives the append failure')
+  t.equal(leader.state, 'follower', 'the failed leader steps down')
+  t.ok(leader.isOpen, 'uncertain replication is nonfatal')
+  t.equal(leader.log.begin, 2n, 'an uncommitted tail does not trigger pruning')
+  t.equal(leader._applySeq, 4n, 'the failed CMD has not been applied')
+  await sleep(30)
+  t.equal(attempts, 1, 'the failed leader does not retry')
+  const replacement = await electOpen(nodes, nodes[1])
+  const later = await appendThroughSync(replacement, toBuf({ key: 'later', value: 4 }))
+  await waitApplied(nodes, later.syncSeq)
+  for (const node of nodes) {
+    t.equal(valueAt(node, 'uncommitted'), null, 'the replacement trims the conflicting tail')
+    t.equal(valueAt(node, 'later'), 4, 'retention remains correct after tail replacement')
+  }
+  t.deepEqual(fixture.errors, [], 'failed replication emits no fatal errors')
+})
+
+test('local retention cancels a lagging replica while its healthy quorum progresses',
   async (t) => {
     const fixture = clusterFixture(t, 'lagging-warning')
     const cluster = fixture.build({
       opts: {
-        ...keepOpts(3, 5, 8),
+        ...keepOpts(3, 5),
         appendTimeout: 250,
       },
     })
@@ -1252,10 +763,10 @@ test('automatic KEEP cancels a lagging replica while its healthy quorum progress
       key: 'while-offline-2', value: 3,
     }))
     await waitApplied([leader, healthy], newest.syncSeq)
-    t.equal(leader.log.begin, 3n,
-      'automatic KEEP advances the leader retained floor')
-    t.equal(healthy.log.begin, 3n,
-      'automatic KEEP advances the healthy follower retained floor')
+    t.equal(leader.log.begin, 4n,
+      'local retention advances the leader retained floor')
+    t.equal(healthy.log.begin, 4n,
+      'local retention advances the healthy follower retained floor')
     t.equal(stale.log.seq, beforeOffline.syncSeq,
       'the partitioned member remains below the required predecessor')
 
@@ -1326,9 +837,9 @@ test('automatic KEEP cancels a lagging replica while its healthy quorum progress
     t.equal(valueAt(healthy, 'after-cancellation'), 4,
       'the healthy follower applies progress after cancellation')
     t.equal(leader.log.begin, 6n,
-      'later progress drives the leader through another automatic KEEP')
+      'later progress drives the leader through another local retention')
     t.equal(healthy.log.begin, 6n,
-      'the healthy follower applies the later KEEP and forgets old entries')
+      'the healthy follower applies the later pruning and forgets old entries')
     t.equal(valueAt(stale, 'after-cancellation'), null,
       'the cancelled stale follower does not apply later progress')
     t.equal(leader._replication.get(stale.id), staleReplication,

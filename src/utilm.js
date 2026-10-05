@@ -107,17 +107,6 @@ const validateSyncEntry = (node, entry) => {
   return { agree, disagree }
 }
 
-const validateKeepEntry = (node, entry, seq) => {
-  if (node._monsterKeep === null) {
-    throw new Err.ErrorWithCode(
-      'KEEP entry KEEP not configured',
-      Err.RAFT_ILLEGAL,
-    )
-  }
-  const begin = seq - node._monsterKeep.target + 1n
-  return begin < 0n ? 0n : begin
-}
-
 const isFwdCmdMsg = (msg) => isCid(msg.cid) && isTerm(msg.term) &&
   Array.isArray(msg.items) && msg.items.length > 0 &&
   msg.items.every((item) => item instanceof Uint8Array)
@@ -139,12 +128,12 @@ const isFwdCmdAck = (msg, resultCount) => {
 }
 
 const normalizeKeepOptions = (opts) => {
-  const names = ['keepTarget', 'keepTrigger', 'keepHalt']
+  const names = ['keepTarget', 'keepTrigger']
   const supplied = names.filter((name) => opts[name] !== undefined)
   if (supplied.length === 0) { return null }
   if (supplied.length !== names.length) {
     throw new Err.ErrorWithCode(
-      'MonsterFt keepTarget, keepTrigger, and keepHalt must be supplied together',
+      'MonsterFt keepTarget and keepTrigger must be supplied together',
       Err.ARGUMENT_ILLEGAL,
     )
   }
@@ -158,7 +147,6 @@ const normalizeKeepOptions = (opts) => {
   }
   const target = BigInt(opts.keepTarget)
   const trigger = BigInt(opts.keepTrigger)
-  const halt = BigInt(opts.keepHalt)
   if (target < 2n) {
     throw new Err.ErrorWithCode(
       'MonsterFt keepTarget must be >= 2',
@@ -171,18 +159,12 @@ const normalizeKeepOptions = (opts) => {
       Err.ARGUMENT_ILLEGAL,
     )
   }
-  if (trigger + 2n > halt) {
-    throw new Err.ErrorWithCode(
-      'MonsterFt keepHalt must be >= keepTrigger + 2',
-      Err.ARGUMENT_ILLEGAL,
-    )
-  }
-  return { target, trigger, halt }
+  return { target, trigger }
 }
 
 export {
   validateOutcomeRequestMsg, validateOutcomeMsg,
-  validateCmdEntry, validateSyncEntry, validateKeepEntry,
+  validateCmdEntry, validateSyncEntry,
   isFwdCmdMsg, isFwdCmdAck,
   normalizeKeepOptions,
 }

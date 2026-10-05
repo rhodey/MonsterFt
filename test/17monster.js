@@ -21,8 +21,8 @@ import { databasePath, sleep, ready, leaders, followers } from './util.js'
 
 const noop = () => {}
 const errorContext = [
-  'cmdSeq', 'syncSeq', 'keepSeq', 'index', 'ambiguous', 'cause',
-  'retainedCount', 'keepHalt', 'rollbackError',
+  'cmdSeq', 'syncSeq', 'index', 'ambiguous', 'cause',
+  'rollbackError',
 ]
 const hasErrorContext = (err) => errorContext.some((name) => {
   return Object.hasOwn(err, name)

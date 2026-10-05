@@ -9,7 +9,6 @@ import * as utilm from './utilm.js'
 
 const CMD = 'cmd'
 const SYNC = 'sync'
-const KEEP = 'keep'
 
 const FWD_CMD = 'fwd_cmd'
 const OUTCOME = 'monster_outcome'
@@ -129,10 +128,24 @@ class MonsterNode extends RaftNode {
     return asBuffer(localDigest).equals(asBuffer(entry.digest))
   }
 
-  _monsterRetainedCount() {
-    return this.log.begin < 0n
-      ? 0n
-      : this.log.seq - this.log.begin + 1n
+  _monsterPrune() {
+    const keep = this._monsterKeep
+    if (keep === null || this.log.begin < 0n ||
+        this._monsterPendingCommand !== null) {
+      return
+    }
+    const retained = this._applySeq - this.log.begin + 1n
+    if (retained < keep.trigger) { return }
+
+    // DB2 already durably includes this applied prefix. Keep its checkpoint
+    // entry and every unapplied entry so the pair remains safe to reopen.
+    const begin = this._applySeq - keep.target + 1n
+    try {
+      this.log.db.prepare('DELETE FROM raft_log WHERE seq < ?').run(begin)
+      this.log._readHead()
+    } catch (err) {
+      throw Err.wrapError(err, Err.SQLITE_ERROR, 'DB1 retention ')
+    }
   }
 
   _monsterFatalError(err) {
@@ -183,19 +196,6 @@ class MonsterNode extends RaftNode {
     }
     this._toFollower()
     return true
-  }
-
-  _monsterCheckKeepHalt(appendCount=0n) {
-    if (this._monsterKeep === null || !this.isOpen || this.state !== LEADER) {
-      return null
-    }
-    // target, trigger, halt control retention
-    const retainedCount = this._monsterRetainedCount() + appendCount
-    if (retainedCount <= this._monsterKeep.halt) { return null }
-    return this._monsterFatalError(new Err.ErrorWithCode(
-      'KEEP halt reached',
-      Err.KEEP_HALT,
-    ))
   }
 
   async _monsterWriteTx(db, fn) {
@@ -643,22 +643,6 @@ class MonsterNode extends RaftNode {
     this._throwIfClosing()
   }
 
-  _monsterApplyKeep(entry, seq, entryHash) {
-    const begin = utilm.validateKeepEntry(this, entry, seq)
-
-    return this._monsterRunDb((db) => {
-      this._throwIfClosing()
-      // only do deletes if we are certain we wont delete a CMD which is waiting for SYNC
-      // if a delete is skipped then another KEEP will be queued again naturally
-      if (this._monsterPendingCommand === null) {
-        this.log.db.prepare('DELETE FROM raft_log WHERE seq < ?').run(begin)
-        this.log._readHead()
-      }
-      this._monsterAdvanceApplied(db, seq, entryHash)
-      this._applySeq = seq
-    })
-  }
-
   async _monsterApplyEntry(entry, term, seq, isNoop, entryHash) {
     if (isNoop) {
       await this._monsterApplyNoop(term, seq, entryHash)
@@ -677,9 +661,6 @@ class MonsterNode extends RaftNode {
       return this._monsterApplyCmd(entry, term, seq, entryHash)
     } else if (entry?.type === SYNC) {
       await this._monsterApplySync(entry, seq, entryHash)
-      return null
-    } else if (entry?.type === KEEP) {
-      await this._monsterApplyKeep(entry, seq, entryHash)
       return null
     }
     throw new Err.ErrorWithCode('entry type is illegal', Err.LOG_CORRUPT)
@@ -706,6 +687,7 @@ class MonsterNode extends RaftNode {
         entryHash,
       ))
       this._throwIfClosing()
+      this._monsterPrune()
     }
     return results
   }
@@ -723,20 +705,13 @@ class MonsterNode extends RaftNode {
       }
       return await super.append(pack(entry))
     } catch (err) {
-      // leader prefers to step down to avoid log growth up to keepHalt
+      // Let another leader resolve an append whose outcome is uncertain.
       this._monsterStepDownForTerm(term)
       throw err
     }
   }
 
-  _appendToSelfAndFollowers(data) {
-    const appendCount = BigInt(Array.isArray(data) ? data.length : 1)
-    const halt = this._monsterCheckKeepHalt(appendCount)
-    if (halt !== null) { return Promise.reject(halt) }
-    return super._appendToSelfAndFollowers(data)
-  }
-
-  // swap a NoOp (empty buf) for a KEEP if trigger says so
+  // Step down if the election no-op fails instead of retrying in this term.
   _leaderAppendNoOp() {
     if (!this.isOpen) { return }
     if (this.state !== LEADER) { return }
@@ -745,19 +720,13 @@ class MonsterNode extends RaftNode {
         this._commitTerm === this.term) {
       return
     }
-    let data = Buffer.alloc(0)
-    if (this._monsterKeep !== null &&
-        this._monsterRetainedCount() >= this._monsterKeep.trigger) {
-      data = pack({ type: KEEP })
-    }
-    this._appendToSelfAndFollowers(data).catch((err) => {
+    this._appendToSelfAndFollowers(Buffer.alloc(0)).catch((err) => {
       if (this._closing) { return }
       this._emitSafe('warn', err)
       if (this._leaderReady !== leaderReady ||
           this._commitTerm === leaderReady.term) {
         return
       }
-      // leader prefers to step down in many cases to avoid log growth up to keepHalt
       this._monsterStepDownForTerm(leaderReady.term)
     })
   }
@@ -836,27 +805,6 @@ class MonsterNode extends RaftNode {
     throw this._monsterFatalError(err)
   }
 
-  // KEEP jumps ahead of CMD when trigger says so
-  async _monsterAutoKeep(response) {
-    if (this._monsterKeep === null) { return true }
-    if (this._monsterRetainedCount() < this._monsterKeep.trigger) {
-      return true
-    }
-
-    try {
-      await this._monsterAppendEntry({ type: KEEP })
-      return true
-    } catch {
-      if (this._closing) {
-        response.reject(this._shutdownError ??
-          new Err.ErrorWithCode('node not open', Err.NODE_NOT_OPEN))
-        return false
-      }
-      response.reject(new Err.ErrorWithCode('auto KEEP failed', Err.NOT_COMMIT))
-      return false
-    }
-  }
-
   _monsterLeaderQueue(cmdItems) {
     const response = util.oneShot()
     const run = async () => {
@@ -864,10 +812,6 @@ class MonsterNode extends RaftNode {
       this._monsterAssertAvailable()
       this._monsterAssertLeader()
       const term = this.term
-      const admitted = await this._monsterAutoKeep(response)
-      if (!admitted) { return null }
-      this._monsterAssertAvailable()
-      this._monsterAssertLeader(term)
       const appended = await this._monsterAppendEntry({ type: CMD, items: cmdItems })
       this._throwIfClosing()
       const [cmdSeq, applied] = appended
@@ -914,7 +858,6 @@ class MonsterNode extends RaftNode {
   // new leaders always resume CMD which need SYNC
   _monsterOnChange(state) {
     if (state.state !== LEADER) { return }
-    if (this._monsterCheckKeepHalt() !== null) { return }
     const term = state.term
     // only start once per term
     if (this._monsterLeaderSyncTerm === term) { return }
@@ -1141,6 +1084,7 @@ class MonsterNode extends RaftNode {
       if (this._monsterRepairState === REPAIR_OUTSIDE_AGREEMENT) {
         throw this._monsterRepairError()
       }
+      this._monsterPrune()
       this._startRaft()
     } catch (err) {
       if (!this._closing) { this._closeAfterOpenFailure() }

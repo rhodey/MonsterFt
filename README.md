@@ -1,10 +1,10 @@
 # MonsterFt
 
 MonsterFt is a fixed-membership replicated SQLite state machine. For each
-command (request), every available node executes the application callback
-and captures its net database change as an [SQLite Session Extension](https://sqlite.org/sessionintro.html)
+command (request), every available node executes the application and
+captures its database change as an [SQLite Session Extension](https://sqlite.org/sessionintro.html)
 patchset. The command succeeds when a configured quorum agrees on the database
-patchset and the returned value or error.
+change and the return value.
 
 MonsterFt is built on top of standard, unmodified Raft. Raft orders commands;
 MonsterFt adds SQLite agreement above it. Why? [Cosmic Ray Bit-flips](https://en.wikipedia.org/wiki/Single-event_upset)
@@ -76,7 +76,7 @@ console.log('count =', value)
 
 `send(to, message)` may be synchronous or async. A real deployment uses
 its transport to deliver the message to `target.onReceive(senderId, message)`.
-`open()` and `close()` are synchronous. A closed node cannot be reopened.
+`open()` and `close()` are synchronous.
 
 ### Application and patchset rules
 
@@ -127,24 +127,15 @@ const node = new MonsterFt(id, nodeIds, send, databasePath, {
   apply,
   keepTarget: 1_000,
   keepTrigger: 1_500,
-  keepHalt: 2_000,
 })
 ```
 
-Supply all three options or none. As a distributed system MonsterFt can only
-guarantee best effort and needs bounds. If a node ever reaches `keepHalt` it
-will emit an error with code `KEEP_HALT` and close. The log only grows
-beyond `keepTarget` when nodes succeed with elections, meaning RPC is working,
-and appending the post-election no-op buffer works, and thus grows the log,
-but for whatever reason appending the KEEP protocol buffer fails. This would
-need to cycle 500 times (including 500 elections) to halt.
-
-The author chose to not implement Raft "Log Compaction" and to not implement
-Raft membership changes because both were deemed too complicated to justify
-what they bring. In the case of Log Compaction it also does not play well
-with memory-constrained systems. Readers who consult the [Raft PDF](https://raft.github.io/raft.pdf)
-will agree that both log compaction and membership changes are extensions
-outside of core.
+Supply both options or neither. The author chose to not implement Raft "Log
+Compaction" and to not implement Raft membership changes because both were
+deemed too complicated to justify what they bring. In the case of Log
+Compaction it also does not play well with storage-constrained systems. Readers
+who consult the [Raft PDF](https://raft.github.io/raft.pdf) will agree that
+both Log Compaction and membership changes are extensions outside of core.
 
 ### Repair
 
@@ -152,7 +143,7 @@ A node requires repair when an error with code `REPAIR_QUORUM_IMPOSSIBLE` or
 `REPAIR_OUTSIDE_AGREEMENT` is thrown or emit. Respectively these represent a
 command for which no quorum can agree (most likely your app failed to use
 SQLite deterministically) and a command in which only a minority of nodes
-disagree. Additionally a node requires repair when it reaches `keepHalt`.
+disagree. A node also requires repair if it falls behind retention.
 
 The MonsterFt repair protocol is an "offline" procedure to be carried out by
 an operator. [REPAIR.md](REPAIR.md) documents the procedure, in summary its
@@ -172,7 +163,7 @@ Without MonsterFt your application uses maybe 2GB of RAM and maybe 100GB of
 HDD. This is the surface area in which things can go wrong even if you are
 using Raft. With MonsterFt: the surface area vulnerable to bad things is on
 the order of 100 bytes. I'm using approximate language here because this
-repo is not MonsterFt in its final form and what I have planned is looking
+repo is not MonsterFt in its final form and what is planned is looking
 like it can be truly fault tolerant in the sense that aerospace and the
 defense industry understand.
 
@@ -185,7 +176,7 @@ with altitude and orbit and beyond.
 
 The planned work keeps Raft and SQLite and all MonsterFt protocol messages
 while borrowing an architecture from SpaceX: a minimum 3 node cluster
-remains but every node is running two copies of the MonsterFt stack and
+remains but every node is running two copies of the app stack and
 these copies are forced to agree before they can RPC with the cluster.
 
 Actually you could ditch MonsterFt and do Raft core with this architecture
@@ -197,16 +188,15 @@ approx 3X compute and approx 3X storage.
 
 The work is licensed `AGPL-3.0-only` to encourage collaborations while
 leaving open a path for negotiating commercial licenses and support
-packages. Redis chose AGPLv3 and I hope this does well for MonsterFt.
+packages.
 
-I have [Lock Host, Inc](https://lock.host/) on hand that I incorporated
-for some works years ago now and kind of led to this. Write to
-hello@lock.host for commercial licenses and other inquiries. Opening GitHub
-issues is also encouraged.
+I incorporated [Lock Host, Inc](https://lock.host/) for some works years
+ago and they led to this. Write to hello@lock.host for commercial
+licenses and other inquiries. Opening GitHub issues is also encouraged.
 
 ### Install
 
-This software is on NPM with version `0.5.0` for educational purposes. It
+This software is on NPM with version `0.5.1` for educational purposes. It
 may be the case that I cut a `1.0.0` release before releasing what is on
 the roadmap as `2.0.0` but I don't feel pressured to commit to this now.
 
