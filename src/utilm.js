@@ -114,7 +114,8 @@ const isFwdCmdMsg = (msg) => isCid(msg.cid) && isTerm(msg.term) &&
 const isOutcomeTuple = (item) => {
   if (!Array.isArray(item)) { return false }
   if (item.length === 2 && item[0] === 0) { return true }
-  return item.length === 4 && item[0] === 1 &&
+  return (item.length === 4 ||
+    (item.length === 5 && typeof item[4] === 'string')) && item[0] === 1 &&
     typeof item[1] === 'string' &&
     (item[2] === null || Number.isSafeInteger(item[2])) &&
     (item[3] === null || Number.isSafeInteger(item[3]))

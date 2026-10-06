@@ -13,8 +13,8 @@ const NOT_COMMIT = 10_010
 
 const PING_TIMEOUT = 10_011
 const APPEND_TIMEOUT = 10_012
-const RAFT_ILLEGAL = 10_013
-const RPC_ILLEGAL = 10_014
+const RPC_ILLEGAL = 10_013
+const RAFT_ILLEGAL = 10_014
 const SEND_ERROR = 10_015
 const APPLY_ERROR = 10_016
 const REPL_BACKTRACK = 10_017
@@ -22,7 +22,7 @@ const REPL_FORGOT = 10_018
 
 const REPAIR_QUORUM_IMPOSSIBLE = 10_019
 const REPAIR_OUTSIDE_AGREEMENT = 10_020
-const DRAINING = 10_022
+const DRAINING = 10_021
 
 const ErrorCodes = Object.freeze({
   ARGUMENT_ILLEGAL,
@@ -38,8 +38,8 @@ const ErrorCodes = Object.freeze({
   NOT_COMMIT,
   PING_TIMEOUT,
   APPEND_TIMEOUT,
-  RAFT_ILLEGAL,
   RPC_ILLEGAL,
+  RAFT_ILLEGAL,
   SEND_ERROR,
   APPLY_ERROR,
   REPL_BACKTRACK,
@@ -58,6 +58,7 @@ class ErrorWithCode extends Error {
 }
 
 const wrapError = (err, code=null, prefix=null) => {
+  const stack = err?.stack
   const sqlite = err?.code === 'ERR_SQLITE_ERROR'
   code = code ?? (sqlite ? SQLITE_ERROR : err?.code)
   code = Number.isSafeInteger(code) ? code : null
@@ -70,9 +71,19 @@ const wrapError = (err, code=null, prefix=null) => {
     err.message = message
     err.code = code
     err.sqlCode = sqlCode
-    return err
+  } else {
+    err = new ErrorWithCode(message, code, sqlCode)
   }
-  return new ErrorWithCode(message, code, sqlCode)
+  if (typeof stack === 'string') {
+    // Bypass V8's stack setter, which can lose the uncaught-error location.
+    Object.defineProperty(err, 'stack', {
+      value: stack,
+      writable: true,
+      configurable: true,
+      enumerable: false,
+    })
+  }
+  return err
 }
 
 export {
@@ -92,8 +103,8 @@ export {
   NOT_COMMIT,
   PING_TIMEOUT,
   APPEND_TIMEOUT,
-  RAFT_ILLEGAL,
   RPC_ILLEGAL,
+  RAFT_ILLEGAL,
   SEND_ERROR,
   APPLY_ERROR,
   REPL_BACKTRACK,

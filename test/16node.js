@@ -1538,6 +1538,49 @@ test('application materializes each batch before invoking async apply', async (t
   node.close()
 })
 
+test('application can consume its input array without changing batch accounting', async (t) => {
+  for (const mode of ['sync', 'async']) {
+    const batches = []
+    const apply = (node, bufs, seqs) => {
+      batches.push(seqs)
+      const results = []
+      while (bufs.length) { results.push(bufs.shift().toString()) }
+      return results
+    }
+    const node = new ProductionRaftNode('1', ids, () => {}, ':memory:', {
+      applyMax: 2,
+      electionTimeout: 60_000,
+      apply: mode === 'sync' ? apply : async (...args) => {
+        await Promise.resolve()
+        return apply(...args)
+      },
+    })
+    t.teardown(() => node.close())
+    node.open()
+    const values = ['zero', 'one', 'two', 'three']
+    node.log.appendBatch(values.map((value) => entry(node.term, value)))
+    node._commitSeq = 2n
+    const waiter = node._subscribeApply(0n, 2n)
+
+    await node._apply(2n)
+
+    t.deepEqual(await waiter.promise, values.slice(0, 3),
+      `${mode}: routes every result despite the emptied input arrays`)
+    t.deepEqual(batches, [[0n, 1n], [2n]],
+      `${mode}: applies each committed entry once across batch boundaries`)
+    t.equal(node._applySeq, 2n, `${mode}: advances only through committed entries`)
+    t.equal(node._applyWaiters.size, 0, `${mode}: completed result waiter is removed`)
+
+    node._commitSeq = 3n
+    await node._apply(3n)
+    t.deepEqual(batches, [[0n, 1n], [2n], [3n]],
+      `${mode}: later commitment applies only the previously unapplied tail`)
+    t.equal(node._applySeq, 3n, `${mode}: later application advances normally`)
+    t.ok(node.isOpen, `${mode}: consuming the input array does not close the node`)
+    node.close()
+  }
+})
+
 test('log iteration failure during apply closes the node', async (t) => {
   const failure = new Error('apply log read failed')
   const log = {

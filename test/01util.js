@@ -1,3 +1,4 @@
+import { DatabaseSync } from 'node:sqlite'
 import test from 'tape'
 import * as Public from '../src/index.js'
 import {
@@ -48,7 +49,7 @@ test('ErrorWithCode initializes error codes', (t) => {
   t.end()
 })
 
-test('public error codes preserve the existing constants', (t) => {
+test('public error codes expose the assigned constants', (t) => {
   const codes = {
     ARGUMENT_ILLEGAL,
     LOG_NOT_OPEN,
@@ -63,8 +64,8 @@ test('public error codes preserve the existing constants', (t) => {
     NOT_COMMIT,
     PING_TIMEOUT,
     APPEND_TIMEOUT,
-    RAFT_ILLEGAL,
     RPC_ILLEGAL,
+    RAFT_ILLEGAL,
     SEND_ERROR,
     APPLY_ERROR,
     REPL_BACKTRACK,
@@ -74,9 +75,9 @@ test('public error codes preserve the existing constants', (t) => {
     DRAINING,
   }
   const values = Object.values(codes)
-  t.deepEqual(values, [...Array.from({ length: 21 }, (_, i) => 10_000 + i), 10_022],
-    'preserves numeric values, including DRAINING after the removed code')
-  t.deepEqual(Public.ErrorCodes, codes, 'exports exactly the existing names and values')
+  t.deepEqual(values, Array.from({ length: 22 }, (_, i) => 10_000 + i),
+    'uses consecutive numeric values in the declared order')
+  t.deepEqual(Public.ErrorCodes, codes, 'exports exactly the assigned names and values')
   t.ok(Object.isFrozen(Public.ErrorCodes), 'the public namespace is frozen')
   t.notOk(Object.hasOwn(Public, 'wrapError'), 'does not expose wrapError at the package root')
   t.ok(Object.keys(codes).every((name) => !Object.hasOwn(Public, name)),
@@ -97,10 +98,11 @@ test('public ErrorWithCode matches errors thrown by nodes', (t) => {
 })
 
 test('errorRpc creates a normalized RPC error envelope', (t) => {
+  const original = new ErrorWithCode('RPC failed', ARGUMENT_ILLEGAL, 7)
   t.deepEqual(errorRpc(
     2n,
     'rpc-error',
-    new ErrorWithCode('RPC failed', ARGUMENT_ILLEGAL, 7),
+    original,
   ), {
     type: 'err',
     term: 2n,
@@ -108,7 +110,15 @@ test('errorRpc creates a normalized RPC error envelope', (t) => {
     msg: 'RPC failed',
     code: ARGUMENT_ILLEGAL,
     sqlCode: 7,
+    stack: original.stack,
   }, 'returns the common coded error fields')
+  const received = wrapError(errorRpc(2n, 'rpc-error', original))
+  t.equal(received.stack, original.stack, 'RPC reconstruction preserves the original stack')
+  original.stack = undefined
+  const withoutStack = errorRpc(2n, 'stackless-error', original)
+  t.notOk(Object.hasOwn(withoutStack, 'stack'), 'omits an unavailable stack')
+  t.equal(typeof wrapError(withoutStack).stack, 'string',
+    'a response without a stack uses the normal generated trace')
   t.end()
 })
 
@@ -132,12 +142,15 @@ test('wrapError normalizes errors and accepts code and prefix', (t) => {
   t.equal(normalized.message, 'plain error', 'null prefix preserves the message')
   t.equal(normalized.code, null, 'uses null')
   t.equal(normalized.sqlCode, null, 'has no SQLite code')
+  t.equal(normalized.stack, plain.stack, 'preserves the original stack')
 
   const coded = new ErrorWithCode('coded error', ARGUMENT_ILLEGAL)
+  const codedStack = coded.stack
   const prefixed = wrapError(coded, null, 'prefix - ')
   t.equal(prefixed, coded, 'retains an ErrorWithCode')
   t.equal(prefixed.message, 'prefix - coded error', 'adds a prefix')
   t.equal(prefixed.code, ARGUMENT_ILLEGAL, 'retains its library code')
+  t.equal(prefixed.stack, codedStack, 'preserves the stack while prefixing its message')
 
   const sqlite = new Error('SQLite error')
   sqlite.code = 'ERR_SQLITE_ERROR'
@@ -146,6 +159,7 @@ test('wrapError normalizes errors and accepts code and prefix', (t) => {
   t.equal(normalizedSQLite.code, SQLITE_ERROR,
     'classifies a SQLite error')
   t.equal(normalizedSQLite.sqlCode, 5, 'copies the SQLite error code')
+  t.equal(normalizedSQLite.stack, sqlite.stack, 'preserves the SQLite error stack')
 
   const sqliteWithSqlCode = new Error('SQLite error with normalized metadata')
   sqliteWithSqlCode.code = 'ERR_SQLITE_ERROR'
@@ -203,6 +217,58 @@ test('wrapError normalizes errors and accepts code and prefix', (t) => {
     'still classifies SQLite errors with invalid native metadata')
   t.equal(normalizedInvalidSQLite.sqlCode, null,
     'normalizes an invalid native SQLite code to null')
+  t.end()
+})
+
+test('wrapError preserves original stacks across repeated normalization', (t) => {
+  const original = new TypeError('application failure')
+  const stack = original.stack
+  const first = wrapError(original, SQLITE_ERROR, 'DB2 ')
+  const second = wrapError(first, APPLY_ERROR, '(apply) ')
+  t.equal(second, first, 'reuses an existing ErrorWithCode')
+  t.equal(second.message, '(apply) DB2 application failure', 'retains message prefixes')
+  t.equal(second.code, APPLY_ERROR, 'retains the latest code override')
+  t.equal(second.stack, stack, 'keeps every original frame and the original TypeError header')
+  t.equal(original.message, 'application failure', 'does not mutate the source TypeError')
+  t.notOk(Object.hasOwn(second, 'cause'), 'adds no cause property')
+
+  const unread = new ErrorWithCode('stack not read yet')
+  const prefixed = wrapError(unread, APPLY_ERROR, '(apply) ')
+  t.equal(prefixed.stack.split('\n')[0], 'Error: stack not read yet',
+    'captures a lazy stack before mutating the message')
+  t.equal(prefixed.message, '(apply) stack not read yet', 'still updates the message')
+  t.end()
+})
+
+test('wrapError keeps its fallback for thrown values without string stacks', (t) => {
+  for (const value of [null, undefined, 'failure', 42,
+    { message: 'missing stack' }, { message: 'invalid stack', stack: 42 }]) {
+    const err = wrapError(value)
+    t.ok(err instanceof ErrorWithCode, 'normalizes the thrown value')
+    t.equal(typeof err.stack, 'string', 'retains a generated fallback stack')
+    t.equal(err.code, null, 'retains the normalized code')
+  }
+  const empty = wrapError({ message: 'empty stack', stack: '' })
+  t.equal(empty.stack, '', 'preserves even an explicitly empty string stack')
+  t.end()
+})
+
+test('wrapError preserves a native SQLite exception stack and numeric codes', (t) => {
+  const db = new DatabaseSync(':memory:')
+  let original = null
+  try {
+    db.exec('SELECT * FROM missing_stack_test_table')
+  } catch (err) {
+    original = err
+  } finally {
+    db.close()
+  }
+  t.ok(original, 'SQLite throws the expected exception')
+  const wrapped = wrapError(original, null, 'DB2 ')
+  t.equal(wrapped.stack, original.stack, 'preserves the native exception trace')
+  t.equal(wrapped.message, `DB2 ${original.message}`, 'retains the contextual message')
+  t.equal(wrapped.code, SQLITE_ERROR, 'normalizes the native SQLite code')
+  t.equal(wrapped.sqlCode, original.errcode, 'preserves the native numeric SQLite code')
   t.end()
 })
 

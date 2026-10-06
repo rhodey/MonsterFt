@@ -162,6 +162,35 @@ test('node configuration requires a viable fixed cluster', (t) => {
     throwsInvalidArgument(() => new RaftNode('1', ids, send, log, { applyMax }),
       /applyMax must be int > 0/, `rejects invalid applyMax ${applyMax}`)
   }
+  for (const invalid of [undefined, null, false, 1, 'callback', {}]) {
+    throwsInvalidArgument(() => new RaftNode('1', ids, invalid, log),
+      /send must be a function/, `rejects invalid send ${String(invalid)}`)
+  }
+  for (const apply of [false, 1, 'callback', {}]) {
+    throwsInvalidArgument(() => new RaftNode('1', ids, send, log, { apply }),
+      /apply must be a function/, `rejects invalid apply ${String(apply)}`)
+  }
+  for (const apply of [undefined, null]) {
+    const node = new RaftNode('1', ids, send, log, { apply })
+    t.deepEqual(node.opts.apply(node, [Buffer.from('value')]), [null],
+      `apply ${String(apply)} retains the default application callback`)
+  }
+  t.end()
+})
+
+test('node timeouts require positive integers', (t) => {
+  for (const name of ['electionTimeout', 'pingTimeout', 'appendTimeout']) {
+    for (const value of [undefined, null, false, 0, -1, 1.5, NaN, Infinity,
+      '100', 100n]) {
+      const err = thrown(() => new RaftNode('1', ids, () => {}, {}, { [name]: value }))
+      t.equal(err?.code, ARGUMENT_ILLEGAL, `${name} rejects ${String(value)}`)
+      t.match(err?.message ?? '', new RegExp(name), 'error identifies the option')
+    }
+    for (const value of [1, 2_147_483_648, Number.MAX_SAFE_INTEGER]) {
+      const node = new RaftNode('1', ids, () => {}, {}, { [name]: value })
+      t.equal(node.opts[name], value, `${name} accepts positive integer ${value}`)
+    }
+  }
   t.end()
 })
 
@@ -263,13 +292,13 @@ test('vote persistence completes before change and transport callbacks', async (
     seqP: -1n,
   })
 
-  t.deepEqual(order, ['persist', 'change', 'send'],
-    'callbacks run synchronously after durable election state')
+  t.deepEqual(order, ['persist', 'send', 'change'],
+    'persists and sends the vote before publishing the change')
   node.removeListener('change', changed)
   node.close()
 })
 
-test('a change listener can synchronously close before later transport work', async (t) => {
+test('a vote response precedes a change listener that closes the node', async (t) => {
   const log = lifecycleLog()
   let persisted = false
   const election = log.election.bind(log)
@@ -300,7 +329,9 @@ test('a change listener can synchronously close before later transport work', as
 
   t.notOk(node.isOpen, 'listener leaves the node closed')
   t.notOk(log.isOpen, 'listener closes storage before returning')
-  t.deepEqual(sent, [], 'vote path stops before sending after listener close')
+  t.deepEqual(sent, [['2', {
+    type: 'vote', term: 1n, voteGranted: true, from: '1',
+  }]], 'sends the durable vote before the change listener closes the node')
 })
 
 test('plain Raft open starts the protocol automatically', (t) => {
@@ -658,6 +689,76 @@ test('node lifecycle calls are idempotent', (t) => {
   t.end()
 })
 
+test('awaitEvent rejects every value thrown by its callback', async (t) => {
+  const node = new RaftNode('1', ids, () => {}, lifecycleLog(), {
+    electionTimeout: 60_000,
+  })
+  t.teardown(() => node.close())
+  node.open()
+  const failure = new Error('callback failed')
+  const stack = failure.stack
+  const coded = new ErrorWithCode('coded callback failure', ARGUMENT_ILLEGAL)
+
+  for (const reason of [undefined, null, false, 0, 0n, '', NaN, failure, coded]) {
+    const label = typeof reason + ':' + String(reason)
+    const waiting = node.awaitEvent('custom-event', () => { throw reason })
+    const outcome = waiting.then(
+      (value) => ({ status: 'fulfilled', value }),
+      (error) => ({ status: 'rejected', error }),
+    )
+    node.emit('custom-event', 'value')
+    const result = await outcome
+
+    t.equal(result.status, 'rejected', `${label}: callback failure rejects`)
+    t.ok(Object.is(result.error, reason), `${label}: preserves the exact thrown value`)
+    t.equal(node.listenerCount('custom-event'), 0, `${label}: removes the event listener`)
+    t.equal(node._shutdownWaiters.size, 0, `${label}: removes the shutdown registration`)
+  }
+  t.equal(failure.stack, stack, 'the callback error retains its original stack')
+})
+
+test('awaitEvent filters events and returns the accepted value unchanged', async (t) => {
+  const node = new RaftNode('1', ids, () => {}, lifecycleLog(), {
+    electionTimeout: 60_000,
+  })
+  t.teardown(() => node.close())
+  node.open()
+
+  for (const value of [false, null, undefined, { accepted: true }]) {
+    const seen = []
+    const waiting = node.awaitEvent('custom-event', (event) => {
+      seen.push(event)
+      return event !== 'skip'
+    })
+    node.emit('custom-event', 'skip')
+    t.equal(node.listenerCount('custom-event'), 1, 'an unmatched event leaves the wait active')
+    node.emit('custom-event', value)
+    t.equal(await waiting, value, 'returns the exact accepted value, including undefined')
+    t.equal(node.listenerCount('custom-event'), 0, 'success removes the event listener')
+    t.equal(node._shutdownWaiters.size, 0, 'success removes the shutdown registration')
+    node.emit('custom-event', 'later')
+    t.deepEqual(seen, ['skip', value], 'later events do not call the completed callback')
+  }
+})
+
+test('awaitEvent rejects if its callback closes the node before returning a match', async (t) => {
+  const node = new RaftNode('1', ids, () => {}, lifecycleLog(), {
+    electionTimeout: 60_000,
+  })
+  t.teardown(() => node.close())
+  node.open()
+  const waiting = node.awaitEvent('custom-event', () => {
+    node.close()
+    return true
+  })
+  node.emit('custom-event', 'value')
+
+  t.equal(await rejection(waiting), node._shutdownError,
+    'shutdown rejection takes precedence over the later match')
+  t.equal(node.listenerCount('custom-event'), 0, 'shutdown removes the event listener')
+  t.equal(node._shutdownWaiters.size, 0, 'shutdown removes the registration')
+})
+
 test('close rejects and detaches pending public waiters without waiting for them', async (t) => {
   const log = lifecycleLog()
   const node = new RaftNode('1', ids, () => {}, log, {
@@ -689,6 +790,71 @@ test('close rejects and detaches pending public waiters without waiting for them
   t.equal(node.listenerCount('change'), 0, 'close removes the leader change listener')
   t.equal(node.listenerCount('commit'), 0, 'close removes the leader commit listener')
   t.equal(node.listenerCount('custom-event'), 0, 'close removes the custom event listener')
+})
+
+test('shutdown clears quorum deadlines with only one available follower', async (t) => {
+  const nodes = new Map()
+  const errors = []
+  const timers = new Set()
+  const appendTimeout = 5_000
+  const setTimeout = global.setTimeout
+  const clearTimeout = global.clearTimeout
+  let blocked = false
+
+  try {
+    for (const id of ['1', '2']) {
+      const node = new ProductionRaftNode(id, ids, (to, msg) => {
+        if (blocked && msg.type === 'append' && msg.data) { return }
+        return nodes.get(to)?.onReceive(id, msg)
+      }, ':memory:', {
+        electionTimeout: id === '1' ? 20 : 60_000,
+        pingTimeout: 60_000,
+        appendTimeout,
+      })
+      node.on('error', (err) => errors.push(err))
+      nodes.set(id, node)
+    }
+    for (const node of nodes.values()) { node.open() }
+    await Promise.all([...nodes.values()].map((node) => node.awaitLeader(true)))
+    await new Promise(setImmediate)
+    const leader = nodes.get('1')
+    t.equal(leader.state, 'leader', 'elects the first node normally')
+    t.deepEqual(leader.followers, ['2'], 'only one of the configured peers is available')
+
+    global.setTimeout = (fn, ms, ...args) => {
+      const timer = setTimeout(fn, ms, ...args)
+      if (ms === appendTimeout) { timers.add(timer) }
+      return timer
+    }
+    global.clearTimeout = (timer) => {
+      timers.delete(timer)
+      clearTimeout(timer)
+    }
+
+    const [seq] = await leader.append(Buffer.from('completed'))
+    await new Promise(setImmediate)
+    t.equal(seq, 1n, 'normal appends still complete with the available quorum')
+    t.equal(timers.size, 0, 'successful append clears its deadlines')
+    t.equal(leader._shutdownWaiters.size, 0, 'successful append removes shutdown registrations')
+
+    blocked = true
+    const command = rejection(leader.append(Buffer.from('blocked')))
+    await new Promise(setImmediate)
+    t.ok(timers.size > 0, 'blocked replication has active deadlines')
+    for (const node of nodes.values()) { node.close() }
+    const err = await command
+    await new Promise(setImmediate)
+    t.equal(err?.code, NODE_NOT_OPEN, 'public append rejects on shutdown')
+    t.equal(timers.size, 0, 'shutdown clears every append deadline without waiting for timeout')
+    t.equal(leader._shutdownWaiters.size, 0, 'shutdown removes all operation registrations')
+    t.equal(leader._acks.size, 0, 'shutdown removes all response waiters')
+    t.deepEqual(errors, [], 'shutdown produces no fatal errors')
+  } finally {
+    for (const node of nodes.values()) { node.close() }
+    for (const timer of timers) { clearTimeout(timer) }
+    global.setTimeout = setTimeout
+    global.clearTimeout = clearTimeout
+  }
 })
 
 test('shutdown races retain only active operations', async (t) => {
@@ -1018,7 +1184,7 @@ test('malformed message values and append payloads are ignored or rejected', asy
     t.equal(sent[index][1].sqlCode, null,
       `${label} has no SQLite code`)
     t.deepEqual(Object.keys(sent[index][1]).sort(),
-      ['cid', 'code', 'from', 'msg', 'sqlCode', 'term', 'type'],
+      ['cid', 'code', 'from', 'msg', 'sqlCode', 'stack', 'term', 'type'],
       `${label} uses the common RPC error envelope`)
   }
 
@@ -1102,8 +1268,9 @@ test('forwarded Raft handlers transmit normalized SQLite metadata', async (t) =>
     msg: 'constraint failed',
     code: SQLITE_ERROR,
     sqlCode: 19,
+    stack: sqlite.stack,
     from: '1',
-  }], 'transmits normalized library and SQLite error codes')
+  }], 'transmits normalized codes and the original SQLite trace')
 
   node.close()
 })
@@ -1167,6 +1334,47 @@ test('current-term commit stops a scheduled leader no-op retry', async (t) => {
   t.equal(attempts, 1, 'the committed readiness entry prevents another no-op')
   t.equal(node._shutdownWaiters.size, 0, 'the completed retry delay detaches')
   node.close()
+})
+
+test('leader no-op retries stay with their original leadership', async (t) => {
+  const node = new RaftNode('1', ids, () => {}, lifecycleLog(), {
+    electionTimeout: 60_000,
+  })
+  t.teardown(() => node.close())
+  const attempts = []
+  const retries = []
+  let rejectAppend = null
+  node._appendToSelfAndFollowers = () => {
+    attempts.push(node.term)
+    return new Promise((_, reject) => { rejectAppend = reject })
+  }
+  node._delay = () => new Promise((resolve) => retries.push(resolve))
+  node._startPingTimer = () => {}
+  node.open()
+
+  node._voteForSelf()
+  await node.onReceive('2', { type: 'vote', term: node.term, voteGranted: true })
+  const originalReady = node._leaderReady
+  rejectAppend(new Error('first-term no-op failed'))
+  await new Promise((resolve) => setImmediate(resolve))
+  t.equal(retries.length, 1, 'the first leadership schedules a retry')
+
+  node._advanceTerm(2n)
+  node._voteForSelf()
+  await node.onReceive('2', { type: 'vote', term: node.term, voteGranted: true })
+  t.notEqual(node._leaderReady, originalReady, 'the new leadership has its own readiness')
+  t.deepEqual(attempts, [1n, 3n], 'each election starts one no-op')
+
+  retries.shift()()
+  await new Promise((resolve) => setImmediate(resolve))
+  t.deepEqual(attempts, [1n, 3n], 'the old retry does not append in the new term')
+
+  rejectAppend(new Error('current-term no-op failed'))
+  await new Promise((resolve) => setImmediate(resolve))
+  t.equal(retries.length, 1, 'the current leadership still schedules its own retry')
+  retries.shift()()
+  await new Promise((resolve) => setImmediate(resolve))
+  t.deepEqual(attempts, [1n, 3n, 3n], 'the current leadership can retry its no-op')
 })
 
 test('awaitLeader with commit waits past a granted vote', async (t) => {
@@ -1424,6 +1632,58 @@ test('correlated send validates responses and preserves timeout errors', async (
   node.close()
 })
 
+test('correlated send rejects after close without registering work', async (t) => {
+  let sends = 0
+  const node = new RaftNode('1', ids, () => { sends++ }, lifecycleLog())
+  node.open()
+  node.close()
+
+  const setTimeout = global.setTimeout
+  let timers = 0
+  global.setTimeout = (fn, ms, ...args) => {
+    timers++
+    return setTimeout(fn, 0, ...args)
+  }
+  let work = null
+  let err = null
+  try {
+    t.doesNotThrow(() => {
+      work = node._sendAndAwaitResponse('2', { cid: 'closed-request' }, 10,
+        new ErrorWithCode('append timeout', APPEND_TIMEOUT))
+    }, 'shutdown rejection does not throw synchronously')
+    t.ok(work instanceof Promise, 'returns a promise after shutdown')
+    t.equal(node._acks.size, 0, 'does not register a response waiter')
+    err = await rejection(work)
+  } finally {
+    global.setTimeout = setTimeout
+  }
+  t.equal(err?.code, NODE_NOT_OPEN, 'reports shutdown instead of a timeout')
+  t.equal(timers, 0, 'does not schedule a timer')
+  t.equal(sends, 0, 'does not call the transport')
+})
+
+test('synchronous transport shutdown prevents later correlated waits', async (t) => {
+  const sent = []
+  let node = null
+  node = new RaftNode('1', ids, (to) => {
+    sent.push(to)
+    throw new Error('transport failed')
+  }, lifecycleLog())
+  node.open()
+  node.on('warn', () => node.close())
+
+  const work = ['2', '3'].map((to) => node._sendAndAwaitAck(to, {
+    type: 'append', term: 0n, termP: -1n, seqP: -1n,
+    commitSeq: -1n, cid: `close-during-send-${to}`,
+  }, ACK_OPERATION.PING))
+  t.notOk(node.isOpen, 'the first send closes the node synchronously')
+  t.equal(node._acks.size, 0, 'later sends leave no response registrations')
+  const errors = await Promise.all(work.map(rejection))
+  t.ok(errors.every((err) => err?.code === NODE_NOT_OPEN),
+    'both requests reject as closed, without synchronous throws')
+  t.deepEqual(sent, ['2'], 'only the first request reaches the transport')
+})
+
 test('ACK operation descriptors select timeout policy and error', async (t) => {
   const log = lifecycleLog()
   const node = new RaftNode('1', ids, () => {}, log, {
@@ -1571,6 +1831,27 @@ test('malformed and lower-term correlated ACKs are ignored', async (t) => {
   node.close()
 })
 
+test('forwarded result survives a term change before ACK post-processing', async (t) => {
+  const sent = []
+  const node = new RaftNode('1', ids, (to, msg) => sent.push(msg), lifecycleLog(), {
+    electionTimeout: 60_000,
+  })
+  t.teardown(() => node.close())
+  node.open()
+  node.leader = '2'
+
+  const pending = node.append(Buffer.from('command'))
+  node.onReceive('2', {
+    type: 'ack', term: 0n, cid: sent[0].cid, seq: 4n, results: 'completed',
+  })
+  node._advanceTerm(1n)
+
+  t.deepEqual(await pending, [4n, 'completed'], 'returns the completed command result')
+  t.equal(node.term, 1n, 'keeps the newer local term')
+  t.notOk(node._pongs.has('2'), 'the earlier-term ACK does not restore cleared liveness')
+  t.equal(node._acks.size, 0, 'the completed response waiter is removed')
+})
+
 test('higher-term correlated ACK reaches its caller after stepdown', async (t) => {
   const log = lifecycleLog()
   const node = new RaftNode('1', ids, () => {}, log, {
@@ -1621,6 +1902,7 @@ test('Raft ERR responses normalize metadata and coded backtracking', async (t) =
   })
   t.equal(node._acks.has('backtrack-error'), true,
     'ERR with an invalid term leaves its waiter active')
+  const stack = 'Error: termP mismatch at seqP 4\n    at remoteAppend (/remote/node.js:10:3)'
   await node.onReceive('2', {
     type: 'err',
     term: node.term,
@@ -1628,6 +1910,7 @@ test('Raft ERR responses normalize metadata and coded backtracking', async (t) =
     msg: 'termP mismatch at seqP 4',
     code: REPL_BACKTRACK,
     sqlCode: null,
+    stack,
   })
   const err = await pending
 
@@ -1637,6 +1920,7 @@ test('Raft ERR responses normalize metadata and coded backtracking', async (t) =
     'the remote error identifies the Raft operation')
   t.equal(err.code, REPL_BACKTRACK, 'preserves the structured backtrack code')
   t.equal(err.sqlCode, null, 'backtracking has no SQLite code')
+  t.equal(err.stack, stack, 'the operation prefix preserves the remote error trace')
   t.equal(node._acks.size, 0, 'removes the rejected CID waiter')
 
   for (const [cid, fields, label] of [
@@ -2108,8 +2392,8 @@ test('granted vote persists before response is sent', async (t) => {
   t.equal(sent[0][1].voteGranted, true, 'grants the persisted vote')
   t.deepEqual(changes.map(({ term, leader }) => [term, leader]), [[2n, null]],
     'publishes the persisted term without inventing a leader')
-  t.deepEqual(order, ['persist', 'change', 'send'],
-    'persists before publishing or sending the vote')
+  t.deepEqual(order, ['persist', 'send', 'change'],
+    'persists and sends the vote before publishing the change')
   node._stopTimers()
 })
 

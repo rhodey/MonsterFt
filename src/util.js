@@ -16,7 +16,7 @@ const isRpc = (msg) => msg !== null && typeof msg === 'object' &&
 
 const errorRpc = (term, cid, err, code=null) => {
   err = Err.wrapError(err, code)
-  return {
+  const msg = {
     type: ERR,
     term,
     cid,
@@ -24,6 +24,8 @@ const errorRpc = (term, cid, err, code=null) => {
     code: err.code,
     sqlCode: err.sqlCode,
   }
+  if (typeof err.stack === 'string') { msg.stack = err.stack }
+  return msg
 }
 
 const terr = new Error('timeout')
@@ -86,7 +88,7 @@ const createSQLiteDirectory = (databasePath) => {
   try {
     fs.mkdirSync(path.dirname(databasePath), { recursive: true })
   } catch (err) {
-    throw new Err.ErrorWithCode(err.message, Err.FS_ERROR)
+    throw Err.wrapError(err, Err.FS_ERROR)
   }
 }
 
@@ -103,7 +105,7 @@ const deleteSQLiteFiles = (databasePath) => {
       fs.rmSync(file, { force: true })
     }
   } catch (err) {
-    throw new Err.ErrorWithCode(err.message, Err.FS_ERROR)
+    throw Err.wrapError(err, Err.FS_ERROR)
   }
 }
 

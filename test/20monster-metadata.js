@@ -815,6 +815,7 @@ test('MonsterFt validates structured forwarded results directly', async (t) => {
     toBuf({ key: 'wire-failure', value: 2 }),
   ]
   const value = { key: 'wire-success', value: 1 }
+  const stack = 'RangeError: planned wire failure\n    at remoteApply (/remote/app.js:10:3)'
   const fwdCmdTerm = follower.term
   const response = {
     type: 'ack',
@@ -822,7 +823,7 @@ test('MonsterFt validates structured forwarded results directly', async (t) => {
     cmdSeq: leader.seq + 1n,
     results: [
       [0, value],
-      [1, 'planned wire failure', 17, 19],
+      [1, 'planned wire failure', 17, 19, stack],
     ],
   }
   const malformed = [
@@ -834,7 +835,14 @@ test('MonsterFt validates structured forwarded results directly', async (t) => {
     { ...response, results: [response.results[0], [2, 'bad', 17, null]] },
     { ...response, results: [response.results[0], [1, 'bad', {}, null]] },
     { ...response, results: [response.results[0], [1, 'bad', 17, {}]] },
+    ...[null, undefined, 42, {}, []].map((invalidStack) => ({
+      ...response, results: [response.results[0], [1, 'bad', 17, 19, invalidStack]],
+    })),
+    { ...response, results: [response.results[0], [1, 'bad', 17, 19, stack, 'extra']] },
   ]
+  const withoutStack = {
+    ...response, results: [response.results[0], response.results[1].slice(0, 4)],
+  }
 
   const sendAndAwaitCmdAck = follower._monsterSendAndAwaitCmdAck
   follower._monsterSendAndAwaitCmdAck = async (to, msg, validate) => {
@@ -844,6 +852,7 @@ test('MonsterFt validates structured forwarded results directly', async (t) => {
       'the forwarded request retains its admission term')
     t.equal(validate(response), true,
       'the receiver accepts structured outcomes from a later response term')
+    t.equal(validate(withoutStack), true, 'the receiver still accepts four-element rejections')
     malformed.forEach((candidate, index) => {
       t.equal(validate(candidate), false,
         `the receiver rejects malformed structured result ${index + 1}`)
@@ -875,13 +884,101 @@ test('MonsterFt validates structured forwarded results directly', async (t) => {
     'the structured failure retains its code')
   t.equal(outcomes[1].reason.sqlCode, 19,
     'the structured failure retains its sqlCode')
+  t.equal(outcomes[1].reason.stack, stack, 'the structured failure retains its remote stack')
   t.equal(response.results[1].includes('RangeError'), false,
-    'the structured failure carries no error name')
+    'the structured failure carries no separate error name')
   t.notOk(Object.hasOwn(outcomes[1].reason, 'cmdSeq'),
     'the structured failure has no command context')
   t.notOk(Object.hasOwn(outcomes[1].reason, 'index'),
     'the structured failure has no item context')
+
+  follower._monsterSendAndAwaitCmdAck = async () => withoutStack
+  try {
+    const [, legacy] = await follower._monsterAppendOrFwdCmd(items)
+    t.equal(legacy[1].reason.message, 'planned wire failure', 'a stackless reply retains its message')
+    t.equal(typeof legacy[1].reason.stack, 'string', 'a stackless reply gets a generated trace')
+    t.notEqual(legacy[1].reason.stack, stack, 'the fallback does not invent a remote trace')
+  } finally {
+    follower._monsterSendAndAwaitCmdAck = sendAndAwaitCmdAck
+  }
 })
+
+for (const asynchronous of [false, true]) {
+  const mode = asynchronous ? 'async' : 'sync'
+  test(`MonsterFt preserves ${mode} application stacks without changing consensus`, async (t) => {
+    const fixture = makeFixture(t, `application-stacks-${mode}`)
+    const originals = new Map()
+    const applicationApply = (db, node, buf, term, seq, index) => {
+      const command = toObj(buf)
+      if (!command.fail) { return command.value }
+      const err = new TypeError('agreed application failure')
+      err.code = 17
+      err.sqlCode = 19
+      // Simulate different deployment paths while retaining the real throw site.
+      err.stack += `\n    at replicaApply (/replica-${node.id}/app.js:10:3)`
+      originals.set(`${node.id}:${seq}:${index}`, err)
+      throw err
+    }
+    const apply = asynchronous
+      ? async (...args) => {
+          await Promise.resolve()
+          return applicationApply(...args)
+        }
+      : applicationApply
+    const cluster = fixture.build({ apply })
+    const leader = await openAndElect(cluster)
+    const follower = cluster.nodes.find((node) => node !== leader)
+
+    for (const caller of [leader, follower]) {
+      for (const batch of [false, true]) {
+        const label = `${caller === leader ? 'local' : 'forwarded'} ${batch ? 'batch' : 'single'}`
+        const synced = nextEvent(leader, 'sync')
+        let error = null
+        if (batch) {
+          const [, outcomes] = await caller.appendBatch([
+            toBuf({ value: { answer: 42 } }), toBuf({ fail: true }),
+          ])
+          t.deepEqual(outcomes[0], { status: 'fulfilled', value: { answer: 42 } },
+            `${label} retains successful outcomes`)
+          t.equal(outcomes[1].status, 'rejected', `${label} retains the rejected outcome`)
+          error = outcomes[1].reason
+        } else {
+          error = await rejects(t, caller.append(toBuf({ fail: true })),
+            /agreed application failure/, `${label} rejects with the application message`)
+        }
+        const sync = await synced
+        await waitFor(() => cluster.nodes.every((node) => node._applySeq >= sync.syncSeq),
+          `${label} stack SYNC`)
+        const index = batch ? 1 : 0
+        const original = originals.get(`${leader.id}:${sync.cmdSeq}:${index}`)
+        t.ok(error instanceof ErrorWithCode, `${label} remains an ErrorWithCode`)
+        t.equal(error.code, 17, `${label} preserves the numeric code`)
+        t.equal(error.sqlCode, 19, `${label} preserves the SQLite code`)
+        t.equal(error.stack, original.stack, `${label} preserves the leader's exact trace`)
+        t.match(error.stack, /applicationApply/, `${label} identifies the application frame`)
+        t.notOk(Object.hasOwn(error, 'cause'), `${label} adds no cause property`)
+        const stacks = cluster.nodes.map((node) => {
+          return originals.get(`${node.id}:${sync.cmdSeq}:${index}`).stack
+        })
+        t.equal(new Set(stacks).size, 3, `${label} has different traces on every node`)
+        const digests = cluster.outcomeCalls.filter((call) => call.cmdSeq === sync.cmdSeq)
+        t.equal(digests.length, 3, `${label} gathers every node's digest`)
+        t.equal(new Set(digests.map(({ digest }) => digest.toString('hex'))).size, 1,
+          `${label} agrees despite different stack strings`)
+        const calls = cluster.patchsetCalls.filter((call) => call.seq === sync.cmdSeq)
+        t.ok(calls.every((call) => {
+          const reported = digests.find(({ id }) => id === call.id)
+          return reported.digest.equals(digestEnvelope(
+            call.term, call.seq, call.output, call.outcomes,
+          ))
+        }), `${label} preserves the original stack-free digest bytes`)
+        t.equal(headRecord(leader).quorum, true, `${label} reaches a successful SYNC`)
+        t.ok(cluster.nodes.every((node) => node._monsterRepairState === 0),
+          `${label} leaves every node healthy`)
+      }
+    }
+  })
+}
 
 test('MonsterFt uses one Session across every CMD item', async (t) => {
   const fixture = makeFixture(t, 'session-order')

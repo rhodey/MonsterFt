@@ -24,7 +24,8 @@ const max = (a, b) => a > b ? a : b
 const min = (a, b) => a < b ? a : b
 const rand = (min, max) => Math.floor(Math.random() * (max - min)) + min
 const isEntries = (data) => Array.isArray(data) && data.length > 0 &&
-  data.every((entry) => Buffer.isBuffer(entry) && entry.length >= 8)
+  data.every((entry) => Buffer.isBuffer(entry) && entry.length >= 8 &&
+    util.isTerm(entry.readBigUInt64LE()))
 const isForwardData = (data) =>
   (Buffer.isBuffer(data) && data.length > 0) ||
   (Array.isArray(data) && data.length > 0 &&
@@ -91,6 +92,12 @@ class RaftNode extends EventEmitter {
       throw new Err.ErrorWithCode(
         'nodes must contain its id', Err.ARGUMENT_ILLEGAL)
     }
+    if (typeof send !== 'function') {
+      throw new Err.ErrorWithCode('send must be a function', Err.ARGUMENT_ILLEGAL)
+    }
+    if (typeof opts.apply !== 'function') {
+      throw new Err.ErrorWithCode('apply must be a function', Err.ARGUMENT_ILLEGAL)
+    }
     const sendError = (err) => {
       if (!this.isOpen) { return }
       err = Err.wrapError(err, Err.SEND_ERROR, '(send) ')
@@ -125,6 +132,12 @@ class RaftNode extends EventEmitter {
     if (!Number.isSafeInteger(opts.applyMax) || opts.applyMax <= 0) {
       throw new Err.ErrorWithCode(
         'applyMax must be int > 0', Err.ARGUMENT_ILLEGAL)
+    }
+    for (const name of ['electionTimeout', 'pingTimeout', 'appendTimeout']) {
+      if (!Number.isSafeInteger(opts[name]) || opts[name] <= 0) {
+        throw new Err.ErrorWithCode(
+          `${name} must be int > 0`, Err.ARGUMENT_ILLEGAL)
+      }
     }
     opts.quorum = this.quorum
     this.opts = opts
@@ -296,6 +309,11 @@ class RaftNode extends EventEmitter {
   }
 
   _sendAndAwaitResponse(to, msg, timeoutMs, timeoutErr, validate=null) {
+    if (this._closing) {
+      return Promise.reject(
+        new Err.ErrorWithCode('node not open', Err.NODE_NOT_OPEN),
+      )
+    }
     const [timer, timedout] = util.timeout(timeoutMs)
     const deadline = timedout.catch(() => {
       throw timeoutErr
@@ -325,7 +343,9 @@ class RaftNode extends EventEmitter {
       if (response.type === ERR) {
         throw Err.wrapError(response, null, `${name} ERR `)
       }
-      if (response.term !== msg.term) { return response }
+      if (response.term !== msg.term || response.term !== this.term) {
+        return response
+      }
       this._pongs.set(to, Date.now())
       if (this.state === LEADER && !this.followers.includes(to)) {
         this.followers.push(to)
@@ -402,10 +422,10 @@ class RaftNode extends EventEmitter {
           let results = this.opts.apply(this, data, seqs, terms)
           if (results instanceof Promise) { results = await results }
           if (this._closing) { return }
-          if (!Array.isArray(results) || results.length !== data.length) {
-            throw new Error(`results must be array with len ${data.length}`)
+          if (!Array.isArray(results) || results.length !== arr.length) {
+            throw new Error(`results must be array with len ${arr.length}`)
           }
-          const applied = begin + BigInt(data.length - 1)
+          const applied = begin + BigInt(arr.length - 1)
           this._applySeq = applied
           this._routeApply(begin, results)
           this._emitSafe('apply', applied)
@@ -511,6 +531,7 @@ class RaftNode extends EventEmitter {
   }
 
   _toFollower(leader=null, change=true) {
+    if (this._closing) { return }
     this._cancelReplication(
       new Err.ErrorWithCode('node not leader', Err.NOT_LEADER),
     )
@@ -631,8 +652,8 @@ class RaftNode extends EventEmitter {
     }
 
     if (!this._persistElection()) { return }
-    if (termChange || stateChange) { this._change() }
     this._replyVote(from, voteGranted)
+    if (termChange || stateChange) { this._change() }
   }
 
   _rxVote(msg, from) {
@@ -668,6 +689,7 @@ class RaftNode extends EventEmitter {
     } else if (update) {
       this.followers.push(from)
     }
+    if (this._closing) { return }
     update && this._change()
   }
 
@@ -678,14 +700,16 @@ class RaftNode extends EventEmitter {
     const commitSeq = this._commitSeq
     const cid = crypto.randomUUID()
     const msg = { type: APPEND, term: this.term, termP, seqP, commitSeq }
-    this.nodes.filter((id) => id !== this.id).forEach((to, idx) => {
+    const peers = this.nodes.filter((id) => id !== this.id)
+    for (const [idx, to] of peers.entries()) {
       const msgg = { ...msg, cid: cid + idx }
       this._sendAndAwaitAck(to, msgg, ACK_OPERATION.PING)
         .then(() => this._catchUpFollower(to))
         .catch((err) => {
           if (!this._closing) { this._emitSafe('warn', err) }
         })
-    })
+      if (this.state !== LEADER || this.term !== msg.term) { return }
+    }
     if (this._pruneFollowers()) { return }
     this._toFollower()
   }
@@ -793,27 +817,24 @@ class RaftNode extends EventEmitter {
         this._emitSafe('warn', err)
         return false
       }
-      const backtrack = err.code === Err.REPL_BACKTRACK
-      let retryDelay = !backtrack
-      if (backtrack) {
+      if (err.code === Err.REPL_BACKTRACK) {
         if (seqP === -1n) {
           err = Err.wrapError(err, Err.RAFT_ILLEGAL, 'genesis rejected ')
           this._cancelReplicationState(state, err)
           this._emitSafe('warn', err)
           return false
         }
-        const nextIndex = min(state.nextIndex, max(0n, begin - 1n))
-        retryDelay = nextIndex === state.nextIndex
-        state.nextIndex = nextIndex
+        // The next attempt starts earlier than this rejected page.
+        state.nextIndex = min(state.nextIndex, begin - 1n)
+        this._emitSafe('warn', err)
+        return true
       }
       this._emitSafe('warn', err)
-      if (retryDelay) {
-        const retryms = Math.max(2, this.opts.pingTimeout * 0.10)
-        try {
-          await this._delay(retryms)
-        } catch {
-          return false
-        }
+      const retryms = Math.max(2, this.opts.pingTimeout * 0.10)
+      try {
+        await this._delay(retryms)
+      } catch {
+        return false
       }
       return true
     } finally {
@@ -904,7 +925,7 @@ class RaftNode extends EventEmitter {
 
   _appendToFollowers(begin, end) {
     const [timer, timedout] = util.timeout(this.opts.appendTimeout)
-    const work = new Promise((res, rej) => {
+    const work = this._raceShutdown(new Promise((res, rej) => {
       if (this.state !== LEADER) {
         return rej(new Err.ErrorWithCode('node not leader', Err.NOT_LEADER))
       }
@@ -928,7 +949,7 @@ class RaftNode extends EventEmitter {
         if (err?.code === Err.NOT_COMMIT) { return rej(err) }
         rej(new Err.ErrorWithCode('append not commit', Err.NOT_COMMIT))
       })
-    })
+    }))
     work.catch(noop).finally(() => clearTimeout(timer))
     return work
   }
@@ -987,7 +1008,10 @@ class RaftNode extends EventEmitter {
         return
       }
       const retryms = Math.max(2, this.opts.pingTimeout * 0.10)
-      this._delay(retryms).then(() => this._leaderAppendNoOp()).catch(noop)
+      this._delay(retryms).then(() => {
+        if (this._leaderReady !== leaderReady) { return }
+        this._leaderAppendNoOp()
+      }).catch(noop)
     })
   }
 
@@ -1003,7 +1027,6 @@ class RaftNode extends EventEmitter {
     return this._sendAndAwaitAck(
       leader, msg, ACK_OPERATION.APPEND
     ).then((response) => {
-      // todo: cleaner
       if (Array.isArray(data) &&
           (!Array.isArray(response.results) ||
             response.results.length !== data.length)) {
@@ -1100,7 +1123,7 @@ class RaftNode extends EventEmitter {
         }
         if (commitTerm === null) {
           throw new Err.ErrorWithCode(
-            `commit ${next} not found`, Err.RAFT_ILLEGAL,
+            `rx append commit ${next} not found`, Err.RAFT_ILLEGAL,
           )
         }
         this._commitSeq = next
@@ -1165,7 +1188,7 @@ class RaftNode extends EventEmitter {
       const trim = seqP + BigInt(same)
       if (trim < this._commitSeq) {
         throw new Err.ErrorWithCode(
-          `append cannot trim committed ${this._commitSeq} to ${trim}`,
+          `rx append cannot trim committed ${this._commitSeq} to ${trim}`,
           Err.RAFT_ILLEGAL,
         )
       }
@@ -1191,7 +1214,7 @@ class RaftNode extends EventEmitter {
         } catch (err) {
           if (!this._closing) { this._emitSafe('fatal', err) }
         }
-        return
+        break
 
       case VOTE_REQUEST:
         this._rxVoteRequest(msg, from)
@@ -1215,26 +1238,27 @@ class RaftNode extends EventEmitter {
     if (!this.isOpen) {
       throw new Err.ErrorWithCode('node not open', Err.NODE_NOT_OPEN)
     }
-    return new Promise((res, rej) => {
+    return new Promise((resolve, reject) => {
       let settled = false
-      const finish = (err=null, val=null) => {
+      const finish = (settle, value) => {
         if (settled) { return }
         settled = true
         this.removeListener(event, cb)
-        this._shutdownWaiters.delete(finish)
-        err ? rej(err) : res(val)
+        this._shutdownWaiters.delete(fail)
+        settle(value)
       }
+      const fail = (err) => finish(reject, err)
       const cb = (val) => {
         let matched = false
         try {
           matched = fn(val)
         } catch (err) {
-          finish(err)
+          fail(err)
           return
         }
-        if (matched) { finish(null, val) }
+        if (matched) { finish(resolve, val) }
       }
-      this._shutdownWaiters.add(finish)
+      this._shutdownWaiters.add(fail)
       this.on(event, cb)
     })
   }
