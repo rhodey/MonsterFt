@@ -142,6 +142,62 @@ test('decrypt errors use the stream callback and error event', async (t) => {
   t.ok(decrypt.destroyed, 'error destroys the stream')
 })
 
+test('decrypting stream reports thrown data-handler values and stops coalesced frames', async (t) => {
+  t.plan(58)
+  await sodium.ready
+  const key = Buffer.from(sodium.crypto_secretstream_xchacha20poly1305_keygen())
+  const chunks = await encryptChunks(key, [Buffer.from('first'), Buffer.from('second')])
+  const originalError = new Error('data handler failed')
+  const originalStack = originalError.stack
+  const cases = [
+    ['undefined', undefined],
+    ['null', null],
+    ['false', false],
+    ['zero', 0],
+    ['bigint zero', 0n],
+    ['empty string', ''],
+    ['NaN', NaN],
+    ['Error', originalError],
+  ]
+  for (const [label, value] of cases) {
+    const decrypt = new DecryptingStream(key)
+    const output = []
+    let emitted = null
+    let callbackCalls = 0
+    let closedNaturally = false
+    decrypt.on('data', (chunk) => {
+      output.push(chunk.toString())
+      throw value
+    })
+    decrypt.once('error', (err) => { emitted = err })
+    const closed = closeEvent(decrypt)
+    decrypt.once('close', () => { closedNaturally = true })
+    const writeError = await new Promise((resolve) => {
+      decrypt.write(Buffer.concat(chunks), (err) => {
+        callbackCalls++
+        resolve(err)
+      })
+    })
+    await immediate()
+    const didClose = closedNaturally
+    if (!didClose) { decrypt.destroy() }
+    await closed
+
+    t.ok(writeError instanceof Error, `${label}: write callback receives an Error`)
+    t.equal(writeError?.message, value === originalError ? originalError.message : String(value),
+      `${label}: preserves the failure message`)
+    t.equal(emitted, writeError, `${label}: emits the write callback error`)
+    t.equal(callbackCalls, 1, `${label}: settles the write callback once`)
+    t.deepEqual(output, ['first'], `${label}: stops before the next coalesced frame`)
+    t.ok(didClose, `${label}: failure closes the stream`)
+    t.equal(decrypt.input.length, 0, `${label}: releases queued ciphertext`)
+    if (value === originalError) {
+      t.equal(writeError, originalError, 'preserves the original Error object')
+      t.equal(writeError.stack, originalStack, 'preserves the original error stack')
+    }
+  }
+})
+
 test('decrypting stream rejects incomplete input at EOF', async (t) => {
   t.plan(4)
   await sodium.ready
@@ -338,4 +394,118 @@ test('stream cleanup releases retained state and buffers', async (t) => {
   encrypt.end(Buffer.from('message'))
   await encryptClosed
   t.equal(encrypt.state, null, 'clears encrypt state on close')
+})
+
+test('stream destruction frees each owned native state exactly once', async (t) => {
+  await sodium.ready
+  const key = Buffer.from(sodium.crypto_secretstream_xchacha20poly1305_keygen())
+  const [header, frame] = await encryptChunks(key, [Buffer.from('message')])
+  const native = sodium.libsodium
+  for (const Type of [EncryptingStream, DecryptingStream]) {
+    const modes = Type === EncryptingStream
+      ? ['end', 'destroy', 'error'] : ['end', 'destroy', 'error', 'corruption']
+    for (const mode of modes) {
+      const stream = new Type(key)
+      if (Type === DecryptingStream) { stream.write(header) }
+      const state = stream.state
+      const failure = new Error('connection aborted')
+      const free = native._free
+      let releases = 0
+      let emitted = null
+      stream.on('error', (err) => { emitted = err })
+      stream.resume()
+      native._free = (address) => {
+        if (address === state) { releases++ }
+        return free(address)
+      }
+      try {
+        const closed = closeEvent(stream)
+        if (mode === 'end') {
+          stream.end(Type === EncryptingStream ? Buffer.from('message') : frame)
+        } else if (mode === 'corruption') {
+          const corrupt = Buffer.from(frame)
+          corrupt[corrupt.length - 1] ^= 1
+          stream.end(corrupt)
+        } else {
+          stream.destroy(mode === 'error' ? failure : undefined)
+        }
+        await closed
+        stream.destroy()
+        await immediate()
+        const label = `${Type.name} ${mode}`
+        t.equal(releases, 1, `${label}: releases its allocation once, even after another destroy`)
+        if (mode === 'corruption') {
+          t.equal(emitted?.message, 'stream decrypt error', `${label}: reports corruption`)
+        } else {
+          t.equal(emitted, mode === 'error' ? failure : null,
+            `${label}: preserves the original destruction outcome`)
+        }
+      } finally {
+        stream.destroy()
+        native._free = free
+      }
+    }
+  }
+})
+
+test('decrypt destruction before initialization does not free a native state', async (t) => {
+  await sodium.ready
+  const key = Buffer.from(sodium.crypto_secretstream_xchacha20poly1305_keygen())
+  const native = sodium.libsodium
+  for (const partialHeader of [false, true]) {
+    const decrypt = new DecryptingStream(key)
+    const free = native._free
+    const releases = []
+    native._free = (address) => {
+      releases.push(address)
+      return free(address)
+    }
+    try {
+      if (partialHeader) { decrypt.write(Buffer.alloc(1)) }
+      const closed = closeEvent(decrypt)
+      decrypt.destroy()
+      await closed
+      decrypt.destroy()
+      t.deepEqual(releases, [], `${partialHeader ? 'partial' : 'absent'} header: owns no allocation to free`)
+    } finally {
+      decrypt.destroy()
+      native._free = free
+    }
+  }
+})
+
+test('repeated encrypted stream lifecycles leave no native allocations outstanding', async (t) => {
+  await sodium.ready
+  const key = Buffer.from(sodium.crypto_secretstream_xchacha20poly1305_keygen())
+  const native = sodium.libsodium
+  const malloc = native._malloc
+  const free = native._free
+  const live = new Map()
+  const streams = []
+  native._malloc = (size) => {
+    const address = malloc(size)
+    live.set(address, size)
+    return address
+  }
+  native._free = (address) => {
+    live.delete(address)
+    return free(address)
+  }
+  try {
+    for (let index = 0; index < 50; index++) {
+      const encrypt = new EncryptingStream(key)
+      const decrypt = new DecryptingStream(key)
+      streams.push(encrypt, decrypt)
+      decrypt.write(encrypt.read())
+      const closed = Promise.all([closeEvent(encrypt), closeEvent(decrypt)])
+      encrypt.destroy()
+      decrypt.destroy()
+      await closed
+    }
+    t.equal(live.size, 0, 'releases states and temporary allocations across repeated initialization')
+  } finally {
+    streams.forEach((stream) => stream.destroy())
+    native._malloc = malloc
+    native._free = free
+  }
 })

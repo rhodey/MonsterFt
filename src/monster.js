@@ -42,14 +42,18 @@ const digestEntry = (term, buffer) => {
   return hash.digest()
 }
 
-const outcomesWire = (outcomes) => outcomes.map((outcome) => {
+const outcomesWire = (outcomes, includeStack=true) => outcomes.map((outcome) => {
   if (outcome.status === FULFILLED) { return [0, outcome.result] }
   const { message, code, sqlCode } = outcome.error
-  return [1, message, code, sqlCode]
+  const item = [1, message, code, sqlCode]
+  if (includeStack && typeof outcome.error.stack === 'string') {
+    item.push(outcome.error.stack)
+  }
+  return item
 })
 
 const digestCmd = (term, cmdSeq, patchset, outcomes) => {
-  outcomes = outcomesWire(outcomes)
+  outcomes = outcomesWire(outcomes, false)
   return crypto.createHash('sha256')
     .update(pack([term, cmdSeq, patchset, outcomes]))
     .digest()
@@ -993,7 +997,9 @@ class MonsterNode extends RaftNode {
       }
       return {
         status: REJECTED,
-        reason: new Err.ErrorWithCode(item[1], item[2], item[3]),
+        reason: Err.wrapError({
+          message: item[1], code: item[2], sqlCode: item[3], stack: item[4],
+        }),
       }
     })
     return [cmdSeq, outcomes]

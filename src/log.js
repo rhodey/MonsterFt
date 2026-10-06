@@ -69,6 +69,7 @@ class SQLiteLog {
     if (entry.length < 8) {
       throw new Err.ErrorWithCode('data buffer length must be >= 8', code)
     }
+    this._validateSeq(entry.readBigUInt64LE(), false, code, 'term')
   }
 
   _entryFromRow(row, expected=undefined) {

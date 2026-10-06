@@ -184,7 +184,7 @@ function node(id, ids) {
     }
     throw new Error(`unknown method: ${command.method}`)
   }
-  const databasePath = `/tmp/node${id}.db`
+  const databasePath = `/tmp/node-${id}.db`
   const node = new MonsterFt(id, ids, send, databasePath, { apply, quorum })
   nodesById.set(id, node)
   return node

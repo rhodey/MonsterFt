@@ -1,7 +1,7 @@
 import net from 'node:net'
 import test from 'tape'
 import sodium from 'libsodium-wrappers'
-import { tcpServer, tcpClient } from '../src/index.js'
+import { ErrorWithCode, ErrorCodes, RaftNode, tcpServer, tcpClient } from '../src/index.js'
 
 const noop = () => {}
 
@@ -45,7 +45,7 @@ function timeout(promise, name) {
 }
 
 test('tcp server rejects asynchronous listen errors', async (t) => {
-  t.plan(3)
+  t.plan(5)
   const holder = await listen(net.createServer(), '0.0.0.0')
   let reported = null
   let failure = null
@@ -57,13 +57,60 @@ test('tcp server rejects asynchronous listen errors', async (t) => {
     failure = err
   }
   t.ok(failure, 'listen promise rejects')
-  t.equal(failure?.cause?.code, 'EADDRINUSE', 'preserves the listen error as cause')
+  t.ok(failure instanceof ErrorWithCode, 'normalizes the listen error')
+  t.match(failure.message, /net error listen EADDRINUSE/, 'retains the listen context')
+  t.match(failure.stack, /^Error: listen EADDRINUSE/,
+    'the stack retains the original listen error header')
   t.equal(reported, null, 'does not report a startup error as a runtime error')
   await closeServer(holder)
 })
 
+test('tcp server preserves runtime error stacks', async (t) => {
+  let reported = null
+  const server = await tcpServer(Buffer.alloc(32), 0, noop, (err) => { reported = err })
+  const original = new Error('server failure')
+  try {
+    server.emit('error', original)
+    t.ok(reported instanceof ErrorWithCode, 'normalizes the runtime error')
+    t.equal(reported.message, '0 net error server failure', 'retains the server context')
+    t.equal(reported.stack, original.stack, 'preserves the complete original stack')
+  } finally {
+    await closeServer(server)
+  }
+})
+
+test('tcp connection error stacks survive Raft send warnings', async (t) => {
+  const original = new Error('connection failed')
+  original.code = 'ECONNREFUSED'
+  const connect = net.Socket.prototype.connect
+  let socket = null
+  net.Socket.prototype.connect = function () {
+    socket = this
+    queueMicrotask(() => this.emit('error', original))
+    return this
+  }
+  const node = new RaftNode('1', ['1', '2', '3'],
+    () => tcpClient(Buffer.alloc(32), 1, '127.0.0.1'), ':memory:', {
+      electionTimeout: 60_000,
+    })
+  try {
+    node.open()
+    const warned = event(node, 'warn')
+    node.send('2', { type: 'probe' })
+    const warning = await timeout(warned, 'send warning')
+    t.ok(warning instanceof ErrorWithCode, 'reports a normalized transport error')
+    t.equal(warning.code, ErrorCodes.SEND_ERROR, 'retains the send error code')
+    t.equal(warning.message, '(send) net error connection failed', 'retains both prefixes')
+    t.equal(warning.stack, original.stack, 'preserves the original stack through both wrappers')
+    t.ok(socket.destroyed, 'closes the failed socket')
+  } finally {
+    net.Socket.prototype.connect = connect
+    node.close()
+  }
+})
+
 test('tcp client destroys the connection after a decrypt error', async (t) => {
-  t.plan(7)
+  t.plan(9)
   await sodium.ready
   const key = Buffer.from(sodium.crypto_secretstream_xchacha20poly1305_keygen())
   let accept
@@ -104,6 +151,8 @@ test('tcp client destroys the connection after a decrypt error', async (t) => {
   const err = await timeout(errored, 'client error')
   await timeout(Promise.all([packClosed, peerClosed]), 'connection close')
   t.equal(err.message, 'decrypt error stream decrypt error', 'forwards the decrypt error')
+  t.match(err.stack, /^Error: stream decrypt error\n/, 'preserves the original error header')
+  t.match(err.stack, /at DecryptingStream\._drain/, 'preserves the decrypt failure location')
   t.notOk(destroyedOnError, 'emits the error before destroying the public stream')
   t.deepEqual(clientEvents, ['error', 'close'], 'closes after reporting the error')
   t.ok(pack.destroyed, 'destroys the public stream')
@@ -214,6 +263,86 @@ test('tcp server closes a connection when setup throws', async (t) => {
   await closeServer(server)
 })
 
+test('tcp server reports an encrypted request callback failure and closes its connection', async (t) => {
+  await sodium.ready
+  const key = Buffer.from(sodium.crypto_secretstream_xchacha20poly1305_keygen())
+  const original = new Error('request callback failed')
+  const stack = original.stack
+  let response
+  let report
+  let destroyedOnError = null
+  const reported = new Promise((res) => { report = res })
+  const server = await tcpServer(key, 0, (pack) => {
+    response = pack
+    throw original
+  }, (err) => {
+    destroyedOnError = response.destroyed
+    report(err)
+  })
+  const client = await tcpClient(key, server.address().port, '127.0.0.1')
+  client.on('error', noop)
+  try {
+    const clientClosed = closed(client)
+    client.write({ message: 'hello' })
+    const failure = await timeout(reported, 'request callback error')
+    await timeout(clientClosed, 'failed request connection close')
+    t.equal(failure, original, 'reports the original callback error')
+    t.equal(failure.stack, stack, 'preserves its original stack')
+    t.equal(destroyedOnError, false, 'reports the error before closing the response stream')
+    t.ok(client.destroyed, 'closes the client connection')
+  } finally {
+    client.destroy()
+    await closeServer(server)
+  }
+})
+
+test('tcp server reports connection errors and cleans up even if the error callback throws', async (t) => {
+  await sodium.ready
+  const key = Buffer.from(sodium.crypto_secretstream_xchacha20poly1305_keygen())
+  for (const source of ['socket', 'decrypt', 'unpack', 'pack', 'encrypt', 'throwing callback']) {
+    const original = new Error(`${source} failed`)
+    const reporterFailure = new Error('error callback failed')
+    const reported = []
+    let receive
+    const received = new Promise((res) => { receive = res })
+    const server = await tcpServer(key, 0, (pack) => receive(pack), (err) => {
+      reported.push(err)
+      if (source === 'throwing callback') { throw reporterFailure }
+    })
+    const accepted = event(server, 'connection')
+    const client = await tcpClient(key, server.address().port, '127.0.0.1')
+    client.on('error', noop)
+    try {
+      const socket = await timeout(accepted, 'server connection')
+      client.write({ message: 'hello' })
+      const pack = await timeout(received, 'server message')
+      const decrypt = socket._readableState.pipes[0]
+      const unpack = decrypt._readableState.pipes[0]
+      const encrypt = pack._readableState.pipes[0]
+      const streams = { socket, decrypt, unpack, pack, encrypt }
+      const clientClosed = closed(client)
+      const stream = streams[source] || socket
+      if (source === 'throwing callback') {
+        t.throws(() => stream.emit('error', original), (err) => err === reporterFailure,
+          'propagates an error callback failure after cleanup')
+      } else {
+        stream.emit('error', original)
+      }
+      await timeout(clientClosed, `${source} connection close`)
+      t.deepEqual(reported, [original], `${source}: reports the original error once`)
+      t.ok(Object.values(streams).every((item) => item.destroyed),
+        `${source}: destroys all connection streams`)
+      t.ok(Object.values(streams).every((item) => item.eventNames().length === 0),
+        `${source}: removes all connection listeners`)
+      t.ok(Object.values(streams).every((item) => item._readableState.pipes.length === 0),
+        `${source}: disconnects all connection pipes`)
+    } finally {
+      client.destroy()
+      await closeServer(server)
+    }
+  }
+})
+
 test('tcp server clears the connection when a response stream closes', async (t) => {
   t.plan(3)
   await sodium.ready
@@ -261,7 +390,7 @@ test('tcp transports structured outcome arrays in the enclosing message', async 
     cmdSeq: 9n,
     results: [
       [0, { answer: 42, tags: ['raw', 'value'] }],
-      [1, 'bad input', 17, null],
+      [1, 'bad input', 17, null, 'TypeError: bad input\n    at remoteApply (/app.js:10:3)'],
     ],
   }
   client.write(message)
@@ -274,6 +403,8 @@ test('tcp transports structured outcome arrays in the enclosing message', async 
     'the server receives results as an array')
   t.deepEqual(serverMessage.results[0], message.results[0],
     'the fulfilled tuple retains its raw structured value')
+  t.equal(clientMessage.results[1][4], message.results[1][4],
+    'the original stack string survives TCP serialization')
   t.deepEqual(clientMessage, message,
     'the complete outcome array survives a TCP round trip')
 

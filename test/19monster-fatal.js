@@ -1,7 +1,8 @@
 import crypto from 'node:crypto'
+import { spawnSync } from 'node:child_process'
 import test from 'tape'
 import { MonsterFt, SQLiteLog } from '../src/index.js'
-import { ErrorWithCode, RAFT_ILLEGAL } from '../src/error.js'
+import { APPLY_ERROR, ErrorWithCode, RAFT_ILLEGAL } from '../src/error.js'
 import { databasePath, sleep } from './util.js'
 
 const ids = ['1', '2', '3']
@@ -98,6 +99,85 @@ const expectFatalClose = async (t, target, source, msg, failure, context) => {
   t.equal(err.message, message,
     `${context} preserves the original failure message`)
   t.notOk(target.isOpen, `${context} closes the affected receiver`)
+}
+
+test('uncaught application errors retain their trace without an anonymous script header', (t) => {
+  const moduleUrl = new URL('../src/index.js', import.meta.url).href
+  for (const mode of ['startup', 'local', 'forwarded']) {
+    const source = `
+      import { MonsterFt } from ${JSON.stringify(moduleUrl)}
+      const mode = ${JSON.stringify(mode)}
+      const ids = ['1', '2', '3']
+      const byId = new Map()
+      const nodes = ids.map((id) => {
+        const node = new MonsterFt(id, ids,
+          (to, msg) => byId.get(to).onReceive(id, msg), ':memory:', {
+            electionTimeout: 60000,
+            apply: function applicationApply(db, data, term, seq) {
+              if (mode !== 'startup' && seq === 0n) { return }
+              throw new TypeError('original application failure')
+            },
+          })
+        byId.set(id, node)
+        return node
+      })
+      nodes.forEach((node) => node.open())
+      nodes[0]._voteForSelf()
+      if (mode !== 'startup') {
+        await Promise.all(nodes.map((node) => node.awaitLeader(true)))
+        const caller = nodes[mode === 'local' ? 0 : 1]
+        try {
+          await caller.append(Buffer.from('fail'))
+        } catch (err) {
+          queueMicrotask(() => caller.emit('error', err))
+        }
+      }
+    `
+    const result = spawnSync(process.execPath, ['--input-type=module', '-e', source], {
+      encoding: 'utf8', timeout: 8000,
+    })
+    t.error(result.error, `${mode} child completes without a timeout`)
+    t.equal(result.status, 1, `${mode} still exits on an unhandled error`)
+    t.match(result.stderr, /TypeError: original application failure/,
+      `${mode} preserves the original error header`)
+    t.match(result.stderr, /at MonsterFt\.applicationApply/,
+      `${mode} preserves the application frame`)
+    t.notOk(/<anonymous_script>:0|\n{3}/.test(result.stderr),
+      `${mode} has no anonymous header or extra blank lines`)
+  }
+  t.end()
+})
+
+for (const asynchronous of [false, true]) {
+  const mode = asynchronous ? 'async' : 'sync'
+  test(`MonsterFt preserves ${mode} sequence-zero errors in fatal and error events`, async (t) => {
+    const fixture = makeFixture(t, `schema-stack-${mode}`)
+    const node = fixture.nodes[0]
+    let original = null
+    let fatal = null
+    const schemaApply = () => {
+      original = new TypeError('schema application failure')
+      throw original
+    }
+    node._monsterUserApply = asynchronous
+      ? async () => {
+          await Promise.resolve()
+          schemaApply()
+        }
+      : schemaApply
+    node.on('fatal', (err) => { fatal = err })
+    const errored = new Promise((resolve) => node.once('error', resolve))
+    openNodes(fixture.nodes)
+    node._voteForSelf()
+    const err = await withTimeout(errored, `${mode} schema error event`)
+    t.ok(err instanceof ErrorWithCode, 'emits a normalized error')
+    t.equal(err.code, APPLY_ERROR, 'the sequence-zero failure retains its fatal code')
+    t.equal(err.message, '(apply) schema application failure', 'the contextual message is preserved')
+    t.equal(err.stack, original.stack, 'the emitted error keeps the original trace')
+    t.match(err.stack, /schemaApply/, 'the trace identifies the application callback')
+    t.equal(err, fatal, 'fatal and error events report the same error')
+    t.notOk(node.isOpen, 'the initialization failure still closes the node')
+  })
 }
 
 test('MonsterFt treats an illegal repair state as fatal', async (t) => {

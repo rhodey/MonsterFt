@@ -1,6 +1,7 @@
 import net from 'node:net'
 import { PackrStream, UnpackrStream } from 'msgpackr'
 import { EncryptingStream, DecryptingStream } from './stream.js'
+import * as Err from './error.js'
 
 const noop = () => {}
 
@@ -16,28 +17,34 @@ function tcpServer(key, port, msgCb, errCb) {
       streams.forEach((stream) => stream?.removeAllListeners())
       streams.forEach((stream) => stream?.destroy())
     }
-    sock.on('error', close)
+    const onError = (err) => {
+      try {
+        errCb(err)
+      } finally {
+        close()
+      }
+    }
+    sock.on('error', onError)
     try {
       decrypt = new DecryptingStream(key)
       unpack = new UnpackrStream()
       pack = new PackrStream()
       encrypt = new EncryptingStream(key)
-      decrypt.on('error', close)
-      unpack.on('error', close)
-      pack.on('error', close)
-      encrypt.on('error', close)
+      decrypt.on('error', onError)
+      unpack.on('error', onError)
+      pack.on('error', onError)
+      encrypt.on('error', onError)
       sock.once('close', close)
       pack.once('close', close)
       const onData = (data) => msgCb(pack, data)
       sock.pipe(decrypt).pipe(unpack).on('data', onData)
       pack.pipe(encrypt).pipe(sock)
     } catch (err) {
-      close()
-      errCb(err)
+      onError(err)
     }
   })
   return new Promise((res, rej) => {
-    const netError = (err) => new Error(`${port} net error ${err.message}`, { cause: err })
+    const netError = (err) => Err.wrapError(err, null, `${port} net error `)
     const onListenError = (err) => rej(netError(err))
     server.once('error', onListenError)
     try {
@@ -70,7 +77,7 @@ function tcpClient(key, port, host, msgCb=noop) {
     }
     const onConnectError = (err) => {
       close()
-      rej(new Error(`net error ${err.message}`, { cause: err }))
+      rej(Err.wrapError(err, null, 'net error '))
     }
     const onConnectClose = () => {
       close()
@@ -93,10 +100,10 @@ function tcpClient(key, port, host, msgCb=noop) {
             close()
           }
         }
-        sock.on('error', (err) => abort(new Error(`net error ${err.message}`, { cause: err })))
-        encrypt.on('error', (err) => abort(new Error(`encrypt error ${err.message}`, { cause: err })))
-        decrypt.on('error', (err) => abort(new Error(`decrypt error ${err.message}`, { cause: err })))
-        unpack.on('error', (err) => abort(new Error(`unpack error ${err.message}`, { cause: err })))
+        sock.on('error', (err) => abort(Err.wrapError(err, null, 'net error ')))
+        encrypt.on('error', (err) => abort(Err.wrapError(err, null, 'encrypt error ')))
+        decrypt.on('error', (err) => abort(Err.wrapError(err, null, 'decrypt error ')))
+        unpack.on('error', (err) => abort(Err.wrapError(err, null, 'unpack error ')))
         pack.once('close', () => {
           close()
           pack.removeAllListeners()

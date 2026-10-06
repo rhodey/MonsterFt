@@ -1107,8 +1107,8 @@ test('MonsterFt compares throws, rolls back failed items, and continues', async 
   t.ok(Array.isArray(rejectedAck?.msg.results),
     'a rejected command ACK also carries structured results')
   t.deepEqual(rejectedAck?.msg.results, [[
-    1, 'forwarded failure', null, null,
-  ]], 'the structured ACK retains message, code, and sqlCode')
+    1, 'forwarded failure', null, null, forwarded.stack,
+  ]], 'the structured ACK retains message, codes, and the original stack')
 
   const [forwardedBatchSeq, forwardedOutcomes] =
     await follower.appendBatch([
@@ -1581,8 +1581,11 @@ test('MonsterFt records quorum:false only after every digest quorum is impossibl
       msg: 'repair required',
       code: REPAIR_QUORUM_IMPOSSIBLE,
       sqlCode: null,
+      stack: forwardedFence.stack,
       from: leader.id,
     }, 'the Monster RPC uses only the common coded error envelope')
+    t.match(forwardedFence.stack, /_monsterRepairError/,
+      'the ordinary RPC error preserves the remote origin')
     t.notOk(Object.hasOwn(forwardedErr ?? {}, 'error'),
       'the Monster RPC omits the legacy nested error object')
     t.notOk(Object.hasOwn(forwardedErr ?? {}, 'name'),

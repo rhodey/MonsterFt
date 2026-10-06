@@ -109,6 +109,7 @@ test('filesystem failures use FS_ERROR', (t) => {
     t.ok(err instanceof ErrorWithCode, 'delete uses ErrorWithCode')
     t.equal(err.code, FS_ERROR, 'delete has FS_ERROR code')
     t.equal(err.sqlCode, null, 'delete has no SQLite code')
+    t.equal(err.stack, deleteError.stack, 'delete preserves the original filesystem stack')
     t.match(err.message, /\(log del\) remove failed/,
       'delete adds operation context')
   } finally {
@@ -134,6 +135,7 @@ test('filesystem failures use FS_ERROR', (t) => {
     t.ok(err instanceof ErrorWithCode, 'directory creation uses ErrorWithCode')
     t.equal(err.code, FS_ERROR, 'directory creation has FS_ERROR code')
     t.equal(err.sqlCode, null, 'directory creation has no SQLite code')
+    t.equal(err.stack, mkdirError.stack, 'directory creation preserves the original filesystem stack')
     t.match(err.message, /\(log open\) mkdir failed/,
       'directory creation adds open context')
   } finally {
@@ -338,6 +340,57 @@ test('append and trim validate arguments', (t) => {
     t.equal(err.code, ARGUMENT_ILLEGAL, 'caller sequence has ARGUMENT_ILLEGAL code')
     t.equal(err.sqlCode, null, 'caller sequence has no SQLite code')
   }
+  t.end()
+})
+
+test('entry terms stay within the supported range', (t) => {
+  const { create } = logFixture(t, '02-entry-terms')
+  const log = create()
+  log.del()
+  log.open()
+
+  const entries = [toEntry('zero', 0n), toEntry('maximum', MAX_SEQ)]
+  t.equal(log.append(entries[0]), 0n, 'accepts term zero')
+  t.equal(log.appendBatch([entries[1]]), 1n, 'accepts the maximum term')
+
+  for (const term of [MAX_SEQ + 1n, (1n << 64n) - 1n]) {
+    const invalid = toEntry('invalid', term)
+    const rejected = (err) => err.code === ARGUMENT_ILLEGAL &&
+      err.message.includes(`term must be <= ${MAX_SEQ}`)
+    t.throws(() => log.append(invalid), rejected, `append rejects term ${term}`)
+    t.throws(() => log.appendBatch([toEntry('valid', MAX_SEQ), invalid]),
+      rejected, `batch rejects term ${term}`)
+  }
+  t.equal(log.seq, 1n, 'rejected entries preserve the cached head sequence')
+  t.deepEqual([...log.iter()], entries, 'rejected entries leave stored history unchanged')
+
+  log.close()
+  log.open()
+  t.equal(log.term, MAX_SEQ, 'the maximum term survives reopening')
+  t.deepEqual([...log.iter()], entries, 'boundary terms can be read from storage')
+  t.end()
+})
+
+test('stored out-of-range entry terms report log corruption', (t) => {
+  const { create } = logFixture(t, '02-corrupt-entry-term')
+  const log = create()
+  log.del()
+  log.open()
+  const invalid = toEntry('invalid', MAX_SEQ + 1n)
+  const insert = log.db.prepare('INSERT INTO raft_log (seq, entry) VALUES (?, ?)')
+  insert.run(0n, invalid)
+  insert.run(1n, toEntry('valid', 1n))
+  log.close()
+  log.open()
+
+  const corrupt = (err) => err.code === LOG_CORRUPT &&
+    err.message.includes(`term must be <= ${MAX_SEQ}`)
+  t.throws(() => [...log.iter()], corrupt, 'iteration rejects an invalid interior term')
+
+  log.db.prepare('UPDATE raft_log SET entry = ? WHERE seq = 1').run(invalid)
+  log.close()
+  t.throws(() => log.open(), corrupt, 'open rejects an invalid head term')
+  t.notOk(log.isOpen, 'failed open leaves the log closed')
   t.end()
 })
 

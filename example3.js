@@ -38,7 +38,7 @@ function createNode(id) {
     id,
     nodeIds,
     send,
-    `/tmp/node${id}.db`,
+    `/tmp/node-${id}.db`,
     { apply },
   )
   nodesById.set(id, node)

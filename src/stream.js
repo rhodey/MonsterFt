@@ -27,6 +27,8 @@ class EncryptingStream extends Transform {
   }
 
   _destroy(err, callback) {
+    // Secretstream state is a native allocation, not a GC-managed object.
+    if (this.state !== null) { sodium.libsodium._free(this.state) }
     this.state = null
     callback(err)
   }
@@ -159,7 +161,8 @@ class DecryptingStream extends Transform {
         }
       }
     } catch (err) {
-      error = err
+      // Stream callbacks treat falsy error values as success.
+      error = err || new Error(String(err))
     }
     this.draining = false
 
@@ -204,6 +207,7 @@ class DecryptingStream extends Transform {
 
   _destroy(err, callback) {
     this.key = null
+    if (this.state !== null) { sodium.libsodium._free(this.state) }
     this.state = null
     this.len = null
     this.input.clear()
