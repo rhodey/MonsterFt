@@ -679,28 +679,90 @@ test('repair state one retains its fence while no-ops continue local pruning', a
   t.equal(err?.code, REPAIR_QUORUM_IMPOSSIBLE, 'the leader remains command-fenced')
 })
 
-test('failed election no-op steps down without retrying in the same term', async (t) => {
-  const fixture = clusterFixture(t, 'election-failure')
-  const { nodes } = fixture.build({ opts: keepOpts() })
-  const candidate = nodes[0]
-  const failure = new Error('injected election replication failure')
-  const markers = []
-  candidate._appendToSelfAndFollowers = (data) => {
-    markers.push(data)
-    return Promise.reject(failure)
-  }
-  nodes.forEach((node) => node.open())
-  candidate._voteForSelf()
-  await waitFor(() => fixture.warnings.some(({ err }) => err === failure), 'election warning')
-  await waitFor(() => candidate.state === 'follower', 'failed election stepdown')
-  await sleep(50)
-  t.deepEqual(markers, [Buffer.alloc(0)], 'one ordinary election no-op is attempted')
-  t.ok(candidate.isOpen, 'the failed election is nonfatal')
-  const replacement = await electOpen(nodes, nodes[1])
-  await waitApplied(nodes, 0n)
-  t.equal(replacement._commitTerm, replacement.term, 'a replacement leader becomes ready')
-  t.deepEqual(raftTypes(replacement), ['noop'], 'the replacement also uses an ordinary no-op')
-})
+for (const pending of [false, true]) {
+  test(`failed election no-op retries in the same term${pending ? ' with a pending CMD' : ''}`,
+    async (t) => {
+      const fixture = clusterFixture(t, `election-retry-${pending}`)
+      const calls = []
+      const apply = (db, buf, term, seq) => {
+        if (buf !== null) { calls.push(toObj(buf).key) }
+        return applyApp(db, buf, term, seq)
+      }
+      const { nodes } = fixture.build({
+        apply,
+        opts: { ...keepOpts(6, 10), pingTimeout: 500, appendTimeout: 60 },
+      })
+      let pendingSeq = null
+      if (pending) {
+        const leader = await openAndElect(nodes)
+        const [seq] = await leader._monsterAppendEntry({
+          type: 'cmd', items: [toBuf({ key: 'pending', value: 1 })],
+        })
+        pendingSeq = seq
+        await waitApplied(nodes, pendingSeq)
+      } else {
+        nodes.forEach((node) => node.open())
+      }
+      const candidate = nodes[pending ? 1 : 0]
+      const beforeSeq = candidate.seq
+      const beforeCalls = calls.length
+      let blockData = true
+      const send = fixture.bus.send.bind(fixture.bus)
+      fixture.bus.send = (to, from, msg) => {
+        // Keep heartbeats working while election entries cannot replicate.
+        if (blockData && from === candidate.id &&
+            msg.type === 'append' && msg.data !== undefined) {
+          return undefined
+        }
+        return send(to, from, msg)
+      }
+
+      candidate._voteForSelf()
+      const term = candidate.term
+      const ready = candidate._leaderReady
+      const queued = candidate.append(toBuf({ key: 'queued', value: 2 }))
+      queued.catch(noop)
+      await waitFor(() => candidate.seq >= beforeSeq + 2n, 'election no-op retry')
+      t.equal(candidate.state, 'leader', 'a failed no-op does not force stepdown')
+      t.equal(candidate.term, term, 'the retry uses the same term')
+      t.equal(candidate._leaderReady, ready, 'the retry preserves the readiness wait')
+      t.notOk(ready.settled, 'leadership is not ready before an entry commits')
+      t.equal(calls.length, beforeCalls, 'the queued command waits for readiness and recovery')
+      t.ok(fixture.warnings.some(({ id, err }) => {
+        return id === candidate.id && /append timeout|append not commit/.test(err.message)
+      }), 'failed replication emits a warning')
+      t.ok(raftTypes(candidate).slice(Number(beforeSeq + 1n)).every((type) => type === 'noop'),
+        'retries append only ordinary no-ops')
+      t.equal(candidate.log.begin, 0n, 'uncommitted retries do not trigger pruning')
+      if (pending) {
+        t.equal(pendingAt(candidate)?.cmdSeq, pendingSeq, 'the pending CMD survives retries')
+      }
+
+      blockData = false
+      const [cmdSeq, result] = await withTimeout(queued, 'queued command after retry')
+      await candidate._monsterProtocol
+      await waitApplied(nodes, cmdSeq + 1n)
+      t.deepEqual(result, { key: 'queued', value: 2 }, 'the queued command succeeds')
+      t.equal(candidate._commitTerm, term, 'the same term becomes ready')
+      t.equal(candidate.state, 'leader', 'the original candidate remains leader')
+      t.equal(candidate.term, term, 'recovery needs no additional election')
+      t.equal(calls.filter((key) => key === 'queued').length, nodes.length,
+        'each node applies the queued command once')
+      if (pending) {
+        t.equal(calls.filter((key) => key === 'pending').length, nodes.length,
+          'recovery does not reapply the pending command')
+      }
+      t.ok(nodes.every((node) => pendingAt(node) === null), 'SYNC clears pending state')
+
+      for (let index = 0; index < 3; index++) {
+        const later = await appendThroughSync(candidate, toBuf({ key: 'later', value: index }))
+        await waitApplied(nodes, later.syncSeq)
+      }
+      t.ok(nodes.every((node) => node.log.begin > 0n), 'local pruning continues after recovery')
+      t.ok(nodes.every((node) => retainedCount(node) < 10n), 'applied history stays below trigger')
+      t.deepEqual(fixture.errors, [], 'retries and subsequent commands emit no fatal errors')
+    })
+}
 
 test('failed CMD replication preserves history and steps down without retry', async (t) => {
   const fixture = clusterFixture(t, 'command-failure')

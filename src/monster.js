@@ -715,26 +715,6 @@ class MonsterNode extends RaftNode {
     }
   }
 
-  // Step down if the election no-op fails instead of retrying in this term.
-  _leaderAppendNoOp() {
-    if (!this.isOpen) { return }
-    if (this.state !== LEADER) { return }
-    const leaderReady = this._leaderReady
-    if (!leaderReady || leaderReady.term !== this.term ||
-        this._commitTerm === this.term) {
-      return
-    }
-    this._appendToSelfAndFollowers(Buffer.alloc(0)).catch((err) => {
-      if (this._closing) { return }
-      this._emitSafe('warn', err)
-      if (this._leaderReady !== leaderReady ||
-          this._commitTerm === leaderReady.term) {
-        return
-      }
-      this._monsterStepDownForTerm(leaderReady.term)
-    })
-  }
-
   async _monsterAwaitDecision(command, term=null) {
     term = term ?? this.term
     this._monsterAssertLeader(term)
