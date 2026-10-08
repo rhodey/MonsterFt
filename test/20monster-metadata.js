@@ -354,7 +354,7 @@ const raftRecordAtPath = (databasePath, seq) => {
 
 const headRecord = (node) => unpack(node.head)
 
-test('MonsterFt classifies illegal SYNC entries as log corruption', (t) => {
+test('MonsterFt classifies invalid SYNC entries as Monster corruption', (t) => {
   const node = { nodes: ids, quorum: 2 }
   const valid = {
     cmdSeq: 0n,
@@ -364,18 +364,18 @@ test('MonsterFt classifies illegal SYNC entries as log corruption', (t) => {
     digest: Buffer.alloc(32),
   }
   const invalid = [
-    [{ ...valid, cmdSeq: -1n }, 'SYNC entry cmdSeq is illegal'],
-    [{ ...valid, quorum: 1 }, 'SYNC entry quorum is illegal'],
-    [{ ...valid, agree: ['1'] }, 'SYNC entry agree has illegal length'],
-    [{ ...valid, agree: ['2', '1'] }, 'SYNC entry agree has illegal items'],
+    [{ ...valid, cmdSeq: -1n }, 'SYNC entry cmdSeq is corrupt'],
+    [{ ...valid, quorum: 1 }, 'SYNC entry quorum is corrupt'],
+    [{ ...valid, agree: ['1'] }, 'SYNC entry agree has corrupt length'],
+    [{ ...valid, agree: ['2', '1'] }, 'SYNC entry agree has corrupt id'],
     [{ ...valid, disagree: null },
-      'SYNC entry disagree has illegal length'],
+      'SYNC entry disagree has corrupt length'],
     [{ ...valid, disagree: ['1', '1'] },
-      'SYNC entry disagree has illegal items'],
+      'SYNC entry disagree has corrupt id'],
     [{ ...valid, quorum: false, agree: ['1'] },
       'SYNC entry quorum:false agree must be empty'],
     [{ ...valid, digest: Buffer.alloc(31) },
-      'SYNC entry digest is illegal'],
+      'SYNC entry digest is corrupt'],
   ]
 
   for (const [entry, message] of invalid) {
@@ -387,13 +387,13 @@ test('MonsterFt classifies illegal SYNC entries as log corruption', (t) => {
     }
     t.ok(err instanceof ErrorWithCode, `${message} throws ErrorWithCode`)
     t.equal(err.message, message, `${message} preserves its message`)
-    t.equal(err.code, LOG_CORRUPT, `${message} uses LOG_CORRUPT`)
+    t.equal(err.code, MONSTER_CORRUPT, `${message} uses MONSTER_CORRUPT`)
     t.equal(err.sqlCode, null, `${message} has no SQLite error code`)
   }
   t.end()
 })
 
-test('MonsterFt classifies a SYNC without its command as log corruption',
+test('MonsterFt classifies a SYNC without its command as Monster corruption',
   async (t) => {
     const target = {
       nodes: ids,
@@ -413,28 +413,28 @@ test('MonsterFt classifies a SYNC without its command as log corruption',
     )
     t.ok(err instanceof ErrorWithCode,
       'the missing SYNC command throws ErrorWithCode')
-    t.equal(err.code, LOG_CORRUPT,
-      'the missing SYNC command uses LOG_CORRUPT')
+    t.equal(err.code, MONSTER_CORRUPT,
+      'the missing SYNC command uses MONSTER_CORRUPT')
     t.equal(err.sqlCode, null,
       'the missing SYNC command has no SQLite error code')
   })
 
-test('MonsterFt classifies an illegal entry type as log corruption',
+test('MonsterFt classifies an invalid entry type as Monster corruption',
   async (t) => {
     const err = await rejects(
       t,
       MonsterFt.prototype._monsterApplyEntry.call(
         {}, { type: 'invalid' }, 0n, 0n, false, Buffer.alloc(32),
       ),
-      /^entry type is illegal$/,
-      'an illegal entry type is rejected',
+      /^entry type is corrupt$/,
+      'an invalid entry type is rejected',
     )
     t.ok(err instanceof ErrorWithCode,
-      'an illegal entry type throws ErrorWithCode')
-    t.equal(err.code, LOG_CORRUPT,
-      'an illegal entry type uses LOG_CORRUPT')
+      'an invalid entry type throws ErrorWithCode')
+    t.equal(err.code, MONSTER_CORRUPT,
+      'an invalid entry type uses MONSTER_CORRUPT')
     t.equal(err.sqlCode, null,
-      'an illegal entry type has no SQLite error code')
+      'an invalid entry type has no SQLite error code')
   })
 
 test('MonsterFt normalizes DB2 rollback failures', async (t) => {
@@ -1613,27 +1613,27 @@ test('MonsterFt validates CMD matchIndex before application', async (t) => {
     {
       name: 'missing',
       record: { type: 'cmd', items },
-      pattern: /CMD entry matchIndex has illegal length/,
+      pattern: /CMD entry matchIndex has corrupt length/,
     },
     {
       name: 'wrong length',
       record: { type: 'cmd', items, matchIndex: [-1n, -1n] },
-      pattern: /CMD entry matchIndex has illegal length/,
+      pattern: /CMD entry matchIndex has corrupt length/,
     },
     {
       name: 'non-sequence',
       record: { type: 'cmd', items, matchIndex: [-1n, -1n, -1] },
-      pattern: /CMD entry matchIndex has illegal items/,
+      pattern: /CMD entry matchIndex has corrupt seq/,
     },
     {
       name: 'equal sequence',
       record: { type: 'cmd', items, matchIndex: [-1n, -1n, 1n] },
-      pattern: /CMD entry matchIndex has illegal items/,
+      pattern: /CMD entry matchIndex has corrupt seq/,
     },
     {
       name: 'greater sequence',
       record: { type: 'cmd', items, matchIndex: [-1n, -1n, 2n] },
-      pattern: /CMD entry matchIndex has illegal items/,
+      pattern: /CMD entry matchIndex has corrupt seq/,
     },
     {
       name: 'empty items',
@@ -1656,8 +1656,8 @@ test('MonsterFt validates CMD matchIndex before application', async (t) => {
     )
     t.ok(err instanceof ErrorWithCode,
       `${name} CMD corruption throws ErrorWithCode`)
-    t.equal(err.code, LOG_CORRUPT,
-      `${name} CMD corruption uses LOG_CORRUPT`)
+    t.equal(err.code, MONSTER_CORRUPT,
+      `${name} CMD corruption uses MONSTER_CORRUPT`)
     t.equal(err.sqlCode, null,
       `${name} CMD corruption has no SQLite error code`)
   }

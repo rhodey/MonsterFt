@@ -654,7 +654,7 @@ class MonsterNode extends RaftNode {
     if (!command) {
       throw new Err.ErrorWithCode(
         'SYNC entry is missing CMD',
-        Err.LOG_CORRUPT,
+        Err.MONSTER_CORRUPT,
       )
     }
     const healthy = this._monsterSyncAgrees(entry, command.localDigest)
@@ -717,7 +717,7 @@ class MonsterNode extends RaftNode {
       await this._monsterApplySync(entry, seq, entryHash)
       return null
     }
-    throw new Err.ErrorWithCode('entry type is illegal', Err.LOG_CORRUPT)
+    throw new Err.ErrorWithCode('entry type is corrupt', Err.MONSTER_CORRUPT)
   }
 
   // RaftNode apply entry point
