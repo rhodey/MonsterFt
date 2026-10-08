@@ -214,7 +214,7 @@ class MonsterNode extends RaftNode {
       active = false
       return result
     } catch (err) {
-      if (this._closing) { this._throwIfClosing() }
+      this._throwIfClosing()
       if (active) {
         try {
           db.exec('ROLLBACK')
