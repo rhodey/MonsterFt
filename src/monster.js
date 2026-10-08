@@ -470,11 +470,8 @@ class MonsterNode extends RaftNode {
       if (group.nodes.length >= this.quorum) { agreement = group }
     }
     const unknown = this.nodes.length - reported
-    return {
-      agreement,
-      impossible: !agreement && largest + unknown < this.quorum,
-      reports,
-    }
+    const impossible = !agreement && largest + unknown < this.quorum
+    return { agreement, impossible, reports }
   }
 
   async _monsterRxOutcomeRequest(from, msg) {
