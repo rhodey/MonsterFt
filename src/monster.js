@@ -425,7 +425,7 @@ class MonsterNode extends RaftNode {
         repairState !== BigInt(REPAIR_QUORUM_IMPOSSIBLE) &&
         repairState !== BigInt(REPAIR_OUTSIDE_AGREEMENT)) {
       throw new Err.ErrorWithCode(
-        'stored repair state is illegal', Err.MONSTER_CORRUPT,
+        'stored repair state is corrupt', Err.MONSTER_CORRUPT,
       )
     }
     this._applySeq = meta.applied_seq
@@ -441,12 +441,12 @@ class MonsterNode extends RaftNode {
     if (pendingSeq !== null) {
       if (!util.isSeq(pendingSeq) || pendingSeq < 0n || pendingSeq > this._applySeq) {
         throw new Err.ErrorWithCode(
-          'pending command sequence is illegal', Err.MONSTER_CORRUPT,
+          'pending command sequence is corrupt', Err.MONSTER_CORRUPT,
         )
       }
       if (!(pendingDigest instanceof Uint8Array) || pendingDigest.byteLength !== 32) {
         throw new Err.ErrorWithCode(
-          'pending command digest is illegal', Err.MONSTER_CORRUPT,
+          'pending command digest is corrupt', Err.MONSTER_CORRUPT,
         )
       }
     }
@@ -464,7 +464,7 @@ class MonsterNode extends RaftNode {
   _monsterVerifyAppliedEntry(appliedEntryHash) {
     if (!util.isSeq(this._applySeq) || this._applySeq > this.log.seq) {
       throw new Err.ErrorWithCode(
-        'applied sequence is illegal',
+        'applied sequence is corrupt',
         Err.MONSTER_CORRUPT,
       )
     }
@@ -479,7 +479,7 @@ class MonsterNode extends RaftNode {
     }
     if (!(appliedEntryHash instanceof Uint8Array) || appliedEntryHash.byteLength !== 32) {
       throw new Err.ErrorWithCode(
-        'applied entry hash is illegal', Err.MONSTER_CORRUPT,
+        'applied entry hash is corrupt', Err.MONSTER_CORRUPT,
       )
     }
     const found = this.log.iter(this._applySeq).next()

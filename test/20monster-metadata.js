@@ -625,7 +625,7 @@ test('MonsterFt rejects invalid stored repair states before starting Raft', (t) 
     }
     t.ok(err instanceof ErrorWithCode, `state ${state} throws ErrorWithCode`)
     t.equal(err?.code, MONSTER_CORRUPT, `state ${state} reports DB2 corruption`)
-    t.equal(err?.message, 'stored repair state is illegal',
+    t.equal(err?.message, 'stored repair state is corrupt',
       `state ${state} identifies the invalid stored field`)
     t.notOk(restored.isOpen || restored.log.isOpen || restored.db !== null,
       `state ${state} closes both databases on startup failure`)
@@ -650,30 +650,30 @@ test('MonsterFt validates pending metadata and checkpoint hashes when reopening'
     ['missing digest', 'pending_cmd_seq = 0',
       'pending command metadata is incomplete'],
     ['negative pending sequence', 'pending_cmd_seq = -1, pending_local_digest = zeroblob(32)',
-      'pending command sequence is illegal'],
+      'pending command sequence is corrupt'],
     ['pending sequence ahead of checkpoint',
       'pending_cmd_seq = applied_seq + 1, pending_local_digest = zeroblob(32)',
-      'pending command sequence is illegal'],
+      'pending command sequence is corrupt'],
     ...[0, 31, 33].map((size) => [
       `${size}-byte pending digest`,
       `pending_cmd_seq = 0, pending_local_digest = zeroblob(${size})`,
-      'pending command digest is illegal',
+      'pending command digest is corrupt',
     ]),
-    ['missing checkpoint hash', 'applied_entry_hash = NULL', 'applied entry hash is illegal'],
+    ['missing checkpoint hash', 'applied_entry_hash = NULL', 'applied entry hash is corrupt'],
     ...[0, 31, 33].map((size) => [
       `${size}-byte checkpoint hash`, `applied_entry_hash = zeroblob(${size})`,
-      'applied entry hash is illegal',
+      'applied entry hash is corrupt',
     ]),
     ['initial checkpoint with a hash', 'applied_seq = -1',
       'applied entry hash must be null for initial state'],
     ['pending command before initial checkpoint',
       'applied_seq = -1, applied_entry_hash = NULL, pending_cmd_seq = 0, pending_local_digest = zeroblob(32)',
-      'pending command sequence is illegal'],
+      'pending command sequence is corrupt'],
     ['text pending sequence', "pending_cmd_seq = 'bad', pending_local_digest = zeroblob(32)",
-      'pending command sequence is illegal', true],
+      'pending command sequence is corrupt', true],
     ['text pending digest', "pending_cmd_seq = 0, pending_local_digest = 'bad'",
-      'pending command digest is illegal', true],
-    ['text checkpoint hash', "applied_entry_hash = 'bad'", 'applied entry hash is illegal', true],
+      'pending command digest is corrupt', true],
+    ['text checkpoint hash', "applied_entry_hash = 'bad'", 'applied entry hash is corrupt', true],
   ]
   for (const [name, mutation, message, looseSchema] of cases) {
     const db = new DatabaseSync(`${fixture.paths.get(leader.id)}2`)

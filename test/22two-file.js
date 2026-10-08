@@ -1614,7 +1614,7 @@ test('checkpoint ahead of DB1 rejects and requires a fresh object',
       'the checkpoint ahead of DB1 has no SQLite error code')
     t.match(
       err?.message ?? '',
-      /applied sequence is illegal/,
+      /applied sequence is corrupt/,
       'MonsterFt rejects a DB2 checkpoint ahead of DB1',
     )
     t.notOk(failed.log.isOpen, 'invalid checkpoint cleanup closes DB1')
