@@ -21,6 +21,7 @@ import {
   LOG_NOT_OPEN,
   LOG_OPEN,
   MONSTER_ILLEGAL,
+  MONSTER_CORRUPT,
   NODE_NOT_OPEN,
   NO_LEADER,
   NOT_COMMIT,
@@ -75,9 +76,10 @@ test('public error codes expose the assigned constants', (t) => {
     REPAIR_OUTSIDE_AGREEMENT,
     DRAINING,
     MONSTER_ILLEGAL,
+    MONSTER_CORRUPT,
   }
   const values = Object.values(codes)
-  t.deepEqual(values, Array.from({ length: 23 }, (_, i) => 10_000 + i),
+  t.deepEqual(values, Array.from({ length: 24 }, (_, i) => 10_000 + i),
     'uses consecutive numeric values in the declared order')
   t.deepEqual(Public.ErrorCodes, codes, 'exports exactly the assigned names and values')
   t.ok(Object.isFrozen(Public.ErrorCodes), 'the public namespace is frozen')

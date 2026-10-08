@@ -6,7 +6,7 @@ import { unpack } from 'msgpackr'
 import {
   APPLY_ERROR,
   ErrorWithCode,
-  LOG_CORRUPT,
+  MONSTER_CORRUPT,
   SQLITE_ERROR,
   REPAIR_QUORUM_IMPOSSIBLE,
 } from '../src/error.js'
@@ -653,7 +653,7 @@ test('startup validates the checkpoint before deleting any history', async (t) =
     .run(Buffer.alloc(32))
   closeNodesQuietly(first.nodes)
   const restarted = fixture.build({ opts: keepOpts() }).nodes[0]
-  t.throws(() => restarted.open(), (err) => err.code === LOG_CORRUPT,
+  t.throws(() => restarted.open(), (err) => err.code === MONSTER_CORRUPT,
     'a checkpoint mismatch rejects startup')
   t.deepEqual(readPair(fixture.paths.get(leader.id)).rows.map(({ seq }) => seq),
     [0n, 1n, 2n, 3n, 4n], 'checkpoint validation fails before deletion')

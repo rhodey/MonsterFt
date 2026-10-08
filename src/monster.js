@@ -417,14 +417,14 @@ class MonsterNode extends RaftNode {
     if (!util.isSeq(this._applySeq) || this._applySeq > this.log.seq) {
       throw new Err.ErrorWithCode(
         'applied sequence is illegal',
-        Err.LOG_CORRUPT,
+        Err.MONSTER_CORRUPT,
       )
     }
     if (this._applySeq === -1n) {
       if (appliedEntryHash !== null) {
         throw new Err.ErrorWithCode(
           'applied entry hash must be null for initial state',
-          Err.LOG_CORRUPT,
+          Err.MONSTER_CORRUPT,
         )
       }
       return
@@ -433,14 +433,14 @@ class MonsterNode extends RaftNode {
     if (found.done) {
       throw new Err.ErrorWithCode(
         'applied log entry not found',
-        Err.LOG_CORRUPT,
+        Err.MONSTER_CORRUPT,
       )
     }
     const expected = crypto.createHash('sha256').update(found.value).digest()
     if (!asBuffer(appliedEntryHash).equals(expected)) {
       throw new Err.ErrorWithCode(
         'applied entry hash does not match',
-        Err.LOG_CORRUPT,
+        Err.MONSTER_CORRUPT,
       )
     }
   }

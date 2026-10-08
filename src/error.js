@@ -24,6 +24,7 @@ const REPAIR_QUORUM_IMPOSSIBLE = 10_019
 const REPAIR_OUTSIDE_AGREEMENT = 10_020
 const DRAINING = 10_021
 const MONSTER_ILLEGAL = 10_022
+const MONSTER_CORRUPT = 10_023
 
 const ErrorCodes = Object.freeze({
   ARGUMENT_ILLEGAL,
@@ -49,6 +50,7 @@ const ErrorCodes = Object.freeze({
   REPAIR_OUTSIDE_AGREEMENT,
   DRAINING,
   MONSTER_ILLEGAL,
+  MONSTER_CORRUPT,
 })
 
 class ErrorWithCode extends Error {
@@ -115,4 +117,5 @@ export {
   REPAIR_OUTSIDE_AGREEMENT,
   DRAINING,
   MONSTER_ILLEGAL,
+  MONSTER_CORRUPT,
 }

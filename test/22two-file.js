@@ -10,8 +10,8 @@ import {
   DRAINING,
   ErrorWithCode,
   FS_ERROR,
-  LOG_CORRUPT,
   LOG_OPEN,
+  MONSTER_CORRUPT,
   NODE_NOT_OPEN,
   REPAIR_OUTSIDE_AGREEMENT,
   REPAIR_QUORUM_IMPOSSIBLE,
@@ -1416,8 +1416,8 @@ test('open rejects a DB2 checkpoint hash mismatch', async (t) => {
   const err = errorOfCall(() => second.nodes[0].open())
   t.ok(err instanceof ErrorWithCode,
     'the checkpoint hash mismatch throws ErrorWithCode')
-  t.equal(err?.code, LOG_CORRUPT,
-    'the checkpoint hash mismatch reports LOG_CORRUPT')
+  t.equal(err?.code, MONSTER_CORRUPT,
+    'the checkpoint hash mismatch reports MONSTER_CORRUPT')
   t.equal(err?.sqlCode, null,
     'the checkpoint hash mismatch has no SQLite error code')
   t.match(
@@ -1480,8 +1480,8 @@ test('checkpoint ahead of DB1 rejects and requires a fresh object',
     const err = errorOfCall(() => failed.open())
     t.ok(err instanceof ErrorWithCode,
       'the checkpoint ahead of DB1 throws ErrorWithCode')
-    t.equal(err?.code, LOG_CORRUPT,
-      'the checkpoint ahead of DB1 reports LOG_CORRUPT')
+    t.equal(err?.code, MONSTER_CORRUPT,
+      'the checkpoint ahead of DB1 reports MONSTER_CORRUPT')
     t.equal(err?.sqlCode, null,
       'the checkpoint ahead of DB1 has no SQLite error code')
     t.match(
