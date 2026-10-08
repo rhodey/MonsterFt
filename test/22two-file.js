@@ -1391,6 +1391,134 @@ test('two-file cluster commits, checkpoints exact entries, and restarts',
       'normal two-file operation emits no fatal errors')
   })
 
+for (const missing of ['row', 'table', 'all DB2 tables']) {
+  test(`open rejects a missing metadata ${missing} without replaying application state`, async (t) => {
+    const fixture = clusterFixture(t, `missing-metadata-${missing}`)
+    const apply = (db, buf, term, seq) => {
+      if (seq === 0n) {
+        initializeApp(db)
+        return
+      }
+      db.prepare(`
+        INSERT INTO two_file_items (key, value) VALUES ('counter', 1)
+        ON CONFLICT(key) DO UPDATE SET value = value + 1
+      `).run()
+      return valueAt({ db }, 'counter')
+    }
+    const first = fixture.build({ apply })
+    const leader = await openAndElect(first.nodes)
+    const [cmdSeq] = await leader.append(toBuf({ increment: 1 }))
+    await leader._monsterProtocol
+    await waitApplied(first.nodes, cmdSeq + 1n)
+    t.deepEqual(first.nodes.map((node) => valueAt(node, 'counter')), [1, 1, 1],
+      'each replica applied the increment exactly once')
+    closeNodes(first.nodes)
+
+    const databasePath = fixture.paths.get(leader.id)
+    const db = new DatabaseSync(`${databasePath}2`)
+    if (missing === 'row') {
+      db.exec('DELETE FROM monsterft_meta')
+    } else {
+      db.exec('DROP TABLE monsterft_meta')
+      if (missing === 'all DB2 tables') { db.exec('DROP TABLE two_file_items') }
+    }
+    db.close()
+
+    const second = fixture.build({ apply })
+    const restored = second.nodes.find((node) => node.id === leader.id)
+    const beforeMessages = fixture.bus.messages.length
+    const err = errorOfCall(() => restored.open())
+    t.ok(err instanceof ErrorWithCode, 'missing metadata throws ErrorWithCode')
+    t.equal(err?.code, MONSTER_CORRUPT, 'missing metadata reports DB2 corruption')
+    t.equal(err?.message, `metadata ${missing === 'row' ? 'row' : 'table'} is missing`,
+      'the error identifies the missing metadata')
+    t.notOk(restored.isOpen || restored.log.isOpen || restored.db !== null,
+      'failed startup closes both databases')
+    t.equal(fixture.bus.messages.length, beforeMessages, 'startup sends no Raft messages')
+    t.deepEqual(second.applies, [], 'startup does not replay completed commands')
+
+    const saved = new DatabaseSync(`${databasePath}2`, { readOnly: true })
+    try {
+      if (missing === 'row') {
+        t.deepEqual(saved.prepare('SELECT * FROM monsterft_meta').all(), [],
+          'startup does not recreate the lost checkpoint row')
+      } else {
+        t.notOk(tableNames(saved).includes('monsterft_meta'),
+          'startup does not recreate the lost metadata table')
+      }
+      if (missing !== 'all DB2 tables') {
+        t.equal(Number(valueAt({ db: saved }, 'counter')), 1,
+          'the persisted increment remains applied once')
+      }
+    } finally {
+      saved.close()
+    }
+  })
+}
+
+test('an empty log does not allow reseeding existing DB2 state', (t) => {
+  for (const missing of ['row', 'table']) {
+    const fixture = clusterFixture(t, `empty-log-missing-${missing}`)
+    const original = fixture.build().nodes[0]
+    original.open()
+    t.equal(original.seq, -1n, 'the original log has no entries')
+    if (missing === 'row') {
+      original.db.exec('DELETE FROM monsterft_meta')
+    } else {
+      initializeApp(original.db)
+      original.db.exec('DROP TABLE monsterft_meta')
+    }
+    original.close()
+
+    const restored = fixture.build().nodes[0]
+    const err = errorOfCall(() => restored.open())
+    t.equal(err?.code, MONSTER_CORRUPT, `missing ${missing} is rejected despite an empty log`)
+    t.notOk(restored.isOpen || restored.log.isOpen || restored.db !== null,
+      'failed startup closes both databases')
+  }
+  t.end()
+})
+
+test('failed fresh metadata initialization leaves an empty pair that can be retried', (t) => {
+  const databasePath = uniquePath('metadata-init-rollback')
+  removePair(databasePath)
+  const nodes = []
+  t.teardown(() => {
+    closeNodesQuietly(nodes)
+    removePair(databasePath)
+  })
+
+  class FailedInit extends MonsterFt {
+    _monsterInit(db) {
+      const exec = db.exec.bind(db)
+      db.exec = (sql) => exec(sql.replace('INSERT INTO monsterft_meta', 'INSERT INTO missing_table'))
+      return super._monsterInit(db)
+    }
+  }
+  const opts = { electionTimeout: 60_000, pingTimeout: 60_000, apply: applyApp }
+  const failed = new FailedInit('1', ids, noop, databasePath, opts)
+  nodes.push(failed)
+  const err = errorOfCall(() => failed.open())
+  t.equal(err?.code, SQLITE_ERROR, 'an insert failure reports the SQLite error')
+  t.notOk(failed.isOpen || failed.log.isOpen || failed.db !== null,
+    'initialization failure closes both databases')
+  const saved = new DatabaseSync(`${databasePath}2`, { readOnly: true })
+  try {
+    t.deepEqual(tableNames(saved), [], 'the failed insertion also rolls back table creation')
+  } finally {
+    saved.close()
+  }
+
+  const restored = new MonsterFt('1', ids, noop, databasePath, opts)
+  nodes.push(restored)
+  restored.open()
+  t.ok(restored.isOpen, 'an existing empty pair initializes successfully on retry')
+  t.equal(restored._applySeq, -1n, 'the retry starts at the initial checkpoint')
+  t.equal(restored.db.prepare('SELECT count(*) AS count FROM monsterft_meta').get().count, 1n,
+    'the retry creates exactly one metadata row')
+  t.end()
+})
+
 test('open rejects a DB2 checkpoint hash mismatch', async (t) => {
   const fixture = clusterFixture(t, 'hash-mismatch')
   const first = fixture.build()

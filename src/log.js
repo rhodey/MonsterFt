@@ -72,6 +72,15 @@ class SQLiteLog {
     this._validateSeq(entry.readBigUInt64LE(), false, code, 'term')
   }
 
+  _validateElection(term, votedFor, code=Err.ARGUMENT_ILLEGAL) {
+    this._validateSeq(term, false, code, 'term')
+    if (votedFor !== null &&
+        (typeof votedFor !== 'string' || votedFor.length <= 0)) {
+      throw new Err.ErrorWithCode(
+        'votedFor must be null or a non-empty string', code)
+    }
+  }
+
   _entryFromRow(row, expected=undefined) {
     this._validateSeq(row.seq, false, Err.LOG_CORRUPT)
     if (expected !== undefined && row.seq !== expected) {
@@ -98,13 +107,11 @@ class SQLiteLog {
       head = entry.subarray(8)
     }
 
-    let election = this._statements.electionGet.get()
+    const election = this._statements.electionGet.get()
     if (election === undefined) {
-      election = {
-        term: term >= 0n ? term : 0n,
-        votedFor: null,
-      }
+      throw new Err.ErrorWithCode('election row is missing', Err.LOG_CORRUPT)
     }
+    this._validateElection(election.term, election.votedFor, Err.LOG_CORRUPT)
 
     this.seq = seq
     this.term = term
@@ -134,20 +141,32 @@ class SQLiteLog {
       db.exec('PRAGMA journal_mode = WAL')
       db.exec('PRAGMA synchronous = FULL')
 
-      db.exec(`
-        CREATE TABLE IF NOT EXISTS raft_log (
-          seq INTEGER PRIMARY KEY,
-          entry BLOB NOT NULL
-        ) STRICT
-      `)
+      const schema = db.prepare('SELECT name, type FROM sqlite_schema').all()
+      if (schema.length === 0) {
+        db.exec(`
+          BEGIN IMMEDIATE;
+          CREATE TABLE raft_log (
+            seq INTEGER PRIMARY KEY,
+            entry BLOB NOT NULL
+          ) STRICT;
 
-      db.exec(`
-        CREATE TABLE IF NOT EXISTS raft_election (
-          id INTEGER PRIMARY KEY CHECK (id = 1),
-          current_term INTEGER NOT NULL,
-          voted_for TEXT CHECK (voted_for IS NULL OR voted_for <> '')
-        ) STRICT
-      `)
+          CREATE TABLE raft_election (
+            id INTEGER PRIMARY KEY CHECK (id = 1),
+            current_term INTEGER NOT NULL,
+            voted_for TEXT CHECK (voted_for IS NULL OR voted_for <> '')
+          ) STRICT;
+
+          INSERT INTO raft_election (id, current_term, voted_for)
+          VALUES (1, 0, NULL);
+          COMMIT;
+        `)
+      } else {
+        for (const name of ['raft_log', 'raft_election']) {
+          if (!schema.some((row) => row.type === 'table' && row.name === name)) {
+            throw new Err.ErrorWithCode(`${name} table is missing`, Err.LOG_CORRUPT)
+          }
+        }
+      }
 
       this.db = db
       this._statements = {
@@ -292,12 +311,7 @@ class SQLiteLog {
   election(currentTerm, votedFor) {
     try {
       this._assertOpen()
-      this._validateSeq(currentTerm, false, Err.ARGUMENT_ILLEGAL, 'term')
-      if (votedFor !== null &&
-          (typeof votedFor !== 'string' || votedFor.length <= 0)) {
-        throw new Err.ErrorWithCode(
-          'votedFor must be null or a non-empty string', Err.ARGUMENT_ILLEGAL)
-      }
+      this._validateElection(currentTerm, votedFor)
 
       this._statements.electionUpsert.run(currentTerm, votedFor)
       this.elec.term = currentTerm

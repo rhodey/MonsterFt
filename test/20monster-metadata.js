@@ -5,6 +5,7 @@ import { pack, unpack } from 'msgpackr'
 import {
   ErrorWithCode,
   LOG_CORRUPT,
+  MONSTER_CORRUPT,
   REPAIR_OUTSIDE_AGREEMENT,
   REPAIR_QUORUM_IMPOSSIBLE,
   RPC_ILLEGAL,
@@ -601,6 +602,115 @@ test('MonsterFt uses one constrained singleton bookkeeping table', (t) => {
     repair_state: 0n,
   }, 'failed constraint checks preserve the seeded metadata row')
   t.end()
+})
+
+test('MonsterFt rejects invalid stored repair states before starting Raft', (t) => {
+  for (const state of [-1n, 3n, 9_223_372_036_854_775_807n]) {
+    const fixture = makeFixture(t, `invalid-repair-state-${state}`)
+    fixture.reset()
+    const original = fixture.build().nodes[0]
+    original.open()
+    original.db.exec('PRAGMA ignore_check_constraints = ON')
+    original.db.prepare('UPDATE monsterft_meta SET repair_state = ? WHERE id = 1')
+      .run(state)
+    original.close()
+
+    const { nodes, messages } = fixture.build()
+    const restored = nodes[0]
+    let err = null
+    try {
+      restored.open()
+    } catch (failure) {
+      err = failure
+    }
+    t.ok(err instanceof ErrorWithCode, `state ${state} throws ErrorWithCode`)
+    t.equal(err?.code, MONSTER_CORRUPT, `state ${state} reports DB2 corruption`)
+    t.equal(err?.message, 'stored repair state is illegal',
+      `state ${state} identifies the invalid stored field`)
+    t.notOk(restored.isOpen || restored.log.isOpen || restored.db !== null,
+      `state ${state} closes both databases on startup failure`)
+    t.deepEqual(messages, [], `state ${state} sends no Raft messages`)
+  }
+  t.end()
+})
+
+test('MonsterFt validates pending metadata and checkpoint hashes when reopening', async (t) => {
+  const fixture = makeFixture(t, 'invalid-stored-metadata')
+  fixture.reset()
+  const first = fixture.build()
+  const leader = await openAndElect(first)
+  const checkpoint = leader.db.prepare(`
+    SELECT applied_seq, applied_entry_hash FROM monsterft_meta WHERE id = 1
+  `).get()
+  closeNodes(first.nodes)
+
+  const cases = [
+    ['orphan digest', 'pending_local_digest = zeroblob(32)',
+      'pending command metadata is incomplete'],
+    ['missing digest', 'pending_cmd_seq = 0',
+      'pending command metadata is incomplete'],
+    ['negative pending sequence', 'pending_cmd_seq = -1, pending_local_digest = zeroblob(32)',
+      'pending command sequence is illegal'],
+    ['pending sequence ahead of checkpoint',
+      'pending_cmd_seq = applied_seq + 1, pending_local_digest = zeroblob(32)',
+      'pending command sequence is illegal'],
+    ...[0, 31, 33].map((size) => [
+      `${size}-byte pending digest`,
+      `pending_cmd_seq = 0, pending_local_digest = zeroblob(${size})`,
+      'pending command digest is illegal',
+    ]),
+    ['missing checkpoint hash', 'applied_entry_hash = NULL', 'applied entry hash is illegal'],
+    ...[0, 31, 33].map((size) => [
+      `${size}-byte checkpoint hash`, `applied_entry_hash = zeroblob(${size})`,
+      'applied entry hash is illegal',
+    ]),
+    ['initial checkpoint with a hash', 'applied_seq = -1',
+      'applied entry hash must be null for initial state'],
+    ['pending command before initial checkpoint',
+      'applied_seq = -1, applied_entry_hash = NULL, pending_cmd_seq = 0, pending_local_digest = zeroblob(32)',
+      'pending command sequence is illegal'],
+    ['text pending sequence', "pending_cmd_seq = 'bad', pending_local_digest = zeroblob(32)",
+      'pending command sequence is illegal', true],
+    ['text pending digest', "pending_cmd_seq = 0, pending_local_digest = 'bad'",
+      'pending command digest is illegal', true],
+    ['text checkpoint hash', "applied_entry_hash = 'bad'", 'applied entry hash is illegal', true],
+  ]
+  for (const [name, mutation, message, looseSchema] of cases) {
+    const db = new DatabaseSync(`${fixture.paths.get(leader.id)}2`)
+    try {
+      db.exec('PRAGMA ignore_check_constraints = ON')
+      if (looseSchema) {
+        db.exec(`
+          ALTER TABLE monsterft_meta RENAME TO old_meta;
+          CREATE TABLE monsterft_meta AS SELECT * FROM old_meta;
+          DROP TABLE old_meta;
+        `)
+      }
+      db.prepare(`
+        UPDATE monsterft_meta SET applied_seq = ?, applied_entry_hash = ?,
+          pending_cmd_seq = NULL, pending_local_digest = NULL WHERE id = 1
+      `).run(checkpoint.applied_seq, checkpoint.applied_entry_hash)
+      db.exec(`UPDATE monsterft_meta SET ${mutation} WHERE id = 1`)
+    } finally {
+      db.close()
+    }
+
+    const { nodes, messages, calls } = fixture.build()
+    const restored = nodes.find((node) => node.id === leader.id)
+    let err = null
+    try {
+      restored.open()
+    } catch (failure) {
+      err = failure
+    }
+    t.ok(err instanceof ErrorWithCode, `${name} throws ErrorWithCode`)
+    t.equal(err?.code, MONSTER_CORRUPT, `${name} reports DB2 corruption`)
+    t.equal(err?.message, message, `${name} identifies the invalid field`)
+    t.notOk(restored.isOpen || restored.log.isOpen || restored.db !== null,
+      `${name} closes both databases`)
+    t.deepEqual(messages, [], `${name} sends no Raft messages`)
+    t.deepEqual(calls, [], `${name} runs no application callbacks`)
+  }
 })
 
 test('MonsterFt classifies failed metadata mutations as SQLite errors',

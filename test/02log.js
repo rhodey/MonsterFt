@@ -1,4 +1,5 @@
 import fs from 'node:fs'
+import { DatabaseSync } from 'node:sqlite'
 import test from 'tape'
 import {
   ErrorWithCode,
@@ -201,6 +202,159 @@ test('election term and vote state persist', (t) => {
   throwsInvalidArgument(
     () => log.election(4n, 1), /votedFor must be null or a non-empty string/,
     'non-string candidate')
+  t.end()
+})
+
+test('fresh election state is durable before any vote or append', (t) => {
+  const { create, file } = logFixture(t, '02-initial-election')
+  let log = create()
+  log.del()
+  log.open()
+  log.close()
+
+  const db = new DatabaseSync(file, { readBigInts: true })
+  try {
+    const row = db.prepare('SELECT current_term, voted_for FROM raft_election WHERE id = 1').get()
+    t.equal(row?.current_term, 0n, 'term zero is persisted at initialization')
+    t.equal(row?.voted_for, null, 'the initial null vote is persisted')
+  } finally {
+    db.close()
+  }
+
+  log = create()
+  log.open()
+  t.deepEqual(log.elec, { term: 0n, votedFor: null }, 'restores fresh election state')
+  log.election(MAX_SEQ, 'node-a')
+  log.close()
+  log.open()
+  t.deepEqual(log.elec, { term: MAX_SEQ, votedFor: 'node-a' },
+    'restores the maximum term and a nonempty vote')
+  t.end()
+})
+
+test('stored election fields are validated on open', (t) => {
+  const cases = [
+    ['negative-term', -2n, null, /term must be >= 0/],
+    ['null-term', null, null, /term must be bigint/],
+    ['text-term', '4', null, /term must be bigint/],
+    ['real-term', 1.5, null, /term must be bigint/],
+    ['oversized-term', Number(MAX_SEQ) * 2, null, /term must be bigint/],
+    ['empty-vote', 4n, '', /votedFor must be null or a non-empty string/],
+    ['integer-vote', 4n, 2n, /votedFor must be null or a non-empty string/],
+    ['blob-vote', 4n, Buffer.from('2'), /votedFor must be null or a non-empty string/],
+  ]
+  for (const [name, term, votedFor, message] of cases) {
+    const { create, file } = logFixture(t, `02-election-${name}`)
+    const seed = create()
+    seed.del()
+    seed.open()
+    // Remove affinities and constraints to exercise restoration checks.
+    seed.db.exec(`
+      DROP TABLE raft_election;
+      CREATE TABLE raft_election (id INTEGER PRIMARY KEY, current_term, voted_for);
+    `)
+    seed.db.prepare('INSERT INTO raft_election VALUES (1, ?, ?)').run(term, votedFor)
+    seed.close()
+
+    const log = create()
+    t.throws(() => log.open(),
+      (err) => err.code === LOG_CORRUPT && message.test(err.message),
+      `${name}: reports corrupt election state`)
+    t.notOk(log.isOpen, `${name}: remains closed`)
+    t.equal(log.db, null, `${name}: releases the database handle`)
+    t.deepEqual(log.elec, { term: null, votedFor: null }, `${name}: clears cached election state`)
+
+    const db = new DatabaseSync(file)
+    try {
+      db.prepare('UPDATE raft_election SET current_term = 4, voted_for = NULL').run()
+    } finally {
+      db.close()
+    }
+    log.open()
+    t.deepEqual(log.elec, { term: 4n, votedFor: null }, `${name}: can reopen after repair`)
+  }
+  t.end()
+})
+
+test('existing databases must retain both log tables and their election row', (t) => {
+  const cases = [
+    ['election-row', 'DELETE FROM raft_election', 'election row is missing'],
+    ['election-table', 'DROP TABLE raft_election', 'raft_election table is missing'],
+    ['log-table', 'DROP TABLE raft_log', 'raft_log table is missing'],
+    ['unrelated-schema', `
+      DROP TABLE raft_election;
+      DROP TABLE raft_log;
+      CREATE VIEW other_data AS SELECT 1;
+    `, 'raft_log table is missing'],
+  ]
+  for (const [name, sql, message] of cases) {
+    const { create, file } = logFixture(t, `02-missing-${name}`)
+    const seed = create()
+    seed.del()
+    seed.open()
+    seed.append(toEntry('saved history', 4n))
+    seed.election(4n, 'node-a')
+    seed.db.exec(sql)
+    const schemaBefore = seed.db.prepare('SELECT name, type FROM sqlite_schema ORDER BY name').all()
+    seed.close()
+
+    const log = create()
+    t.throws(() => log.open(),
+      (err) => err.code === LOG_CORRUPT && err.message === `(log open) ${message}`,
+      `${name}: reports missing persisted state`)
+    t.notOk(log.isOpen, `${name}: remains closed`)
+    const db = new DatabaseSync(file, { readBigInts: true })
+    try {
+      t.deepEqual(db.prepare('SELECT name, type FROM sqlite_schema ORDER BY name').all(),
+        schemaBefore, `${name}: does not recreate missing tables`)
+      if (name === 'election-row') {
+        t.equal(db.prepare('SELECT * FROM raft_election').get(), undefined,
+          'does not replace a missing election row')
+      }
+      if (name === 'log-table') {
+        const row = db.prepare('SELECT current_term, voted_for FROM raft_election').get()
+        t.equal(row.current_term, 4n, 'preserves the remaining election term')
+        t.equal(row.voted_for, 'node-a', 'preserves the remaining vote')
+      }
+    } finally {
+      db.close()
+    }
+  }
+  t.end()
+})
+
+test('failed log initialization rolls back tables and election state', (t) => {
+  const { create, file } = logFixture(t, '02-init-rollback')
+  const log = create()
+  log.del()
+  const exec = DatabaseSync.prototype.exec
+  let injected = false
+  DatabaseSync.prototype.exec = function(sql) {
+    if (sql.includes('CREATE TABLE raft_election')) {
+      injected = true
+      sql = sql.replace('COMMIT;', 'SELECT * FROM missing_init_table; COMMIT;')
+    }
+    return exec.call(this, sql)
+  }
+  try {
+    t.throws(() => log.open(), (err) => err.code === SQLITE_ERROR,
+      'failure after inserting initial election state prevents open')
+  } finally {
+    DatabaseSync.prototype.exec = exec
+  }
+  t.ok(injected, 'failure was injected in fresh initialization')
+  t.notOk(log.isOpen, 'failed initialization leaves the log closed')
+  t.equal(log.db, null, 'failed initialization releases the database')
+  const db = new DatabaseSync(file)
+  try {
+    t.deepEqual(db.prepare('SELECT name FROM sqlite_schema').all(), [],
+      'closing the failed transaction rolls back all schema changes')
+  } finally {
+    db.close()
+  }
+  log.open()
+  t.deepEqual(log.elec, { term: 0n, votedFor: null }, 'retry initializes the election row')
+  t.equal(log.append(toEntry('after retry')), 0n, 'retry creates a usable log')
   t.end()
 })
 

@@ -1,7 +1,9 @@
 import test from 'tape'
+import { DatabaseSync } from 'node:sqlite'
 import {
   ARGUMENT_ILLEGAL,
   ErrorWithCode,
+  LOG_CORRUPT,
   NO_LEADER,
   RPC_ILLEGAL,
 } from '../src/error.js'
@@ -418,6 +420,55 @@ test('a restarted node repeats only its persisted vote', async (t) => {
   t.equal(node.leader, null, 'restoring a vote does not restore a leader')
 
   node.close()
+})
+
+test('lost election state prevents startup and a second vote in the same term', async (t) => {
+  for (const [name, sql] of [
+    ['row', 'DELETE FROM raft_election'],
+    ['table', 'DROP TABLE raft_election'],
+  ]) {
+    const fixture = logFixture(t, `21-lost-election-${name}`)
+    fixture.create().del()
+    const sent = []
+    const send = (to, msg) => sent.push([to, { ...msg }])
+    const nodes = []
+    t.teardown(() => nodes.forEach((node) => node.close()))
+    const create = () => {
+      const node = new ProductionRaftNode('1', ids, send, fixture.file, opts)
+      nodes.push(node)
+      return node
+    }
+    const request = { type: 'vote_request', term: 4n, termP: -1n, seqP: -1n }
+    const first = create()
+    first.open()
+    first._stopTimers()
+    await first.onReceive('2', request)
+    t.equal(sent.at(-1)[1].voteGranted, true, `${name}: grants the first vote`)
+    t.equal(first.seq, -1n, `${name}: a durable vote does not require log entries`)
+    first.close()
+
+    const intact = create()
+    intact.open()
+    intact._stopTimers()
+    await intact.onReceive('3', request)
+    t.equal(sent.at(-1)[1].voteGranted, false, `${name}: intact restart preserves the vote`)
+    intact.close()
+    const db = new DatabaseSync(fixture.file)
+    try { db.exec(sql) } finally { db.close() }
+
+    const reopened = create()
+    const changes = []
+    reopened.on('change', (change) => changes.push(change))
+    t.throws(() => reopened.open(), (err) => err.code === LOG_CORRUPT,
+      `${name}: missing election state prevents startup`)
+    t.notOk(reopened.isOpen, `${name}: Raft stays closed`)
+    t.notOk(reopened.log.isOpen, `${name}: the log stays closed`)
+    t.deepEqual(changes, [], `${name}: publishes no open state`)
+    t.equal(reopened._electionTimer, undefined, `${name}: starts no election timer`)
+    const count = sent.length
+    await reopened.onReceive('3', request)
+    t.equal(sent.length, count, `${name}: cannot grant a second vote after lost state`)
+  }
 })
 
 test('RequestVote candidate identity stays separate from established leader identity', async (t) => {

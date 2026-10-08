@@ -366,33 +366,48 @@ class MonsterNode extends RaftNode {
   }
 
   _monsterInit(db) {
-    db.exec(`
-      CREATE TABLE IF NOT EXISTS monsterft_meta (
-        id INTEGER PRIMARY KEY CHECK (id = 1),
-        applied_seq INTEGER NOT NULL,
-        applied_entry_hash BLOB,
-        repair_state INTEGER NOT NULL CHECK (repair_state IN (0, 1, 2)),
-        pending_cmd_seq INTEGER,
-        pending_local_digest BLOB,
-        CHECK (
-          (applied_seq = -1 AND applied_entry_hash IS NULL) OR
-          (applied_seq >= 0 AND applied_entry_hash IS NOT NULL AND
-           length(applied_entry_hash) = 32)
-        ),
-        CHECK (
-          (pending_cmd_seq IS NULL AND pending_local_digest IS NULL) OR
-          (pending_cmd_seq IS NOT NULL AND pending_cmd_seq >= 0 AND
-           pending_cmd_seq <= applied_seq AND
-           pending_local_digest IS NOT NULL AND
-           length(pending_local_digest) = 32)
+    const table = db.prepare(`
+      SELECT name FROM sqlite_schema
+      WHERE type = 'table' AND name = 'monsterft_meta'
+    `).get()
+    if (table === undefined) {
+      // Only an empty DB2 paired with an empty log can be initialized.
+      if (this.log.seq !== -1n ||
+          db.prepare('SELECT name FROM sqlite_schema LIMIT 1').get() !== undefined) {
+        throw new Err.ErrorWithCode(
+          'metadata table is missing', Err.MONSTER_CORRUPT,
         )
-      ) STRICT;
+      }
+      db.exec(`
+        BEGIN IMMEDIATE;
+        CREATE TABLE monsterft_meta (
+          id INTEGER PRIMARY KEY CHECK (id = 1),
+          applied_seq INTEGER NOT NULL,
+          applied_entry_hash BLOB,
+          repair_state INTEGER NOT NULL CHECK (repair_state IN (0, 1, 2)),
+          pending_cmd_seq INTEGER,
+          pending_local_digest BLOB,
+          CHECK (
+            (applied_seq = -1 AND applied_entry_hash IS NULL) OR
+            (applied_seq >= 0 AND applied_entry_hash IS NOT NULL AND
+             length(applied_entry_hash) = 32)
+          ),
+          CHECK (
+            (pending_cmd_seq IS NULL AND pending_local_digest IS NULL) OR
+            (pending_cmd_seq IS NOT NULL AND pending_cmd_seq >= 0 AND
+             pending_cmd_seq <= applied_seq AND
+             pending_local_digest IS NOT NULL AND
+             length(pending_local_digest) = 32)
+          )
+        ) STRICT;
 
-      INSERT OR IGNORE INTO monsterft_meta
-        (id, applied_seq, applied_entry_hash, repair_state,
-         pending_cmd_seq, pending_local_digest)
-      VALUES (1, -1, NULL, 0, NULL, NULL);
-    `)
+        INSERT INTO monsterft_meta
+          (id, applied_seq, applied_entry_hash, repair_state,
+           pending_cmd_seq, pending_local_digest)
+        VALUES (1, -1, NULL, 0, NULL, NULL);
+        COMMIT;
+      `)
+    }
 
     const meta = db.prepare(`
       SELECT applied_seq, applied_entry_hash, repair_state,
@@ -400,16 +415,49 @@ class MonsterNode extends RaftNode {
       FROM monsterft_meta
       WHERE id = 1
     `).get()
+    if (meta === undefined) {
+      throw new Err.ErrorWithCode(
+        'metadata row is missing', Err.MONSTER_CORRUPT,
+      )
+    }
+    const repairState = meta.repair_state
+    if (repairState !== BigInt(REPAIR_NONE) &&
+        repairState !== BigInt(REPAIR_QUORUM_IMPOSSIBLE) &&
+        repairState !== BigInt(REPAIR_OUTSIDE_AGREEMENT)) {
+      throw new Err.ErrorWithCode(
+        'stored repair state is illegal', Err.MONSTER_CORRUPT,
+      )
+    }
     this._applySeq = meta.applied_seq
-    this._monsterRepairState = Number(meta.repair_state)
-    this._monsterPendingCommand = meta.pending_cmd_seq === null
+    this._monsterVerifyAppliedEntry(meta.applied_entry_hash)
+
+    const pendingSeq = meta.pending_cmd_seq
+    const pendingDigest = meta.pending_local_digest
+    if ((pendingSeq === null) !== (pendingDigest === null)) {
+      throw new Err.ErrorWithCode(
+        'pending command metadata is incomplete', Err.MONSTER_CORRUPT,
+      )
+    }
+    if (pendingSeq !== null) {
+      if (!util.isSeq(pendingSeq) || pendingSeq < 0n || pendingSeq > this._applySeq) {
+        throw new Err.ErrorWithCode(
+          'pending command sequence is illegal', Err.MONSTER_CORRUPT,
+        )
+      }
+      if (!(pendingDigest instanceof Uint8Array) || pendingDigest.byteLength !== 32) {
+        throw new Err.ErrorWithCode(
+          'pending command digest is illegal', Err.MONSTER_CORRUPT,
+        )
+      }
+    }
+    this._monsterRepairState = Number(repairState)
+    this._monsterPendingCommand = pendingSeq === null
       ? null
       : {
-          cmdSeq: meta.pending_cmd_seq,
-          localDigest: asBuffer(meta.pending_local_digest),
+          cmdSeq: pendingSeq,
+          localDigest: asBuffer(pendingDigest),
         }
     this._monsterPendingReports.clear()
-    this._monsterVerifyAppliedEntry(asBuffer(meta.applied_entry_hash))
   }
 
   // Require that the log (DB1) contains the last entry that monster (DB2) applied
@@ -428,6 +476,11 @@ class MonsterNode extends RaftNode {
         )
       }
       return
+    }
+    if (!(appliedEntryHash instanceof Uint8Array) || appliedEntryHash.byteLength !== 32) {
+      throw new Err.ErrorWithCode(
+        'applied entry hash is illegal', Err.MONSTER_CORRUPT,
+      )
     }
     const found = this.log.iter(this._applySeq).next()
     if (found.done) {
