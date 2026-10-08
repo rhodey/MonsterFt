@@ -863,6 +863,7 @@ class MonsterNode extends RaftNode {
         }
         if (decision.sync.quorum && !decision.leaderAgrees) {
           await this._monsterFenceLeader()
+          return
         }
         const syncSeq = await this._monsterAppendSync(
           decision.sync,
