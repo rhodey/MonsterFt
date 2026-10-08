@@ -310,7 +310,7 @@ class MonsterNode extends RaftNode {
     }
   }
 
-  _monsterReleaseDb(work, value, failed) {
+  _monsterFinishDbWork(work, value, failed) {
     this._monsterDbWork = null
     this._monsterDbActive = false
     failed ? work.reject(value) : work.resolve(value)
@@ -329,12 +329,12 @@ class MonsterNode extends RaftNode {
       this._throwIfClosing()
       result = work.fn(this.db)
     } catch (err) {
-      this._monsterReleaseDb(work, err, true)
+      this._monsterFinishDbWork(work, err, true)
       return
     }
     Promise.resolve(result).then(
-      (value) => this._monsterReleaseDb(work, value, false),
-      (err) => this._monsterReleaseDb(work, err, true),
+      (value) => this._monsterFinishDbWork(work, value, false),
+      (err) => this._monsterFinishDbWork(work, err, true),
     )
   }
 
