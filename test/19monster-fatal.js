@@ -2,7 +2,7 @@ import crypto from 'node:crypto'
 import { spawnSync } from 'node:child_process'
 import test from 'tape'
 import { MonsterFt, SQLiteLog } from '../src/index.js'
-import { APPLY_ERROR, ErrorWithCode, RAFT_ILLEGAL } from '../src/error.js'
+import { APPLY_ERROR, ErrorWithCode, MONSTER_ILLEGAL } from '../src/error.js'
 import { databasePath, sleep } from './util.js'
 
 const ids = ['1', '2', '3']
@@ -199,8 +199,8 @@ test('MonsterFt treats an illegal repair state as fatal', async (t) => {
     'the illegal state throws ErrorWithCode')
   t.equal(thrown.message, 'repair state is illegal',
     'the illegal state throws the invariant error')
-  t.equal(thrown.code, RAFT_ILLEGAL,
-    'the illegal state has the Raft invariant code')
+  t.equal(thrown.code, MONSTER_ILLEGAL,
+    'the illegal state has the Monster invariant code')
   t.equal(thrown.sqlCode, null,
     'the illegal state has no SQLite error code')
   t.deepEqual(fatals, [thrown],

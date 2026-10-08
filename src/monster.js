@@ -161,7 +161,7 @@ class MonsterNode extends RaftNode {
     if (state !== REPAIR_QUORUM_IMPOSSIBLE &&
         state !== REPAIR_OUTSIDE_AGREEMENT) {
       throw this._monsterFatalError(new Err.ErrorWithCode(
-        'repair state is illegal', Err.RAFT_ILLEGAL
+        'repair state is illegal', Err.MONSTER_ILLEGAL
       ))
     }
     const code = state === REPAIR_QUORUM_IMPOSSIBLE
