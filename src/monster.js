@@ -955,6 +955,7 @@ class MonsterNode extends RaftNode {
         results: outcomesWire(result.outcomes),
       })
     } catch (err) {
+      // todo: maybe emit a warn
       error(err)
     }
   }
