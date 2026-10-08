@@ -146,7 +146,7 @@ class MonsterNode extends RaftNode {
     const begin = this._applySeq - keep.target + 1n
     try {
       this.log.db.prepare('DELETE FROM raft_log WHERE seq < ?').run(begin)
-      this.log._readHead()
+      this.log.readHead()
     } catch (err) {
       throw Err.wrapError(err, Err.SQLITE_ERROR, 'DB1 retention ')
     }

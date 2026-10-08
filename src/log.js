@@ -85,7 +85,7 @@ class SQLiteLog {
     return entry
   }
 
-  _readHead() {
+  readHead() {
     const row = this._statements.head.get()
     let seq = -1n
     let term = -1n
@@ -172,7 +172,7 @@ class SQLiteLog {
             voted_for = excluded.voted_for
         `),
       }
-      this._readHead()
+      this.readHead()
       this._open = true
     } catch (err) {
       this.db = null
@@ -282,7 +282,7 @@ class SQLiteLog {
           this.db.exec('ROLLBACK')
         } catch {}
         try {
-          this._readHead()
+          this.readHead()
         } catch {}
       }
       throw this._wrapError(err, 'appendBatch')
@@ -315,7 +315,7 @@ class SQLiteLog {
       if (this.seq <= seq) { return }
 
       this._statements.trim.run(seq)
-      this._readHead()
+      this.readHead()
     } catch (err) {
       throw this._wrapError(err, 'trim')
     }

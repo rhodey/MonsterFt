@@ -302,8 +302,8 @@ test('retention checks use cached state and delete in exact applied batches', as
       }
       return prepare(sql)
     }
-    const readHead = node.log._readHead.bind(node.log)
-    node.log._readHead = () => {
+    const readHead = node.log.readHead.bind(node.log)
+    node.log.readHead = () => {
       refreshes.set(node.id, refreshes.get(node.id) + 1)
       return readHead()
     }
@@ -533,7 +533,7 @@ for (const stage of ['delete', 'refresh']) {
       }
     } else {
       // Simulate failure after SQLite commits deletion but before cached state refreshes.
-      leader.log._readHead = () => { throw failure }
+      leader.log.readHead = () => { throw failure }
     }
     const appended = errorOf(leader.append(toBuf({ key: 'completed', value: 2 })))
     const err = await withTimeout(fatal.promise, `${stage} fatal`)
