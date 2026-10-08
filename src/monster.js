@@ -219,6 +219,7 @@ class MonsterNode extends RaftNode {
         try {
           db.exec('ROLLBACK')
         } catch (rollbackErr) {
+          this._emitSafe('error', Err.wrapError(err))
           this._monsterFatalError(Err.wrapError(
             rollbackErr,
             Err.SQLITE_ERROR,
@@ -689,7 +690,9 @@ class MonsterNode extends RaftNode {
       this._throwIfClosing()
     })
 
-    if (repairState === REPAIR_OUTSIDE_AGREEMENT) {
+    if (repairState === REPAIR_QUORUM_IMPOSSIBLE) {
+      this._emitSafe('error', this._monsterRepairError(repairState))
+    } else if (repairState === REPAIR_OUTSIDE_AGREEMENT) {
       const err = this._monsterRepairError(repairState)
       this._monsterFatalError(err)
       return
@@ -921,7 +924,8 @@ class MonsterNode extends RaftNode {
       }
     }
     this._monsterLeaderSync = leaderSync().catch((err) => {
-      if (this._monsterStepDownForTerm(term)) { this._emitSafe('warn', err) }
+      this._monsterStepDownForTerm(term)
+      if (!this._closing) { this._emitSafe('warn', err) }
       throw err
     })
     this._monsterLeaderSync.catch(noop)
@@ -955,8 +959,8 @@ class MonsterNode extends RaftNode {
         results: outcomesWire(result.outcomes),
       })
     } catch (err) {
-      // todo: maybe emit a warn
       error(err)
+      if (!this._closing) { this._emitSafe('warn', err) }
     }
   }
 

@@ -441,9 +441,13 @@ test('MonsterFt normalizes DB2 rollback failures', async (t) => {
   const primary = new ErrorWithCode('primary failure', LOG_CORRUPT)
   const rollbackFailure = new Error('injected rollback failure')
   const fatals = []
+  const errors = []
   const target = {
     _closing: false,
     _throwIfClosing() {},
+    _emitSafe(type, err) {
+      errors.push({ type, err })
+    },
     _monsterFatalError(err) {
       fatals.push(err)
       return err
@@ -464,6 +468,8 @@ test('MonsterFt normalizes DB2 rollback failures', async (t) => {
     'the transaction preserves its primary failure',
   )
   t.equal(err, primary, 'the primary failure keeps its identity')
+  t.deepEqual(errors, [{ type: 'error', err: primary }],
+    'the original coded error is also surfaced on the error channel')
   t.equal(fatals.length, 1, 'the rollback failure is reported once')
   t.ok(fatals[0] instanceof ErrorWithCode,
     'the rollback failure uses ErrorWithCode')
@@ -1367,8 +1373,16 @@ test('MonsterFt requires repair when CMD patchsets prevent a digest quorum', asy
   const cmdSeq = leader.seq + 1n
 
   const syncEvents = new Map(cluster.nodes.map((node) => [node.id, []]))
+  const errors = new Map(cluster.nodes.map((node) => [node.id, []]))
+  const fatals = []
   cluster.nodes.forEach((node) => {
     node.on('sync', (event) => syncEvents.get(node.id).push(event))
+    node.on('fatal', (err) => fatals.push(err))
+    node.on('error', (err) => errors.get(node.id).push({
+      err,
+      metadata: metadataAtPath(fixture.paths.get(node.id)),
+      pending: cachedPendingAt(node),
+    }))
   })
   const err = await rejectsCode(t, leader.append(toBuf({
     key: 'no-quorum',
@@ -1383,7 +1397,7 @@ test('MonsterFt requires repair when CMD patchsets prevent a digest quorum', asy
     'the repair code carries the failure category')
   const syncSeq = cmdSeq + 1n
   await waitFor(() => cluster.nodes.every((node) => {
-    return node._applySeq >= syncSeq && syncEvents.get(node.id).length === 1
+    return node._applySeq >= syncSeq && errors.get(node.id).length === 1
   }), 'quorum-impossible SYNC propagation')
   const databasePath = fixture.paths.get(leader.id)
   const metadata = metadataAtPath(databasePath)
@@ -1412,7 +1426,19 @@ test('MonsterFt requires repair when CMD patchsets prevent a digest quorum', asy
       agree: [],
       disagree: ids,
     }], `node ${node.id} emits the quorum:false SYNC`)
+    const [{ err, metadata, pending }] = errors.get(node.id)
+    t.equal(err.code, REPAIR_QUORUM_IMPOSSIBLE,
+      `node ${node.id} reports the repair-required error`)
+    t.equal(metadata.repairState, 1n,
+      `node ${node.id} commits repair state before reporting the error`)
+    t.equal(metadata.appliedSeq, syncSeq,
+      `node ${node.id} commits the SYNC checkpoint before reporting the error`)
+    t.equal(metadata.pending, null,
+      `node ${node.id} durably clears the command before reporting the error`)
+    t.equal(pending, null,
+      `node ${node.id} clears its pending cache before reporting the error`)
   }
+  t.deepEqual(fatals, [], 'quorum-impossible errors do not enter the fatal path')
   t.ok(cluster.nodes.every((node) => node.isOpen),
     'quorum-impossible application leaves connected members online')
   t.equal(leaders(cluster.nodes)[0], leader,
@@ -1424,6 +1450,49 @@ test('MonsterFt requires repair when CMD patchsets prevent a digest quorum', asy
   t.equal(new Set(patchsets).size, 3,
     'the three substituted CMD patchsets produce distinct command digests')
 })
+
+test('MonsterFt safely reports quorum-impossible errors without listeners or when a listener closes',
+  async (t) => {
+    for (const closeOnError of [false, true]) {
+      const label = closeOnError ? 'closing listener' : 'no listeners'
+      const fixture = makeFixture(t, `quorum-error-${closeOnError}`)
+      const cluster = fixture.build({
+        patchsetTransform: ({ node }) => Buffer.from([Number(node.id)]),
+      })
+      const leader = await openAndElect(cluster)
+      const target = cluster.nodes[2]
+      const fatals = []
+      const errors = []
+      for (const node of cluster.nodes) {
+        node.removeAllListeners('error')
+        node.on('fatal', (err) => fatals.push(err))
+      }
+      if (closeOnError) {
+        target.on('error', (err) => {
+          errors.push(err)
+          target.close()
+        })
+      }
+      await rejectsCode(t, leader.append(toBuf({ key: label, value: 1 })),
+        REPAIR_QUORUM_IMPOSSIBLE, `${label}: the caller receives the repair error`)
+      await waitFor(() => cluster.nodes.every((node) => {
+        return node._monsterRepairState === 1
+      }), `${label}: repair propagation`)
+      await Promise.all(cluster.nodes.map((node) => node._applyPrev))
+      t.deepEqual(fatals, [], `${label}: application never enters the fatal path`)
+      t.ok(leader.isOpen && leader.state === 'leader',
+        `${label}: the leader stays available to replicate the decision`)
+      t.equal(target.isOpen, !closeOnError,
+        `${label}: only an explicit listener close shuts down the follower`)
+      if (closeOnError) {
+        t.deepEqual(errors.map((err) => err.code), [REPAIR_QUORUM_IMPOSSIBLE],
+          'the closing listener receives the repair error exactly once')
+        const metadata = metadataAtPath(fixture.paths.get(target.id))
+        t.equal(metadata.repairState, 1n, 'closing preserves the durable repair state')
+        t.equal(metadata.pending, null, 'closing preserves the durable command decision')
+      }
+    }
+  })
 
 test('MonsterFt requires one quorum to match the complete batch vector',
   async (t) => {
@@ -2102,6 +2171,46 @@ test('MonsterFt ignores an OUTCOME queued behind its command SYNC',
       'the replacement report retains its authoritative digest',
     )
   })
+
+test('MonsterFt reports quorum-impossible recovery without an active caller', async (t) => {
+  const fixture = makeFixture(t, 'recovery-no-quorum')
+  const first = fixture.build({
+    patchsetTransform: ({ node }) => Buffer.from([Number(node.id)]),
+    intercept: (to, from, msg) => {
+      if (msg.type === 'monster_outcome') { return false }
+    },
+  })
+  const leader = await openAndElect(first)
+  const appending = leader.append(toBuf({ key: 'recover-no-quorum', value: 1 }))
+  appending.catch(noop)
+  await waitFor(() => first.nodes.every((node) => cachedPendingAt(node) !== null),
+    'unresolved disagreeing CMD application')
+  closeNodes(first.nodes)
+  await rejects(t, appending, /node not open/, 'the original caller has already failed')
+
+  const recovered = fixture.build()
+  const errors = new Map(recovered.nodes.map((node) => [node.id, []]))
+  const fatals = []
+  recovered.nodes.forEach((node) => {
+    node.on('error', (err) => errors.get(node.id).push(err))
+    node.on('fatal', (err) => fatals.push(err))
+  })
+  const recoveryLeader = await openAndElect(recovered)
+  await withTimeout(recoveryLeader._monsterLeaderSync, 'quorum-impossible recovery')
+  await waitFor(() => recovered.nodes.every((node) => errors.get(node.id).length === 1),
+    'background repair error propagation')
+  for (const node of recovered.nodes) {
+    t.deepEqual(errors.get(node.id).map((err) => err.code), [REPAIR_QUORUM_IMPOSSIBLE],
+      `node ${node.id} reports the recovered repair error exactly once`)
+    const metadata = metadataAtPath(fixture.paths.get(node.id))
+    t.equal(metadata.repairState, 1n, `node ${node.id} persists the recovered repair state`)
+    t.equal(metadata.pending, null, `node ${node.id} resolves the recovered command`)
+  }
+  t.deepEqual(fatals, [], 'background repair reporting does not enter the fatal path')
+  t.ok(recovered.nodes.every((node) => node.isOpen), 'all recovered nodes remain open')
+  t.equal(recoveryLeader.state, 'leader', 'the recovery leader continues replicating')
+  t.equal(recovered.calls.length, 0, 'recovery does not reapply the command')
+})
 
 test('MonsterFt recovery reuses a stored digest without reapplication', async (t) => {
   const fixture = makeFixture(t, 'recovery')
