@@ -412,6 +412,7 @@ class MonsterNode extends RaftNode {
     this._monsterVerifyAppliedEntry(asBuffer(meta.applied_entry_hash))
   }
 
+  // Require that the log (DB1) contains the last entry that monster (DB2) applied
   _monsterVerifyAppliedEntry(appliedEntryHash) {
     if (!util.isSeq(this._applySeq) || this._applySeq > this.log.seq) {
       throw new Err.ErrorWithCode(
@@ -428,7 +429,6 @@ class MonsterNode extends RaftNode {
       }
       return
     }
-    // require that the log (DB1) contains the last entry that monster (DB2) applied
     const found = this.log.iter(this._applySeq).next()
     if (found.done) {
       throw new Err.ErrorWithCode(
