@@ -844,10 +844,11 @@ class MonsterNode extends RaftNode {
   _monsterLeaderQueue(cmdItems) {
     const response = util.oneShot()
     const run = async () => {
-      await this._monsterLeaderSync
-      this._monsterAssertAvailable()
       this._monsterAssertLeader()
       const term = this.term
+      await this._monsterLeaderSync
+      this._monsterAssertAvailable()
+      this._monsterAssertLeader(term)
       try {
         const appended = await this._monsterAppendEntry({ type: CMD, items: cmdItems })
         this._throwIfClosing()
