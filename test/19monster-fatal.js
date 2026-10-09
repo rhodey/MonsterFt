@@ -128,6 +128,11 @@ test('uncaught application errors retain their trace without an anonymous script
         byId.set(id, node)
         return node
       })
+      if (mode === 'startup') {
+        nodes[0].on('error', (err) => {
+          queueMicrotask(() => { throw err })
+        })
+      }
       nodes.forEach((node) => node.open())
       nodes[0]._voteForSelf()
       if (mode !== 'startup') {

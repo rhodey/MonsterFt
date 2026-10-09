@@ -1386,10 +1386,14 @@ class RaftNode extends EventEmitter {
     }
     queueMicrotask(() => {
       while (this._fatalErrors.length > 0) {
-        this.emit('error', this._fatalErrors.shift())
+        try {
+          this.emit('error', this._fatalErrors.shift())
+        } catch {}
       }
       while (this._fatalCloseErrors.length > 0) {
-        this.emit('error', this._fatalCloseErrors.shift())
+        try {
+          this.emit('error', this._fatalCloseErrors.shift())
+        } catch {}
       }
       this._fatalScheduled = false
       this._removeListenersAfterClose()
