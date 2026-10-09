@@ -454,6 +454,7 @@ test('MonsterFt normalizes DB2 rollback failures', async (t) => {
     },
   }
   const db = {
+    isTransaction: true,
     exec(sql) {
       if (sql === 'ROLLBACK') { throw rollbackFailure }
     },

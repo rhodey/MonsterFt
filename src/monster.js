@@ -215,7 +215,7 @@ class MonsterNode extends RaftNode {
       return result
     } catch (err) {
       this._throwIfClosing()
-      if (active) {
+      if (active && db.isTransaction) {
         try {
           db.exec('ROLLBACK')
         } catch (rollbackErr) {
@@ -607,8 +607,14 @@ class MonsterNode extends RaftNode {
               )
             } catch (err) {
               this._throwIfClosing()
-              db.exec('ROLLBACK TO monsterft_item')
-              db.exec('RELEASE monsterft_item')
+              if (!db.isTransaction) { throw err }
+              try {
+                db.exec('ROLLBACK TO monsterft_item')
+                db.exec('RELEASE monsterft_item')
+              } catch (rollbackErr) {
+                this._emitSafe('error', Err.wrapError(err))
+                throw rollbackErr
+              }
               outcomes.push({
                 status: REJECTED,
                 error: Err.wrapError(err),
