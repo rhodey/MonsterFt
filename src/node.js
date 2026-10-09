@@ -530,7 +530,7 @@ class RaftNode extends EventEmitter {
     this._stopTimers()
   }
 
-  _toFollower(leader=null, change=true) {
+  _toFollower(leader=null, change=true, resetElection=true) {
     if (this._closing) { return }
     this._cancelReplication(
       new Err.ErrorWithCode('node not leader', Err.NOT_LEADER),
@@ -542,7 +542,7 @@ class RaftNode extends EventEmitter {
     this._pongs.clear()
     this._votes = []
     clearInterval(this._pingTimer)
-    this._startElectionTimer()
+    if (resetElection) { this._startElectionTimer() }
     change && this._change()
   }
 
@@ -633,7 +633,8 @@ class RaftNode extends EventEmitter {
     if (termChange) {
       this.term = term
       this._votedFor = null
-      this._toFollower(null, false)
+      // A rejected request must not postpone an existing election deadline.
+      this._toFollower(null, false, this.state === LEADER)
     }
 
     const termPF = this.log.term

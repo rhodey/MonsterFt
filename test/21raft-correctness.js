@@ -335,6 +335,97 @@ test('a self vote persists the local candidate id without installing a leader', 
   node.close()
 })
 
+test('a returning stale candidate cannot postpone elections indefinitely', async (t) => {
+  const byId = new Map()
+  const errors = []
+  const denied = []
+  const requests = []
+  let isolated = false
+  let healed = false
+  let healAfterTerm = null
+  const files = ids.map((id) => {
+    const fixture = logFixture(t, `21-election-deadline-${id}`)
+    fixture.create().del()
+    return fixture.file
+  })
+  const readCommands = (idx) => {
+    const db = new DatabaseSync(files[idx], { readOnly: true })
+    try {
+      return db.prepare('SELECT entry FROM raft_log ORDER BY seq').all()
+        .map(({ entry }) => Buffer.from(entry).subarray(8).toString())
+        .filter(Boolean)
+    } finally { db.close() }
+  }
+  const nodes = ids.map((id, idx) => {
+    const send = (to, msg) => {
+      if (healAfterTerm !== null && id === '1' && msg.type === 'vote_request' &&
+          msg.term > healAfterTerm) {
+        isolated = false
+        healed = true
+        healAfterTerm = null
+      }
+      if (isolated && (id === '1' || to === '1')) { return }
+      if (healed && to === '1' && msg.type === 'vote' && !msg.voteGranted) {
+        denied.push(msg.term)
+      }
+      const receiver = byId.get(to)
+      const state = receiver.state
+      const timer = receiver._electionTimer
+      const higherRequest = msg.type === 'vote_request' && msg.term > receiver.term
+      const result = receiver.onReceive(id, msg)
+      if (healed && higherRequest) {
+        requests.push({ state, renewed: receiver._electionTimer !== timer,
+          granted: receiver._votedFor === id })
+      }
+      return result
+    }
+    const node = new ProductionRaftNode(id, ids, send, files[idx], {
+      electionTimeout: [40, 160, 200][idx], pingTimeout: 120,
+      appendTimeout: 1_000, rpcMax: 1, applyMax: 1,
+      apply: (node, bufs) => bufs.map((buf) => buf?.toString() ?? null),
+    })
+    node.on('error', (err) => errors.push(err))
+    byId.set(id, node)
+    return node
+  })
+  t.teardown(() => nodes.forEach((node) => node.close()))
+  nodes.forEach((node) => node.open())
+  await waitFor(() => nodes[0].state === 'leader')
+  t.equal((await nodes[0].append(Buffer.from('base')))[1], 'base',
+    'the shortest-timeout node initially leads and accepts a command')
+  await waitFor(() => ids.every((id, idx) => readCommands(idx).includes('base')))
+
+  isolated = true
+  await waitFor(() => nodes.slice(1).some((node) => node.state === 'leader'))
+  const successor = nodes.slice(1).find((node) => node.state === 'leader')
+  t.equal((await successor.append(Buffer.from('newer')))[1], 'newer',
+    'the other peers commit newer history during the partition')
+  await waitFor(() => readCommands(1).includes('newer') && readCommands(2).includes('newer'))
+  t.deepEqual(readCommands(0), ['base'], 'the isolated node has fallen behind')
+
+  healAfterTerm = successor.term
+  await waitFor(() => denied.length > 0)
+  await waitFor(() => nodes.slice(1).some((node) => node.state === 'leader'), 2_000)
+  const leader = nodes.slice(1).find((node) => node.state === 'leader')
+  t.equal((await leader.append(Buffer.from('restored')))[1], 'restored',
+    'a current peer wins despite the shorter election timeout on the stale node')
+  await waitFor(() => nodes.every((node, idx) => readCommands(idx).includes('restored')))
+  t.ok(nodes.every((node) => node.isOpen), 'progress resumes without closing any node')
+  for (const [idx, id] of ids.entries()) {
+    t.deepEqual(readCommands(idx), ['base', 'newer', 'restored'],
+      `node ${id} durably retains every successful command in order`)
+  }
+  const rejectedFollowers = requests.filter(({ state, granted }) => state === 'follower' && !granted)
+  t.ok(rejectedFollowers.length > 0 && rejectedFollowers.every(({ renewed }) => !renewed),
+    'rejected requests preserve an existing follower election deadline')
+  t.ok(requests.some(({ state, granted, renewed }) => state === 'leader' && !granted && renewed),
+    'a leader rejecting a higher-term request starts its follower election timer')
+  const grantedRequests = requests.filter(({ granted }) => granted)
+  t.ok(grantedRequests.length > 0 && grantedRequests.every(({ renewed }) => renewed),
+    'granting a vote still renews the election deadline')
+  t.deepEqual(errors, [], 'the partition and recovery produce no fatal errors')
+})
+
 test('a vote reply precedes a change listener that delivers a newer vote request', async (t) => {
   const byId = new Map()
   const requests = []
