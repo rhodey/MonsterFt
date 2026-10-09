@@ -103,6 +103,7 @@ class MonsterNode extends RaftNode {
     this._monsterDbActive = false
     this._monsterDbWork = null
     this._monsterDbQueue = []
+    this._monsterDbError = null
 
     this._monsterRepairState = REPAIR_NONE
     this._monsterPendingCommand = null
@@ -315,6 +316,9 @@ class MonsterNode extends RaftNode {
     this._monsterDbWork = null
     this._monsterDbActive = false
     failed ? work.reject(value) : work.resolve(value)
+    if (failed && this._monsterDbError === null) {
+      this._monsterDbError = Err.wrapError(value)
+    }
     if (!this._closing) { this._monsterDrainDb() }
   }
 
@@ -843,6 +847,7 @@ class MonsterNode extends RaftNode {
 
   _monsterLeaderQueue(cmdItems) {
     const response = util.oneShot()
+    const resultPromise = this._raceShutdown(response.promise)
     const run = async () => {
       this._monsterAssertLeader()
       const term = this.term
@@ -865,6 +870,8 @@ class MonsterNode extends RaftNode {
           response.reject(this._monsterRepairError(repairState))
         }
         if (decision.sync.quorum && !decision.leaderAgrees) {
+          // Let the caller send its response before fencing closes transport.
+          await resultPromise.catch(noop)
           await this._monsterFenceLeader()
           return
         }
@@ -886,7 +893,7 @@ class MonsterNode extends RaftNode {
       if (response.reject(err)) { return }
       if (!this._closing) { this._emitSafe('warn', err) }
     })
-    return this._raceShutdown(response.promise)
+    return resultPromise
   }
 
   // new leaders always resume CMD which need SYNC
@@ -1089,6 +1096,12 @@ class MonsterNode extends RaftNode {
             await this._delay(retryms)
           }
           this._throwIfClosing()
+        }
+        // Drain can close before a failed DB operation reaches fatal reporting.
+        if (this._monsterDbError !== null) {
+          const err = this._monsterDbError
+          this._monsterDbError = null
+          this._emitSafe('error', err)
         }
         this.close()
       })
