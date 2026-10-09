@@ -953,6 +953,7 @@ class MonsterNode extends RaftNode {
       return
     }
     try {
+      this._monsterAssertAvailable()
       const result = await this._monsterLeaderQueue(msg.items)
       this.send(from, {
         type: ACK,

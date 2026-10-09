@@ -5,6 +5,7 @@ import {
   ARGUMENT_ILLEGAL,
   APPEND_TIMEOUT,
   APPLY_ERROR,
+  DRAINING,
   ErrorWithCode,
   NO_LEADER,
   NODE_NOT_OPEN,
@@ -414,6 +415,70 @@ test('MonsterFt forwarded commands report leader and term state', async (t) => {
   t.equal(responses[2][1].sqlCode, null,
     'the term-difference response has no SQLite code')
 })
+
+test('MonsterFt rejects forwarded commands while drain waits for a pending CMD',
+  async (t) => {
+    const fixture = makeFixture(t, 'forwarded-command-draining')
+    fixture.clear()
+    let blockOutcomes = true
+    const cluster = fixture.build({
+      opts: { appendTimeout: 1_000 },
+      intercept: (to, from, msg) => {
+        if (blockOutcomes && msg.type === 'monster_outcome') { return false }
+      },
+    })
+    const leader = await openAndElect(cluster)
+    const follower = followers(cluster.nodes)[0]
+    let firstSettled = false
+    const first = leader.append(toBuf({ op: 'set', key: 'pending', value: 1 }))
+    first.then(() => { firstSettled = true }, noop)
+    await waitFor(() => cluster.nodes.every((node) => {
+      return node._monsterPendingCommand !== null
+    }), 'pending CMD on every node')
+    const cmdSeq = cmdSeqFor(cluster, 'pending')
+    const protocol = leader._monsterProtocol
+    let drainSettled = false
+    const draining = leader.drainCmd()
+    draining.then(() => { drainSettled = true }, noop)
+
+    for (const method of ['append', 'appendBatch']) {
+      const item = toBuf({ op: 'set', key: method, value: 2 })
+      const items = method === 'append' ? item : [item, item]
+      await rejectsCode(t, withTimeout(follower[method](items), `draining ${method}`),
+        DRAINING, `forwarded ${method} returns DRAINING before pending CMD resolves`)
+      const request = cluster.messages.find(({ from, msg }) => {
+        return from === follower.id && msg.type === 'fwd_cmd' &&
+          toObj(msg.items[0]).key === method
+      })
+      const reply = cluster.messages.find(({ from, to, msg }) => {
+        return from === leader.id && to === follower.id &&
+          msg.type === 'err' && msg.cid === request?.msg.cid
+      })
+      t.equal(reply?.msg.code, DRAINING,
+        `the leader sends the draining error for ${method} over RPC`)
+      t.equal(leader._monsterProtocol, protocol,
+        `rejected ${method} adds no work to the command queue`)
+    }
+
+    t.notOk(firstSettled, 'the original caller still waits for agreement')
+    t.notOk(drainSettled, 'drain still waits for the pending command SYNC')
+    t.ok(leader.isOpen, 'the draining leader remains open to finish pending work')
+    t.equal(leader._monsterPendingCommand.cmdSeq, cmdSeq,
+      'the original command remains pending while forwarded requests are rejected')
+    t.equal(leader.log.seq, cmdSeq, 'no new Raft entry follows the pending CMD')
+    t.equal(cluster.calls.filter(({ cmd }) => {
+      return cmd?.key === 'append' || cmd?.key === 'appendBatch'
+    }).length, 0, 'neither rejected request reaches application')
+
+    blockOutcomes = false
+    const result = await withTimeout(first, 'original command agreement')
+    await withTimeout(draining, 'pending command drain')
+    t.deepEqual(result, [cmdSeq, { key: 'pending', value: 1 }],
+      'the original command completes normally after outcomes resume')
+    t.notOk(leader.isOpen, 'drain closes the leader after resolving its pending CMD')
+    t.equal(monsterState(fixture.paths.get(leader.id)).meta.pending_cmd_seq, null,
+      'drain leaves no unresolved command in DB2')
+  })
 
 test('MonsterFt emits durable CMD and SYNC events around an early forwarded result',
   async (t) => {

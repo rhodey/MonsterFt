@@ -6,6 +6,7 @@ import {
   ARGUMENT_ILLEGAL,
   DRAINING,
   ErrorWithCode,
+  MONSTER_CORRUPT,
   NOT_LEADER,
   REPAIR_OUTSIDE_AGREEMENT,
   REPAIR_QUORUM_IMPOSSIBLE,
@@ -978,6 +979,36 @@ test('MonsterFt.certify accepts a healthy donor and validates its override flag'
       'healthy certification preserves the Raft log')
     t.end()
   })
+
+test('MonsterFt.certify classifies a missing metadata row as Monster corruption', (t) => {
+  const fixture = recoveryFixture(t, 'certify-missing-metadata')
+  fixture.clear()
+  const donor = fixture.build('initial', ['1']).nodes[0]
+  donor.open()
+  donor.close()
+
+  const donorPath = fixture.paths.get(donor.id)
+  const beforeLog = fs.readFileSync(donorPath)
+  const db = new DatabaseSync(monsterPath(donorPath))
+  db.exec('DELETE FROM monsterft_meta WHERE id = 1')
+  db.close()
+
+  for (const allowUnresolved of [false, true]) {
+    const err = errorOfCall(() => MonsterFt.certify(donorPath, allowUnresolved))
+    t.ok(err instanceof ErrorWithCode, 'missing metadata throws a coded error')
+    t.equal(err?.code, MONSTER_CORRUPT,
+      `missing metadata uses MONSTER_CORRUPT with override ${allowUnresolved}`)
+    t.equal(err?.message, 'MonsterFt certify metadata row is missing',
+      'the error identifies the missing DB2 metadata row')
+  }
+  t.deepEqual(fs.readFileSync(donorPath), beforeLog,
+    'failed certification leaves DB1 unchanged')
+  const replacement = fixture.build('reopened', ['1']).nodes[0]
+  const openError = errorOfCall(() => replacement.open())
+  t.equal(openError?.code, MONSTER_CORRUPT,
+    'certification and startup agree on the corruption classification')
+  t.end()
+})
 
 test('MonsterFt.certify rolls back a failed repair-state update', (t) => {
   const fixture = recoveryFixture(t, 'certify-rollback')
