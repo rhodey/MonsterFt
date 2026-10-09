@@ -568,6 +568,75 @@ for (const stage of ['delete', 'refresh']) {
   })
 }
 
+test('drain safely defers failed retention until reopening', async (t) => {
+  const fixture = clusterFixture(t, 'drain-retention-failure')
+  const { nodes } = fixture.build({ opts: keepOpts(2, 3) })
+  const leader = await openAndElect(nodes)
+  const follower = nodes[2]
+  const databasePath = fixture.paths.get(follower.id)
+  const draining = deferred()
+  const fatals = []
+  let original = null
+  let lock = null
+  follower.on('fatal', (err) => fatals.push(err))
+  t.teardown(() => {
+    if (lock !== null) {
+      lock.exec('ROLLBACK')
+      lock.close()
+    }
+  })
+
+  const prune = follower._monsterPrune
+  follower._monsterPrune = function() {
+    try {
+      return prune.call(this)
+    } catch (err) {
+      original = err
+      throw err
+    }
+  }
+  follower.once('sync', () => {
+    lock = new DatabaseSync(databasePath)
+    lock.exec('BEGIN IMMEDIATE')
+    // Start drain as SYNC application settles, before its pruning failure
+    // reaches the outer Raft fatal handler.
+    queueMicrotask(() => queueMicrotask(() => queueMicrotask(() => {
+      draining.resolve(follower.drainCmd())
+    })))
+  })
+
+  const result = await appendThroughSync(leader, toBuf({ key: 'retained', value: 42 }))
+  const drainError = await withTimeout(errorOf(draining.promise), 'drain after retention failure')
+  await waitApplied(nodes.slice(0, 2), result.syncSeq)
+  await withTimeout(follower._applyPrev, 'retention failure application settles')
+  lock.exec('ROLLBACK')
+  lock.close()
+  lock = null
+
+  t.equal(drainError, null, 'drain succeeds after the completed command')
+  t.ok(original instanceof ErrorWithCode, 'pruning throws a normalized SQLite error')
+  t.equal(original?.code, SQLITE_ERROR, 'the failed operation is a SQLite error')
+  t.equal(original?.message, 'DB1 retention database is locked',
+    'the error identifies the failed retention operation')
+  t.equal(original?.sqlCode, 5, 'the failure is native SQLITE_BUSY')
+  const diagnostics = fixture.errors.filter(({ id }) => id === follower.id)
+  t.deepEqual(diagnostics, [], 'normal drain may close without reporting the retention failure')
+  t.deepEqual(fatals, [], 'drain wins the race with the outer fatal handler')
+  t.notOk(follower.isOpen || follower.log.isOpen || follower.db !== null,
+    'drain closes both databases')
+
+  const saved = readPair(databasePath)
+  t.equal(saved.meta.applied_seq, result.syncSeq, 'the SYNC checkpoint remains durable')
+  t.equal(saved.meta.pending_cmd_seq, null, 'the command has no pending decision')
+  t.deepEqual(saved.rows.map(({ seq }) => seq), [0n, 1n, 2n],
+    'failed pruning leaves extra history, including the checkpoint entry')
+  const recovered = fixture.build({ opts: keepOpts(2, 3) }).nodes[2]
+  recovered.open()
+  t.equal(valueAt(recovered, 'retained'), 42, 'the completed application write survives')
+  t.deepEqual(raftSeqs(recovered), [1n, 2n], 'startup completes the deferred cleanup')
+  t.equal(recovered._applySeq, result.syncSeq, 'startup accepts the durable checkpoint')
+})
+
 test('failed SYNC checkpoint rolls back before pruning and is replayed on restart', async (t) => {
   const fixture = clusterFixture(t, 'checkpoint-failure')
   let commandCalls = 0
