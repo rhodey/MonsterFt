@@ -750,22 +750,15 @@ class MonsterNode extends RaftNode {
   }
 
   async _monsterAppendEntry(entry) {
-    const term = this.term
-    try {
-      if (entry.type === CMD) {
-        // matchIndex may be interesting to the user so add it here
-        const matchIndex = this.nodes.map((id) => {
-          if (id === this.id) { return this.seq }
-          return this._replication.get(id)?.matchIndex ?? -1n
-        })
-        entry = { ...entry, matchIndex }
-      }
-      return await super.append(pack(entry))
-    } catch (err) {
-      // Let another leader resolve an append whose outcome is uncertain.
-      this._monsterStepDownForTerm(term)
-      throw err
+    if (entry.type === CMD) {
+      // matchIndex may be interesting to the user so add it here
+      const matchIndex = this.nodes.map((id) => {
+        if (id === this.id) { return this.seq }
+        return this._replication.get(id)?.matchIndex ?? -1n
+      })
+      entry = { ...entry, matchIndex }
     }
+    return super.append(pack(entry))
   }
 
   async _monsterAwaitDecision(command, term=null) {
@@ -849,11 +842,11 @@ class MonsterNode extends RaftNode {
       this._monsterAssertAvailable()
       this._monsterAssertLeader()
       const term = this.term
-      const appended = await this._monsterAppendEntry({ type: CMD, items: cmdItems })
-      this._throwIfClosing()
-      const [cmdSeq, applied] = appended
-      const command = { cmdSeq, localDigest: applied.localDigest }
       try {
+        const appended = await this._monsterAppendEntry({ type: CMD, items: cmdItems })
+        this._throwIfClosing()
+        const [cmdSeq, applied] = appended
+        const command = { cmdSeq, localDigest: applied.localDigest }
         const decision = await this._monsterAwaitDecision(command, term)
         const result = { cmdSeq, outcomes: applied.outcomes }
         if (decision.leaderAgrees) {
@@ -874,12 +867,8 @@ class MonsterNode extends RaftNode {
         )
         return { cmdSeq, syncSeq }
       } catch (err) {
-        if (this._closing) { throw err }
-        const pending = await this._monsterRunDbGetCmd(command.cmdSeq)
-        if (pending !== null) {
-          // let another leader take over CMD to SYNC
-          this._monsterStepDownForTerm(term)
-        }
+        // Let another leader resolve an append whose outcome is uncertain.
+        this._monsterStepDownForTerm(term)
         throw err
       }
     }
