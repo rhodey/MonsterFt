@@ -577,6 +577,11 @@ class MonsterNode extends RaftNode {
           // user callback gets called with seq 0 (always a no-op) to allow SQL schema setup
           await this._monsterUserApply(db, null, term, seq, 0, null)
           this._throwIfClosing()
+          if (!db.isTransaction) {
+            throw new Err.ErrorWithCode(
+              'DB2 seq0 transaction ended', Err.SQLITE_ERROR,
+            )
+          }
           this._monsterAdvanceApplied(db, seq, entryHash)
         })
         this._throwIfClosing()

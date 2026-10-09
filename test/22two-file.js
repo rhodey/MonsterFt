@@ -787,6 +787,120 @@ test('sequence-zero bootstrap failure rolls back and closes the node',
     replacement.close()
   })
 
+for (const asynchronous of [false, true]) {
+  const mode = asynchronous ? 'async' : 'sync'
+  test(`caught ${mode} bootstrap rollback leaves initialization retryable`,
+    async (t) => {
+      const paths = new Map(ids.map((id) => [
+        id, uniquePath(`bootstrap-caught-full-${mode}-${id}`),
+      ]))
+      const nodes = []
+      const bus = makeBus()
+      const fatals = []
+      const errors = []
+      const failed = deferred()
+      let attempts = 0
+      let original = null
+      let transactionAfterError = null
+      const build = (id) => {
+        const apply = (db, buf, term, seq) => {
+          if (seq !== 0n) { return applyApp(db, buf, term, seq) }
+          initializeApp(db)
+          if (id !== '3' || ++attempts !== 1) { return }
+          const { page_count: pages } = db.prepare('PRAGMA page_count').get()
+          db.exec(`PRAGMA max_page_count = ${pages}`)
+          try {
+            db.exec(`
+              INSERT INTO two_file_items VALUES (hex(zeroblob(1048576)), 1)
+            `)
+          } catch (err) {
+            original = err
+            transactionAfterError = db.isTransaction
+          }
+        }
+        const node = new MonsterFt(id, ids,
+          (to, msg) => bus.send(to, id, msg), paths.get(id), {
+            electionTimeout: Number(id) * 80,
+            pingTimeout: 300,
+            appendTimeout: 5_000,
+            apply: asynchronous ? async (...args) => {
+              const result = apply(...args)
+              await Promise.resolve()
+              return result
+            } : apply,
+          })
+        node.on('warn', noop)
+        node.on('fatal', (err) => fatals.push({ id, err }))
+        node.on('error', (err) => {
+          errors.push({ id, err })
+          if (id === '3') { failed.resolve(err) }
+        })
+        bus.register(node)
+        nodes.push(node)
+        return node
+      }
+      t.teardown(() => {
+        closeNodesQuietly(nodes)
+        for (const databasePath of paths.values()) { removePair(databasePath) }
+      })
+
+      const initial = ids.map(build)
+      openNodes(initial)
+      const failure = await withTimeout(failed.promise, 'caught bootstrap rollback')
+      t.equal(original?.errcode, 13, 'the callback catches native SQLITE_FULL')
+      t.equal(transactionAfterError, false, 'SQLite has rolled back the transaction')
+      t.equal(failure.code, APPLY_ERROR, 'the missing transaction is an application failure')
+      t.equal(failure.message, '(apply) DB2 seq0 transaction ended',
+        'the diagnostic identifies the lost bootstrap transaction')
+      t.deepEqual(fatals, [{ id: '3', err: failure }], 'fatal is emitted once')
+      t.deepEqual(errors, [{ id: '3', err: failure }], 'error is emitted once')
+      t.notOk(initial[2].isOpen, 'the failed node closes')
+      t.equal(initial[2].db, null, 'fatal cleanup releases DB2')
+      t.notOk(initial[2].log.isOpen, 'fatal cleanup releases DB1')
+
+      const databasePath = paths.get('3')
+      const db = new DatabaseSync(`${databasePath}2`, {
+        readOnly: true, readBigInts: true,
+      })
+      try {
+        const meta = db.prepare(`
+          SELECT applied_seq, applied_entry_hash, pending_cmd_seq,
+            pending_local_digest FROM monsterft_meta WHERE id = 1
+        `).get()
+        t.deepEqual({ ...meta }, {
+          applied_seq: -1n,
+          applied_entry_hash: null,
+          pending_cmd_seq: null,
+          pending_local_digest: null,
+        }, 'the durable checkpoint and pending state remain uninitialized')
+        t.deepEqual(tableNames(db), ['monsterft_meta'],
+          'the failed transaction leaves no application schema')
+      } finally {
+        db.close()
+      }
+
+      const replacement = build('3')
+      replacement.open()
+      await withTimeout(replacement.awaitLeader(true), 'replacement committed leader')
+      const synced = nextSync(replacement)
+      const [seq, result] = await withTimeout(
+        replacement.append(toBuf({ key: 'bootstrap-retry', value: 42 })),
+        'append after bootstrap retry',
+      )
+      await withTimeout(synced, 'replacement command SYNC')
+      t.equal(attempts, 2, 'a fresh instance reruns initialization')
+      t.deepEqual(result, { key: 'bootstrap-retry', value: 42 },
+        'a public append succeeds after the retry')
+      t.equal(valueAtPath(databasePath, 'bootstrap-retry'), 42,
+        'the application write is durable in the recreated schema')
+      const meta = monsterMetaAtPath(databasePath)
+      t.ok(meta.applied_seq > seq, 'the durable checkpoint includes command SYNC')
+      t.equal(meta.pending_cmd_seq, null, 'SYNC clears the pending command')
+      t.equal(meta.pending_local_digest, null, 'SYNC clears the pending digest')
+      t.equal(errors.length, 1, 'recovery and later commands emit no further errors')
+    })
+}
+
 test('DB2 open failure closes DB1 and requires a fresh object',
   async (t) => {
     const databasePath = uniquePath('db2-open-retry')
