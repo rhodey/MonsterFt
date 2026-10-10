@@ -6,7 +6,7 @@ import { unpack } from 'msgpackr'
 import {
   APPLY_ERROR,
   ErrorWithCode,
-  LOG_CORRUPT,
+  MONSTER_CORRUPT,
   SQLITE_ERROR,
   REPAIR_QUORUM_IMPOSSIBLE,
 } from '../src/error.js'
@@ -302,8 +302,8 @@ test('retention checks use cached state and delete in exact applied batches', as
       }
       return prepare(sql)
     }
-    const readHead = node.log._readHead.bind(node.log)
-    node.log._readHead = () => {
+    const readHead = node.log.readHead.bind(node.log)
+    node.log.readHead = () => {
       refreshes.set(node.id, refreshes.get(node.id) + 1)
       return readHead()
     }
@@ -533,7 +533,7 @@ for (const stage of ['delete', 'refresh']) {
       }
     } else {
       // Simulate failure after SQLite commits deletion but before cached state refreshes.
-      leader.log._readHead = () => { throw failure }
+      leader.log.readHead = () => { throw failure }
     }
     const appended = errorOf(leader.append(toBuf({ key: 'completed', value: 2 })))
     const err = await withTimeout(fatal.promise, `${stage} fatal`)
@@ -567,6 +567,75 @@ for (const stage of ['delete', 'refresh']) {
       'the recovered cluster accepts further commands')
   })
 }
+
+test('drain safely defers failed retention until reopening', async (t) => {
+  const fixture = clusterFixture(t, 'drain-retention-failure')
+  const { nodes } = fixture.build({ opts: keepOpts(2, 3) })
+  const leader = await openAndElect(nodes)
+  const follower = nodes[2]
+  const databasePath = fixture.paths.get(follower.id)
+  const draining = deferred()
+  const fatals = []
+  let original = null
+  let lock = null
+  follower.on('fatal', (err) => fatals.push(err))
+  t.teardown(() => {
+    if (lock !== null) {
+      lock.exec('ROLLBACK')
+      lock.close()
+    }
+  })
+
+  const prune = follower._monsterPrune
+  follower._monsterPrune = function() {
+    try {
+      return prune.call(this)
+    } catch (err) {
+      original = err
+      throw err
+    }
+  }
+  follower.once('sync', () => {
+    lock = new DatabaseSync(databasePath)
+    lock.exec('BEGIN IMMEDIATE')
+    // Start drain as SYNC application settles, before its pruning failure
+    // reaches the outer Raft fatal handler.
+    queueMicrotask(() => queueMicrotask(() => queueMicrotask(() => {
+      draining.resolve(follower.drainCmd())
+    })))
+  })
+
+  const result = await appendThroughSync(leader, toBuf({ key: 'retained', value: 42 }))
+  const drainError = await withTimeout(errorOf(draining.promise), 'drain after retention failure')
+  await waitApplied(nodes.slice(0, 2), result.syncSeq)
+  await withTimeout(follower._applyPrev, 'retention failure application settles')
+  lock.exec('ROLLBACK')
+  lock.close()
+  lock = null
+
+  t.equal(drainError, null, 'drain succeeds after the completed command')
+  t.ok(original instanceof ErrorWithCode, 'pruning throws a normalized SQLite error')
+  t.equal(original?.code, SQLITE_ERROR, 'the failed operation is a SQLite error')
+  t.equal(original?.message, 'DB1 retention database is locked',
+    'the error identifies the failed retention operation')
+  t.equal(original?.sqlCode, 5, 'the failure is native SQLITE_BUSY')
+  const diagnostics = fixture.errors.filter(({ id }) => id === follower.id)
+  t.deepEqual(diagnostics, [], 'normal drain may close without reporting the retention failure')
+  t.deepEqual(fatals, [], 'drain wins the race with the outer fatal handler')
+  t.notOk(follower.isOpen || follower.log.isOpen || follower.db !== null,
+    'drain closes both databases')
+
+  const saved = readPair(databasePath)
+  t.equal(saved.meta.applied_seq, result.syncSeq, 'the SYNC checkpoint remains durable')
+  t.equal(saved.meta.pending_cmd_seq, null, 'the command has no pending decision')
+  t.deepEqual(saved.rows.map(({ seq }) => seq), [0n, 1n, 2n],
+    'failed pruning leaves extra history, including the checkpoint entry')
+  const recovered = fixture.build({ opts: keepOpts(2, 3) }).nodes[2]
+  recovered.open()
+  t.equal(valueAt(recovered, 'retained'), 42, 'the completed application write survives')
+  t.deepEqual(raftSeqs(recovered), [1n, 2n], 'startup completes the deferred cleanup')
+  t.equal(recovered._applySeq, result.syncSeq, 'startup accepts the durable checkpoint')
+})
 
 test('failed SYNC checkpoint rolls back before pruning and is replayed on restart', async (t) => {
   const fixture = clusterFixture(t, 'checkpoint-failure')
@@ -653,7 +722,7 @@ test('startup validates the checkpoint before deleting any history', async (t) =
     .run(Buffer.alloc(32))
   closeNodesQuietly(first.nodes)
   const restarted = fixture.build({ opts: keepOpts() }).nodes[0]
-  t.throws(() => restarted.open(), (err) => err.code === LOG_CORRUPT,
+  t.throws(() => restarted.open(), (err) => err.code === MONSTER_CORRUPT,
     'a checkpoint mismatch rejects startup')
   t.deepEqual(readPair(fixture.paths.get(leader.id)).rows.map(({ seq }) => seq),
     [0n, 1n, 2n, 3n, 4n], 'checkpoint validation fails before deletion')
@@ -679,28 +748,90 @@ test('repair state one retains its fence while no-ops continue local pruning', a
   t.equal(err?.code, REPAIR_QUORUM_IMPOSSIBLE, 'the leader remains command-fenced')
 })
 
-test('failed election no-op steps down without retrying in the same term', async (t) => {
-  const fixture = clusterFixture(t, 'election-failure')
-  const { nodes } = fixture.build({ opts: keepOpts() })
-  const candidate = nodes[0]
-  const failure = new Error('injected election replication failure')
-  const markers = []
-  candidate._appendToSelfAndFollowers = (data) => {
-    markers.push(data)
-    return Promise.reject(failure)
-  }
-  nodes.forEach((node) => node.open())
-  candidate._voteForSelf()
-  await waitFor(() => fixture.warnings.some(({ err }) => err === failure), 'election warning')
-  await waitFor(() => candidate.state === 'follower', 'failed election stepdown')
-  await sleep(50)
-  t.deepEqual(markers, [Buffer.alloc(0)], 'one ordinary election no-op is attempted')
-  t.ok(candidate.isOpen, 'the failed election is nonfatal')
-  const replacement = await electOpen(nodes, nodes[1])
-  await waitApplied(nodes, 0n)
-  t.equal(replacement._commitTerm, replacement.term, 'a replacement leader becomes ready')
-  t.deepEqual(raftTypes(replacement), ['noop'], 'the replacement also uses an ordinary no-op')
-})
+for (const pending of [false, true]) {
+  test(`failed election no-op retries in the same term${pending ? ' with a pending CMD' : ''}`,
+    async (t) => {
+      const fixture = clusterFixture(t, `election-retry-${pending}`)
+      const calls = []
+      const apply = (db, buf, term, seq) => {
+        if (buf !== null) { calls.push(toObj(buf).key) }
+        return applyApp(db, buf, term, seq)
+      }
+      const { nodes } = fixture.build({
+        apply,
+        opts: { ...keepOpts(6, 10), pingTimeout: 500, appendTimeout: 60 },
+      })
+      let pendingSeq = null
+      if (pending) {
+        const leader = await openAndElect(nodes)
+        const [seq] = await leader._monsterAppendEntry({
+          type: 'cmd', items: [toBuf({ key: 'pending', value: 1 })],
+        })
+        pendingSeq = seq
+        await waitApplied(nodes, pendingSeq)
+      } else {
+        nodes.forEach((node) => node.open())
+      }
+      const candidate = nodes[pending ? 1 : 0]
+      const beforeSeq = candidate.seq
+      const beforeCalls = calls.length
+      let blockData = true
+      const send = fixture.bus.send.bind(fixture.bus)
+      fixture.bus.send = (to, from, msg) => {
+        // Keep heartbeats working while election entries cannot replicate.
+        if (blockData && from === candidate.id &&
+            msg.type === 'append' && msg.data !== undefined) {
+          return undefined
+        }
+        return send(to, from, msg)
+      }
+
+      candidate._voteForSelf()
+      const term = candidate.term
+      const ready = candidate._leaderReady
+      const queued = candidate.append(toBuf({ key: 'queued', value: 2 }))
+      queued.catch(noop)
+      await waitFor(() => candidate.seq >= beforeSeq + 2n, 'election no-op retry')
+      t.equal(candidate.state, 'leader', 'a failed no-op does not force stepdown')
+      t.equal(candidate.term, term, 'the retry uses the same term')
+      t.equal(candidate._leaderReady, ready, 'the retry preserves the readiness wait')
+      t.notOk(ready.settled, 'leadership is not ready before an entry commits')
+      t.equal(calls.length, beforeCalls, 'the queued command waits for readiness and recovery')
+      t.ok(fixture.warnings.some(({ id, err }) => {
+        return id === candidate.id && /append timeout|append not commit/.test(err.message)
+      }), 'failed replication emits a warning')
+      t.ok(raftTypes(candidate).slice(Number(beforeSeq + 1n)).every((type) => type === 'noop'),
+        'retries append only ordinary no-ops')
+      t.equal(candidate.log.begin, 0n, 'uncommitted retries do not trigger pruning')
+      if (pending) {
+        t.equal(pendingAt(candidate)?.cmdSeq, pendingSeq, 'the pending CMD survives retries')
+      }
+
+      blockData = false
+      const [cmdSeq, result] = await withTimeout(queued, 'queued command after retry')
+      await candidate._monsterProtocol
+      await waitApplied(nodes, cmdSeq + 1n)
+      t.deepEqual(result, { key: 'queued', value: 2 }, 'the queued command succeeds')
+      t.equal(candidate._commitTerm, term, 'the same term becomes ready')
+      t.equal(candidate.state, 'leader', 'the original candidate remains leader')
+      t.equal(candidate.term, term, 'recovery needs no additional election')
+      t.equal(calls.filter((key) => key === 'queued').length, nodes.length,
+        'each node applies the queued command once')
+      if (pending) {
+        t.equal(calls.filter((key) => key === 'pending').length, nodes.length,
+          'recovery does not reapply the pending command')
+      }
+      t.ok(nodes.every((node) => pendingAt(node) === null), 'SYNC clears pending state')
+
+      for (let index = 0; index < 3; index++) {
+        const later = await appendThroughSync(candidate, toBuf({ key: 'later', value: index }))
+        await waitApplied(nodes, later.syncSeq)
+      }
+      t.ok(nodes.every((node) => node.log.begin > 0n), 'local pruning continues after recovery')
+      t.ok(nodes.every((node) => retainedCount(node) < 10n), 'applied history stays below trigger')
+      t.deepEqual(fixture.errors, [], 'retries and subsequent commands emit no fatal errors')
+    })
+}
 
 test('failed CMD replication preserves history and steps down without retry', async (t) => {
   const fixture = clusterFixture(t, 'command-failure')

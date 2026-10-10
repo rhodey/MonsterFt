@@ -6,9 +6,12 @@ import {
   ARGUMENT_ILLEGAL,
   DRAINING,
   ErrorWithCode,
+  MONSTER_CORRUPT,
+  NOT_LEADER,
   REPAIR_OUTSIDE_AGREEMENT,
   REPAIR_QUORUM_IMPOSSIBLE,
   SQLITE_ERROR,
+  TERM_DIFF,
 } from '../src/error.js'
 import { MonsterFt, SQLiteLog } from '../src/index.js'
 import { databasePath, sleep } from './util.js'
@@ -476,6 +479,137 @@ test('MonsterFt retains pending reports across higher-term leader recovery',
       'the applied SYNC clears the recovered report state')
   })
 
+for (const waitingState of ['follower', 'candidate']) {
+  test(`MonsterFt rejects queued CMD recovery starting as ${waitingState}`,
+    async (t) => {
+      const fixture = recoveryFixture(t, `queued-recovery-${waitingState}`)
+      fixture.clear()
+      const cluster = fixture.build('first')
+      const leader = await elect(cluster.nodes)
+      await leader._monsterLeaderSync
+      const firstTerm = leader.term
+      const firstError = errorOf(leader.append(toBuf({ key: 'first', value: 1 })))
+      const firstCmdSeq = await waitForUnresolvedCmd(cluster.nodes)
+      const firstProtocol = leader._monsterProtocol
+      const secondData = toBuf({ key: 'second', value: 2 })
+      const secondError = errorOf(leader.append(secondData))
+
+      const send = leader.send
+      const voteRequests = []
+      if (waitingState === 'candidate') {
+        leader.send = (to, msg) => {
+          if (msg.type === 'vote_request') {
+            voteRequests.push([to, msg])
+            return
+          }
+          return send(to, msg)
+        }
+      }
+
+      // This reaction wins the election synchronously after the queued run
+      // starts, before an await of the completed old recovery could resume.
+      const reelection = firstProtocol.then(() => {
+        if (waitingState === 'candidate') {
+          leader.send = send
+          for (const [to, msg] of voteRequests) { send(to, msg) }
+        } else {
+          leader._voteForSelf()
+        }
+      })
+      if (waitingState === 'candidate') {
+        leader._voteForSelf()
+      } else {
+        leader._toFollower(null, true)
+      }
+      t.equal(leader.state, waitingState,
+        'the queued command starts before the new election succeeds')
+
+      const staleError = await withTimeout(secondError, 'stale queued command')
+      await withTimeout(reelection, 'queued command reelection')
+      await withTimeout(firstError, 'interrupted first command')
+      t.equal(staleError?.code, NOT_LEADER,
+        'the queued command rejects before waiting for an old recovery')
+      t.equal(leader.term, firstTerm + 1n, 'the same node wins the next term')
+      t.equal(leader.state, 'leader',
+        'rejecting the stale queued command leaves the new leader in place')
+      const allOpen = cluster.nodes.every((node) => node.isOpen)
+      t.ok(allOpen, 'every replica stays open after the stale command rejects')
+      if (!allOpen) { return }
+
+      for (const node of cluster.nodes) {
+        t.equal(pendingAt(node).pending_cmd_seq, firstCmdSeq,
+          `${node.id} still has only the first CMD pending`)
+        t.equal(valueAt(node, 'second'), null,
+          `${node.id} has not applied the stale queued command`)
+      }
+
+      fixture.allowOutcomes()
+      const firstSyncSeq = await waitForSync(cluster.nodes, firstCmdSeq)
+      await withTimeout(leader._monsterLeaderSync, 'new term recovery')
+      const [secondCmdSeq, result] = await withTimeout(
+        leader.append(secondData), 'retried second command',
+      )
+      await waitForSync(cluster.nodes, secondCmdSeq)
+      t.ok(secondCmdSeq > firstSyncSeq,
+        'the retried command follows the SYNC that completes leader recovery')
+      t.deepEqual(result, { key: 'second', value: 2 },
+        'the retried command returns its normal application result')
+
+      for (const node of cluster.nodes) {
+        const records = raftBytesAtPath(fixture.paths.get(node.id))
+          .filter(({ entry }) => entry.length > 8)
+          .map(({ seq, entry }) => {
+            const record = unpack(entry.subarray(8))
+            return [record.type, record.cmdSeq ?? seq]
+          })
+        t.deepEqual(records, [
+          ['cmd', firstCmdSeq], ['sync', firstCmdSeq],
+          ['cmd', secondCmdSeq], ['sync', secondCmdSeq],
+        ], `${node.id} retains correctly ordered CMD and SYNC records`)
+        t.equal(cluster.applyCalls.filter(({ id, cmd }) => {
+          return id === node.id && cmd?.key === 'first'
+        }).length, 1, `${node.id} does not reapply the recovered command`)
+        t.equal(cluster.applyCalls.filter(({ id, cmd }) => {
+          return id === node.id && cmd?.key === 'second'
+        }).length, 1, `${node.id} applies the retried command exactly once`)
+      }
+      t.deepEqual(fixture.errors, [], 'recovery and retry emit no errors')
+    })
+}
+
+test('MonsterFt rejects a leadership change while queued CMD awaits recovery',
+  async (t) => {
+    const fixture = recoveryFixture(t, 'queued-recovery-term-change')
+    fixture.clear()
+    fixture.allowOutcomes()
+    const cluster = fixture.build('first')
+    const leader = await elect(cluster.nodes)
+    await leader._monsterLeaderSync
+    const firstTerm = leader.term
+    const data = toBuf({ key: 'queued', value: 3 })
+    const rejected = errorOf(leader.append(data))
+
+    // The queue starts in the first term, then yields at the completed
+    // recovery promise while a synchronous election starts the next term.
+    queueMicrotask(() => leader._voteForSelf())
+    const err = await withTimeout(rejected, 'queued recovery term change')
+    t.equal(err?.code, TERM_DIFF,
+      'the command rejects if leadership changed while awaiting recovery')
+    t.equal(leader.term, firstTerm + 1n, 'the node wins a new leader term')
+    t.equal(leader.state, 'leader', 'the stale command does not step it down')
+    t.equal(cluster.applyCalls.filter(({ cmd }) => cmd !== null).length, 0,
+      'no replica applies the rejected command')
+
+    await withTimeout(leader._monsterLeaderSync, 'replacement recovery')
+    const [cmdSeq, result] = await withTimeout(
+      leader.append(data), 'command after replacement recovery',
+    )
+    await waitForSync(cluster.nodes, cmdSeq)
+    t.deepEqual(result, { key: 'queued', value: 3 },
+      'the new leader accepts the retried command after recovery')
+    t.deepEqual(fixture.errors, [], 'the leadership change emits no errors')
+  })
+
 test('MonsterFt drainCmd closes an idle follower without a protocol record',
   async (t) => {
     const fixture = recoveryFixture(t, 'drain-local-only')
@@ -845,6 +979,36 @@ test('MonsterFt.certify accepts a healthy donor and validates its override flag'
       'healthy certification preserves the Raft log')
     t.end()
   })
+
+test('MonsterFt.certify classifies a missing metadata row as Monster corruption', (t) => {
+  const fixture = recoveryFixture(t, 'certify-missing-metadata')
+  fixture.clear()
+  const donor = fixture.build('initial', ['1']).nodes[0]
+  donor.open()
+  donor.close()
+
+  const donorPath = fixture.paths.get(donor.id)
+  const beforeLog = fs.readFileSync(donorPath)
+  const db = new DatabaseSync(monsterPath(donorPath))
+  db.exec('DELETE FROM monsterft_meta WHERE id = 1')
+  db.close()
+
+  for (const allowUnresolved of [false, true]) {
+    const err = errorOfCall(() => MonsterFt.certify(donorPath, allowUnresolved))
+    t.ok(err instanceof ErrorWithCode, 'missing metadata throws a coded error')
+    t.equal(err?.code, MONSTER_CORRUPT,
+      `missing metadata uses MONSTER_CORRUPT with override ${allowUnresolved}`)
+    t.equal(err?.message, 'MonsterFt certify metadata row is missing',
+      'the error identifies the missing DB2 metadata row')
+  }
+  t.deepEqual(fs.readFileSync(donorPath), beforeLog,
+    'failed certification leaves DB1 unchanged')
+  const replacement = fixture.build('reopened', ['1']).nodes[0]
+  const openError = errorOfCall(() => replacement.open())
+  t.equal(openError?.code, MONSTER_CORRUPT,
+    'certification and startup agree on the corruption classification')
+  t.end()
+})
 
 test('MonsterFt.certify rolls back a failed repair-state update', (t) => {
   const fixture = recoveryFixture(t, 'certify-rollback')

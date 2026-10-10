@@ -5,6 +5,7 @@ import { pack, unpack } from 'msgpackr'
 import {
   ErrorWithCode,
   LOG_CORRUPT,
+  MONSTER_CORRUPT,
   REPAIR_OUTSIDE_AGREEMENT,
   REPAIR_QUORUM_IMPOSSIBLE,
   RPC_ILLEGAL,
@@ -353,7 +354,7 @@ const raftRecordAtPath = (databasePath, seq) => {
 
 const headRecord = (node) => unpack(node.head)
 
-test('MonsterFt classifies illegal SYNC entries as log corruption', (t) => {
+test('MonsterFt classifies invalid SYNC entries as Monster corruption', (t) => {
   const node = { nodes: ids, quorum: 2 }
   const valid = {
     cmdSeq: 0n,
@@ -363,18 +364,18 @@ test('MonsterFt classifies illegal SYNC entries as log corruption', (t) => {
     digest: Buffer.alloc(32),
   }
   const invalid = [
-    [{ ...valid, cmdSeq: -1n }, 'SYNC entry cmdSeq is illegal'],
-    [{ ...valid, quorum: 1 }, 'SYNC entry quorum is illegal'],
-    [{ ...valid, agree: ['1'] }, 'SYNC entry agree has illegal length'],
-    [{ ...valid, agree: ['2', '1'] }, 'SYNC entry agree has illegal items'],
+    [{ ...valid, cmdSeq: -1n }, 'SYNC entry cmdSeq is corrupt'],
+    [{ ...valid, quorum: 1 }, 'SYNC entry quorum is corrupt'],
+    [{ ...valid, agree: ['1'] }, 'SYNC entry agree has corrupt length'],
+    [{ ...valid, agree: ['2', '1'] }, 'SYNC entry agree has corrupt id'],
     [{ ...valid, disagree: null },
-      'SYNC entry disagree has illegal length'],
+      'SYNC entry disagree has corrupt length'],
     [{ ...valid, disagree: ['1', '1'] },
-      'SYNC entry disagree has illegal items'],
+      'SYNC entry disagree has corrupt id'],
     [{ ...valid, quorum: false, agree: ['1'] },
       'SYNC entry quorum:false agree must be empty'],
     [{ ...valid, digest: Buffer.alloc(31) },
-      'SYNC entry digest is illegal'],
+      'SYNC entry digest is corrupt'],
   ]
 
   for (const [entry, message] of invalid) {
@@ -386,13 +387,13 @@ test('MonsterFt classifies illegal SYNC entries as log corruption', (t) => {
     }
     t.ok(err instanceof ErrorWithCode, `${message} throws ErrorWithCode`)
     t.equal(err.message, message, `${message} preserves its message`)
-    t.equal(err.code, LOG_CORRUPT, `${message} uses LOG_CORRUPT`)
+    t.equal(err.code, MONSTER_CORRUPT, `${message} uses MONSTER_CORRUPT`)
     t.equal(err.sqlCode, null, `${message} has no SQLite error code`)
   }
   t.end()
 })
 
-test('MonsterFt classifies a SYNC without its command as log corruption',
+test('MonsterFt classifies a SYNC without its command as Monster corruption',
   async (t) => {
     const target = {
       nodes: ids,
@@ -412,43 +413,48 @@ test('MonsterFt classifies a SYNC without its command as log corruption',
     )
     t.ok(err instanceof ErrorWithCode,
       'the missing SYNC command throws ErrorWithCode')
-    t.equal(err.code, LOG_CORRUPT,
-      'the missing SYNC command uses LOG_CORRUPT')
+    t.equal(err.code, MONSTER_CORRUPT,
+      'the missing SYNC command uses MONSTER_CORRUPT')
     t.equal(err.sqlCode, null,
       'the missing SYNC command has no SQLite error code')
   })
 
-test('MonsterFt classifies an illegal entry type as log corruption',
+test('MonsterFt classifies an invalid entry type as Monster corruption',
   async (t) => {
     const err = await rejects(
       t,
       MonsterFt.prototype._monsterApplyEntry.call(
         {}, { type: 'invalid' }, 0n, 0n, false, Buffer.alloc(32),
       ),
-      /^entry type is illegal$/,
-      'an illegal entry type is rejected',
+      /^entry type is corrupt$/,
+      'an invalid entry type is rejected',
     )
     t.ok(err instanceof ErrorWithCode,
-      'an illegal entry type throws ErrorWithCode')
-    t.equal(err.code, LOG_CORRUPT,
-      'an illegal entry type uses LOG_CORRUPT')
+      'an invalid entry type throws ErrorWithCode')
+    t.equal(err.code, MONSTER_CORRUPT,
+      'an invalid entry type uses MONSTER_CORRUPT')
     t.equal(err.sqlCode, null,
-      'an illegal entry type has no SQLite error code')
+      'an invalid entry type has no SQLite error code')
   })
 
 test('MonsterFt normalizes DB2 rollback failures', async (t) => {
   const primary = new ErrorWithCode('primary failure', LOG_CORRUPT)
   const rollbackFailure = new Error('injected rollback failure')
   const fatals = []
+  const errors = []
   const target = {
     _closing: false,
     _throwIfClosing() {},
+    _emitSafe(type, err) {
+      errors.push({ type, err })
+    },
     _monsterFatalError(err) {
       fatals.push(err)
       return err
     },
   }
   const db = {
+    isTransaction: true,
     exec(sql) {
       if (sql === 'ROLLBACK') { throw rollbackFailure }
     },
@@ -463,6 +469,8 @@ test('MonsterFt normalizes DB2 rollback failures', async (t) => {
     'the transaction preserves its primary failure',
   )
   t.equal(err, primary, 'the primary failure keeps its identity')
+  t.deepEqual(errors, [{ type: 'error', err: primary }],
+    'the original coded error is also surfaced on the error channel')
   t.equal(fatals.length, 1, 'the rollback failure is reported once')
   t.ok(fatals[0] instanceof ErrorWithCode,
     'the rollback failure uses ErrorWithCode')
@@ -601,6 +609,115 @@ test('MonsterFt uses one constrained singleton bookkeeping table', (t) => {
     repair_state: 0n,
   }, 'failed constraint checks preserve the seeded metadata row')
   t.end()
+})
+
+test('MonsterFt rejects invalid stored repair states before starting Raft', (t) => {
+  for (const state of [-1n, 3n, 9_223_372_036_854_775_807n]) {
+    const fixture = makeFixture(t, `invalid-repair-state-${state}`)
+    fixture.reset()
+    const original = fixture.build().nodes[0]
+    original.open()
+    original.db.exec('PRAGMA ignore_check_constraints = ON')
+    original.db.prepare('UPDATE monsterft_meta SET repair_state = ? WHERE id = 1')
+      .run(state)
+    original.close()
+
+    const { nodes, messages } = fixture.build()
+    const restored = nodes[0]
+    let err = null
+    try {
+      restored.open()
+    } catch (failure) {
+      err = failure
+    }
+    t.ok(err instanceof ErrorWithCode, `state ${state} throws ErrorWithCode`)
+    t.equal(err?.code, MONSTER_CORRUPT, `state ${state} reports DB2 corruption`)
+    t.equal(err?.message, 'stored repair state is corrupt',
+      `state ${state} identifies the invalid stored field`)
+    t.notOk(restored.isOpen || restored.log.isOpen || restored.db !== null,
+      `state ${state} closes both databases on startup failure`)
+    t.deepEqual(messages, [], `state ${state} sends no Raft messages`)
+  }
+  t.end()
+})
+
+test('MonsterFt validates pending metadata and checkpoint hashes when reopening', async (t) => {
+  const fixture = makeFixture(t, 'invalid-stored-metadata')
+  fixture.reset()
+  const first = fixture.build()
+  const leader = await openAndElect(first)
+  const checkpoint = leader.db.prepare(`
+    SELECT applied_seq, applied_entry_hash FROM monsterft_meta WHERE id = 1
+  `).get()
+  closeNodes(first.nodes)
+
+  const cases = [
+    ['orphan digest', 'pending_local_digest = zeroblob(32)',
+      'pending command metadata is incomplete'],
+    ['missing digest', 'pending_cmd_seq = 0',
+      'pending command metadata is incomplete'],
+    ['negative pending sequence', 'pending_cmd_seq = -1, pending_local_digest = zeroblob(32)',
+      'pending command sequence is corrupt'],
+    ['pending sequence ahead of checkpoint',
+      'pending_cmd_seq = applied_seq + 1, pending_local_digest = zeroblob(32)',
+      'pending command sequence is corrupt'],
+    ...[0, 31, 33].map((size) => [
+      `${size}-byte pending digest`,
+      `pending_cmd_seq = 0, pending_local_digest = zeroblob(${size})`,
+      'pending command digest is corrupt',
+    ]),
+    ['missing checkpoint hash', 'applied_entry_hash = NULL', 'applied entry hash is corrupt'],
+    ...[0, 31, 33].map((size) => [
+      `${size}-byte checkpoint hash`, `applied_entry_hash = zeroblob(${size})`,
+      'applied entry hash is corrupt',
+    ]),
+    ['initial checkpoint with a hash', 'applied_seq = -1',
+      'applied entry hash must be null for initial state'],
+    ['pending command before initial checkpoint',
+      'applied_seq = -1, applied_entry_hash = NULL, pending_cmd_seq = 0, pending_local_digest = zeroblob(32)',
+      'pending command sequence is corrupt'],
+    ['text pending sequence', "pending_cmd_seq = 'bad', pending_local_digest = zeroblob(32)",
+      'pending command sequence is corrupt', true],
+    ['text pending digest', "pending_cmd_seq = 0, pending_local_digest = 'bad'",
+      'pending command digest is corrupt', true],
+    ['text checkpoint hash', "applied_entry_hash = 'bad'", 'applied entry hash is corrupt', true],
+  ]
+  for (const [name, mutation, message, looseSchema] of cases) {
+    const db = new DatabaseSync(`${fixture.paths.get(leader.id)}2`)
+    try {
+      db.exec('PRAGMA ignore_check_constraints = ON')
+      if (looseSchema) {
+        db.exec(`
+          ALTER TABLE monsterft_meta RENAME TO old_meta;
+          CREATE TABLE monsterft_meta AS SELECT * FROM old_meta;
+          DROP TABLE old_meta;
+        `)
+      }
+      db.prepare(`
+        UPDATE monsterft_meta SET applied_seq = ?, applied_entry_hash = ?,
+          pending_cmd_seq = NULL, pending_local_digest = NULL WHERE id = 1
+      `).run(checkpoint.applied_seq, checkpoint.applied_entry_hash)
+      db.exec(`UPDATE monsterft_meta SET ${mutation} WHERE id = 1`)
+    } finally {
+      db.close()
+    }
+
+    const { nodes, messages, calls } = fixture.build()
+    const restored = nodes.find((node) => node.id === leader.id)
+    let err = null
+    try {
+      restored.open()
+    } catch (failure) {
+      err = failure
+    }
+    t.ok(err instanceof ErrorWithCode, `${name} throws ErrorWithCode`)
+    t.equal(err?.code, MONSTER_CORRUPT, `${name} reports DB2 corruption`)
+    t.equal(err?.message, message, `${name} identifies the invalid field`)
+    t.notOk(restored.isOpen || restored.log.isOpen || restored.db !== null,
+      `${name} closes both databases`)
+    t.deepEqual(messages, [], `${name} sends no Raft messages`)
+    t.deepEqual(calls, [], `${name} runs no application callbacks`)
+  }
 })
 
 test('MonsterFt classifies failed metadata mutations as SQLite errors',
@@ -1257,8 +1374,16 @@ test('MonsterFt requires repair when CMD patchsets prevent a digest quorum', asy
   const cmdSeq = leader.seq + 1n
 
   const syncEvents = new Map(cluster.nodes.map((node) => [node.id, []]))
+  const errors = new Map(cluster.nodes.map((node) => [node.id, []]))
+  const fatals = []
   cluster.nodes.forEach((node) => {
     node.on('sync', (event) => syncEvents.get(node.id).push(event))
+    node.on('fatal', (err) => fatals.push(err))
+    node.on('error', (err) => errors.get(node.id).push({
+      err,
+      metadata: metadataAtPath(fixture.paths.get(node.id)),
+      pending: cachedPendingAt(node),
+    }))
   })
   const err = await rejectsCode(t, leader.append(toBuf({
     key: 'no-quorum',
@@ -1273,7 +1398,7 @@ test('MonsterFt requires repair when CMD patchsets prevent a digest quorum', asy
     'the repair code carries the failure category')
   const syncSeq = cmdSeq + 1n
   await waitFor(() => cluster.nodes.every((node) => {
-    return node._applySeq >= syncSeq && syncEvents.get(node.id).length === 1
+    return node._applySeq >= syncSeq && errors.get(node.id).length === 1
   }), 'quorum-impossible SYNC propagation')
   const databasePath = fixture.paths.get(leader.id)
   const metadata = metadataAtPath(databasePath)
@@ -1302,7 +1427,19 @@ test('MonsterFt requires repair when CMD patchsets prevent a digest quorum', asy
       agree: [],
       disagree: ids,
     }], `node ${node.id} emits the quorum:false SYNC`)
+    const [{ err, metadata, pending }] = errors.get(node.id)
+    t.equal(err.code, REPAIR_QUORUM_IMPOSSIBLE,
+      `node ${node.id} reports the repair-required error`)
+    t.equal(metadata.repairState, 1n,
+      `node ${node.id} commits repair state before reporting the error`)
+    t.equal(metadata.appliedSeq, syncSeq,
+      `node ${node.id} commits the SYNC checkpoint before reporting the error`)
+    t.equal(metadata.pending, null,
+      `node ${node.id} durably clears the command before reporting the error`)
+    t.equal(pending, null,
+      `node ${node.id} clears its pending cache before reporting the error`)
   }
+  t.deepEqual(fatals, [], 'quorum-impossible errors do not enter the fatal path')
   t.ok(cluster.nodes.every((node) => node.isOpen),
     'quorum-impossible application leaves connected members online')
   t.equal(leaders(cluster.nodes)[0], leader,
@@ -1314,6 +1451,49 @@ test('MonsterFt requires repair when CMD patchsets prevent a digest quorum', asy
   t.equal(new Set(patchsets).size, 3,
     'the three substituted CMD patchsets produce distinct command digests')
 })
+
+test('MonsterFt safely reports quorum-impossible errors without listeners or when a listener closes',
+  async (t) => {
+    for (const closeOnError of [false, true]) {
+      const label = closeOnError ? 'closing listener' : 'no listeners'
+      const fixture = makeFixture(t, `quorum-error-${closeOnError}`)
+      const cluster = fixture.build({
+        patchsetTransform: ({ node }) => Buffer.from([Number(node.id)]),
+      })
+      const leader = await openAndElect(cluster)
+      const target = cluster.nodes[2]
+      const fatals = []
+      const errors = []
+      for (const node of cluster.nodes) {
+        node.removeAllListeners('error')
+        node.on('fatal', (err) => fatals.push(err))
+      }
+      if (closeOnError) {
+        target.on('error', (err) => {
+          errors.push(err)
+          target.close()
+        })
+      }
+      await rejectsCode(t, leader.append(toBuf({ key: label, value: 1 })),
+        REPAIR_QUORUM_IMPOSSIBLE, `${label}: the caller receives the repair error`)
+      await waitFor(() => cluster.nodes.every((node) => {
+        return node._monsterRepairState === 1
+      }), `${label}: repair propagation`)
+      await Promise.all(cluster.nodes.map((node) => node._applyPrev))
+      t.deepEqual(fatals, [], `${label}: application never enters the fatal path`)
+      t.ok(leader.isOpen && leader.state === 'leader',
+        `${label}: the leader stays available to replicate the decision`)
+      t.equal(target.isOpen, !closeOnError,
+        `${label}: only an explicit listener close shuts down the follower`)
+      if (closeOnError) {
+        t.deepEqual(errors.map((err) => err.code), [REPAIR_QUORUM_IMPOSSIBLE],
+          'the closing listener receives the repair error exactly once')
+        const metadata = metadataAtPath(fixture.paths.get(target.id))
+        t.equal(metadata.repairState, 1n, 'closing preserves the durable repair state')
+        t.equal(metadata.pending, null, 'closing preserves the durable command decision')
+      }
+    }
+  })
 
 test('MonsterFt requires one quorum to match the complete batch vector',
   async (t) => {
@@ -1503,27 +1683,27 @@ test('MonsterFt validates CMD matchIndex before application', async (t) => {
     {
       name: 'missing',
       record: { type: 'cmd', items },
-      pattern: /CMD entry matchIndex has illegal length/,
+      pattern: /CMD entry matchIndex has corrupt length/,
     },
     {
       name: 'wrong length',
       record: { type: 'cmd', items, matchIndex: [-1n, -1n] },
-      pattern: /CMD entry matchIndex has illegal length/,
+      pattern: /CMD entry matchIndex has corrupt length/,
     },
     {
       name: 'non-sequence',
       record: { type: 'cmd', items, matchIndex: [-1n, -1n, -1] },
-      pattern: /CMD entry matchIndex has illegal items/,
+      pattern: /CMD entry matchIndex has corrupt seq/,
     },
     {
       name: 'equal sequence',
       record: { type: 'cmd', items, matchIndex: [-1n, -1n, 1n] },
-      pattern: /CMD entry matchIndex has illegal items/,
+      pattern: /CMD entry matchIndex has corrupt seq/,
     },
     {
       name: 'greater sequence',
       record: { type: 'cmd', items, matchIndex: [-1n, -1n, 2n] },
-      pattern: /CMD entry matchIndex has illegal items/,
+      pattern: /CMD entry matchIndex has corrupt seq/,
     },
     {
       name: 'empty items',
@@ -1546,8 +1726,8 @@ test('MonsterFt validates CMD matchIndex before application', async (t) => {
     )
     t.ok(err instanceof ErrorWithCode,
       `${name} CMD corruption throws ErrorWithCode`)
-    t.equal(err.code, LOG_CORRUPT,
-      `${name} CMD corruption uses LOG_CORRUPT`)
+    t.equal(err.code, MONSTER_CORRUPT,
+      `${name} CMD corruption uses MONSTER_CORRUPT`)
     t.equal(err.sqlCode, null,
       `${name} CMD corruption has no SQLite error code`)
   }
@@ -1992,6 +2172,46 @@ test('MonsterFt ignores an OUTCOME queued behind its command SYNC',
       'the replacement report retains its authoritative digest',
     )
   })
+
+test('MonsterFt reports quorum-impossible recovery without an active caller', async (t) => {
+  const fixture = makeFixture(t, 'recovery-no-quorum')
+  const first = fixture.build({
+    patchsetTransform: ({ node }) => Buffer.from([Number(node.id)]),
+    intercept: (to, from, msg) => {
+      if (msg.type === 'monster_outcome') { return false }
+    },
+  })
+  const leader = await openAndElect(first)
+  const appending = leader.append(toBuf({ key: 'recover-no-quorum', value: 1 }))
+  appending.catch(noop)
+  await waitFor(() => first.nodes.every((node) => cachedPendingAt(node) !== null),
+    'unresolved disagreeing CMD application')
+  closeNodes(first.nodes)
+  await rejects(t, appending, /node not open/, 'the original caller has already failed')
+
+  const recovered = fixture.build()
+  const errors = new Map(recovered.nodes.map((node) => [node.id, []]))
+  const fatals = []
+  recovered.nodes.forEach((node) => {
+    node.on('error', (err) => errors.get(node.id).push(err))
+    node.on('fatal', (err) => fatals.push(err))
+  })
+  const recoveryLeader = await openAndElect(recovered)
+  await withTimeout(recoveryLeader._monsterLeaderSync, 'quorum-impossible recovery')
+  await waitFor(() => recovered.nodes.every((node) => errors.get(node.id).length === 1),
+    'background repair error propagation')
+  for (const node of recovered.nodes) {
+    t.deepEqual(errors.get(node.id).map((err) => err.code), [REPAIR_QUORUM_IMPOSSIBLE],
+      `node ${node.id} reports the recovered repair error exactly once`)
+    const metadata = metadataAtPath(fixture.paths.get(node.id))
+    t.equal(metadata.repairState, 1n, `node ${node.id} persists the recovered repair state`)
+    t.equal(metadata.pending, null, `node ${node.id} resolves the recovered command`)
+  }
+  t.deepEqual(fatals, [], 'background repair reporting does not enter the fatal path')
+  t.ok(recovered.nodes.every((node) => node.isOpen), 'all recovered nodes remain open')
+  t.equal(recoveryLeader.state, 'leader', 'the recovery leader continues replicating')
+  t.equal(recovered.calls.length, 0, 'recovery does not reapply the command')
+})
 
 test('MonsterFt recovery reuses a stored digest without reapplication', async (t) => {
   const fixture = makeFixture(t, 'recovery')

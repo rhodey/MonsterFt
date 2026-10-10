@@ -103,6 +103,7 @@ class MonsterNode extends RaftNode {
     this._monsterDbActive = false
     this._monsterDbWork = null
     this._monsterDbQueue = []
+    this._monsterDbError = null
 
     this._monsterRepairState = REPAIR_NONE
     this._monsterPendingCommand = null
@@ -146,7 +147,7 @@ class MonsterNode extends RaftNode {
     const begin = this._applySeq - keep.target + 1n
     try {
       this.log.db.prepare('DELETE FROM raft_log WHERE seq < ?').run(begin)
-      this.log._readHead()
+      this.log.readHead()
     } catch (err) {
       throw Err.wrapError(err, Err.SQLITE_ERROR, 'DB1 retention ')
     }
@@ -161,7 +162,7 @@ class MonsterNode extends RaftNode {
     if (state !== REPAIR_QUORUM_IMPOSSIBLE &&
         state !== REPAIR_OUTSIDE_AGREEMENT) {
       throw this._monsterFatalError(new Err.ErrorWithCode(
-        'repair state is illegal', Err.RAFT_ILLEGAL
+        'repair state is illegal', Err.MONSTER_ILLEGAL
       ))
     }
     const code = state === REPAIR_QUORUM_IMPOSSIBLE
@@ -214,11 +215,12 @@ class MonsterNode extends RaftNode {
       active = false
       return result
     } catch (err) {
-      if (this._closing) { this._throwIfClosing() }
-      if (active) {
+      this._throwIfClosing()
+      if (active && db.isTransaction) {
         try {
           db.exec('ROLLBACK')
         } catch (rollbackErr) {
+          this._emitSafe('error', Err.wrapError(err))
           this._monsterFatalError(Err.wrapError(
             rollbackErr,
             Err.SQLITE_ERROR,
@@ -314,6 +316,9 @@ class MonsterNode extends RaftNode {
     this._monsterDbWork = null
     this._monsterDbActive = false
     failed ? work.reject(value) : work.resolve(value)
+    if (failed && this._monsterDbError === null) {
+      this._monsterDbError = Err.wrapError(value)
+    }
     if (!this._closing) { this._monsterDrainDb() }
   }
 
@@ -366,33 +371,48 @@ class MonsterNode extends RaftNode {
   }
 
   _monsterInit(db) {
-    db.exec(`
-      CREATE TABLE IF NOT EXISTS monsterft_meta (
-        id INTEGER PRIMARY KEY CHECK (id = 1),
-        applied_seq INTEGER NOT NULL,
-        applied_entry_hash BLOB,
-        repair_state INTEGER NOT NULL CHECK (repair_state IN (0, 1, 2)),
-        pending_cmd_seq INTEGER,
-        pending_local_digest BLOB,
-        CHECK (
-          (applied_seq = -1 AND applied_entry_hash IS NULL) OR
-          (applied_seq >= 0 AND applied_entry_hash IS NOT NULL AND
-           length(applied_entry_hash) = 32)
-        ),
-        CHECK (
-          (pending_cmd_seq IS NULL AND pending_local_digest IS NULL) OR
-          (pending_cmd_seq IS NOT NULL AND pending_cmd_seq >= 0 AND
-           pending_cmd_seq <= applied_seq AND
-           pending_local_digest IS NOT NULL AND
-           length(pending_local_digest) = 32)
+    const table = db.prepare(`
+      SELECT name FROM sqlite_schema
+      WHERE type = 'table' AND name = 'monsterft_meta'
+    `).get()
+    if (table === undefined) {
+      // Only an empty DB2 paired with an empty log can be initialized.
+      if (this.log.seq !== -1n ||
+          db.prepare('SELECT name FROM sqlite_schema LIMIT 1').get() !== undefined) {
+        throw new Err.ErrorWithCode(
+          'metadata table is missing', Err.MONSTER_CORRUPT,
         )
-      ) STRICT;
+      }
+      db.exec(`
+        BEGIN IMMEDIATE;
+        CREATE TABLE monsterft_meta (
+          id INTEGER PRIMARY KEY CHECK (id = 1),
+          applied_seq INTEGER NOT NULL,
+          applied_entry_hash BLOB,
+          repair_state INTEGER NOT NULL CHECK (repair_state IN (0, 1, 2)),
+          pending_cmd_seq INTEGER,
+          pending_local_digest BLOB,
+          CHECK (
+            (applied_seq = -1 AND applied_entry_hash IS NULL) OR
+            (applied_seq >= 0 AND applied_entry_hash IS NOT NULL AND
+             length(applied_entry_hash) = 32)
+          ),
+          CHECK (
+            (pending_cmd_seq IS NULL AND pending_local_digest IS NULL) OR
+            (pending_cmd_seq IS NOT NULL AND pending_cmd_seq >= 0 AND
+             pending_cmd_seq <= applied_seq AND
+             pending_local_digest IS NOT NULL AND
+             length(pending_local_digest) = 32)
+          )
+        ) STRICT;
 
-      INSERT OR IGNORE INTO monsterft_meta
-        (id, applied_seq, applied_entry_hash, repair_state,
-         pending_cmd_seq, pending_local_digest)
-      VALUES (1, -1, NULL, 0, NULL, NULL);
-    `)
+        INSERT INTO monsterft_meta
+          (id, applied_seq, applied_entry_hash, repair_state,
+           pending_cmd_seq, pending_local_digest)
+        VALUES (1, -1, NULL, 0, NULL, NULL);
+        COMMIT;
+      `)
+    }
 
     const meta = db.prepare(`
       SELECT applied_seq, applied_entry_hash, repair_state,
@@ -400,47 +420,85 @@ class MonsterNode extends RaftNode {
       FROM monsterft_meta
       WHERE id = 1
     `).get()
+    if (meta === undefined) {
+      throw new Err.ErrorWithCode(
+        'metadata row is missing', Err.MONSTER_CORRUPT,
+      )
+    }
+    const repairState = meta.repair_state
+    if (repairState !== BigInt(REPAIR_NONE) &&
+        repairState !== BigInt(REPAIR_QUORUM_IMPOSSIBLE) &&
+        repairState !== BigInt(REPAIR_OUTSIDE_AGREEMENT)) {
+      throw new Err.ErrorWithCode(
+        'stored repair state is corrupt', Err.MONSTER_CORRUPT,
+      )
+    }
     this._applySeq = meta.applied_seq
-    this._monsterRepairState = Number(meta.repair_state)
-    this._monsterPendingCommand = meta.pending_cmd_seq === null
+    this._monsterVerifyAppliedEntry(meta.applied_entry_hash)
+
+    const pendingSeq = meta.pending_cmd_seq
+    const pendingDigest = meta.pending_local_digest
+    if ((pendingSeq === null) !== (pendingDigest === null)) {
+      throw new Err.ErrorWithCode(
+        'pending command metadata is incomplete', Err.MONSTER_CORRUPT,
+      )
+    }
+    if (pendingSeq !== null) {
+      if (!util.isSeq(pendingSeq) || pendingSeq < 0n || pendingSeq > this._applySeq) {
+        throw new Err.ErrorWithCode(
+          'pending command sequence is corrupt', Err.MONSTER_CORRUPT,
+        )
+      }
+      if (!(pendingDigest instanceof Uint8Array) || pendingDigest.byteLength !== 32) {
+        throw new Err.ErrorWithCode(
+          'pending command digest is corrupt', Err.MONSTER_CORRUPT,
+        )
+      }
+    }
+    this._monsterRepairState = Number(repairState)
+    this._monsterPendingCommand = pendingSeq === null
       ? null
       : {
-          cmdSeq: meta.pending_cmd_seq,
-          localDigest: asBuffer(meta.pending_local_digest),
+          cmdSeq: pendingSeq,
+          localDigest: asBuffer(pendingDigest),
         }
     this._monsterPendingReports.clear()
-    this._monsterVerifyAppliedEntry(asBuffer(meta.applied_entry_hash))
   }
 
+  // Require that the log (DB1) contains the last entry that monster (DB2) applied
   _monsterVerifyAppliedEntry(appliedEntryHash) {
     if (!util.isSeq(this._applySeq) || this._applySeq > this.log.seq) {
       throw new Err.ErrorWithCode(
-        'applied sequence is illegal',
-        Err.LOG_CORRUPT,
+        'applied sequence is corrupt',
+        Err.MONSTER_CORRUPT,
       )
     }
     if (this._applySeq === -1n) {
       if (appliedEntryHash !== null) {
         throw new Err.ErrorWithCode(
           'applied entry hash must be null for initial state',
-          Err.LOG_CORRUPT,
+          Err.MONSTER_CORRUPT,
         )
       }
       return
     }
-    // require that the log (DB1) contains the last entry that monster (DB2) applied
+    if (!(appliedEntryHash instanceof Uint8Array) || appliedEntryHash.byteLength !== 32) {
+      throw new Err.ErrorWithCode(
+        'applied entry hash is corrupt', Err.MONSTER_CORRUPT,
+      )
+    }
     const found = this.log.iter(this._applySeq).next()
     if (found.done) {
       throw new Err.ErrorWithCode(
         'applied log entry not found',
-        Err.LOG_CORRUPT,
+        Err.MONSTER_CORRUPT,
       )
     }
     const expected = crypto.createHash('sha256').update(found.value).digest()
     if (!asBuffer(appliedEntryHash).equals(expected)) {
       throw new Err.ErrorWithCode(
         'applied entry hash does not match',
-        Err.LOG_CORRUPT,
+        Err.MONSTER_CORRUPT,
       )
     }
   }
@@ -470,11 +528,8 @@ class MonsterNode extends RaftNode {
       if (group.nodes.length >= this.quorum) { agreement = group }
     }
     const unknown = this.nodes.length - reported
-    return {
-      agreement,
-      impossible: !agreement && largest + unknown < this.quorum,
-      reports,
-    }
+    const impossible = !agreement && largest + unknown < this.quorum
+    return { agreement, impossible, reports }
   }
 
   async _monsterRxOutcomeRequest(from, msg) {
@@ -522,6 +577,11 @@ class MonsterNode extends RaftNode {
           // user callback gets called with seq 0 (always a no-op) to allow SQL schema setup
           await this._monsterUserApply(db, null, term, seq, 0, null)
           this._throwIfClosing()
+          if (!db.isTransaction) {
+            throw new Err.ErrorWithCode(
+              'DB2 seq0 transaction ended', Err.SQLITE_ERROR,
+            )
+          }
           this._monsterAdvanceApplied(db, seq, entryHash)
         })
         this._throwIfClosing()
@@ -556,8 +616,14 @@ class MonsterNode extends RaftNode {
               )
             } catch (err) {
               this._throwIfClosing()
-              db.exec('ROLLBACK TO monsterft_item')
-              db.exec('RELEASE monsterft_item')
+              if (!db.isTransaction) { throw err }
+              try {
+                db.exec('ROLLBACK TO monsterft_item')
+                db.exec('RELEASE monsterft_item')
+              } catch (rollbackErr) {
+                this._emitSafe('error', Err.wrapError(err))
+                throw rollbackErr
+              }
               outcomes.push({
                 status: REJECTED,
                 error: Err.wrapError(err),
@@ -604,7 +670,7 @@ class MonsterNode extends RaftNode {
     if (!command) {
       throw new Err.ErrorWithCode(
         'SYNC entry is missing CMD',
-        Err.LOG_CORRUPT,
+        Err.MONSTER_CORRUPT,
       )
     }
     const healthy = this._monsterSyncAgrees(entry, command.localDigest)
@@ -639,7 +705,9 @@ class MonsterNode extends RaftNode {
       this._throwIfClosing()
     })
 
-    if (repairState === REPAIR_OUTSIDE_AGREEMENT) {
+    if (repairState === REPAIR_QUORUM_IMPOSSIBLE) {
+      this._emitSafe('error', this._monsterRepairError(repairState))
+    } else if (repairState === REPAIR_OUTSIDE_AGREEMENT) {
       const err = this._monsterRepairError(repairState)
       this._monsterFatalError(err)
       return
@@ -667,7 +735,7 @@ class MonsterNode extends RaftNode {
       await this._monsterApplySync(entry, seq, entryHash)
       return null
     }
-    throw new Err.ErrorWithCode('entry type is illegal', Err.LOG_CORRUPT)
+    throw new Err.ErrorWithCode('entry type is corrupt', Err.MONSTER_CORRUPT)
   }
 
   // RaftNode apply entry point
@@ -697,42 +765,15 @@ class MonsterNode extends RaftNode {
   }
 
   async _monsterAppendEntry(entry) {
-    const term = this.term
-    try {
-      if (entry.type === CMD) {
-        // matchIndex may be interesting to the user so add it here
-        const matchIndex = this.nodes.map((id) => {
-          if (id === this.id) { return this.seq }
-          return this._replication.get(id)?.matchIndex ?? -1n
-        })
-        entry = { ...entry, matchIndex }
-      }
-      return await super.append(pack(entry))
-    } catch (err) {
-      // Let another leader resolve an append whose outcome is uncertain.
-      this._monsterStepDownForTerm(term)
-      throw err
+    if (entry.type === CMD) {
+      // matchIndex may be interesting to the user so add it here
+      const matchIndex = this.nodes.map((id) => {
+        if (id === this.id) { return this.seq }
+        return this._replication.get(id)?.matchIndex ?? -1n
+      })
+      entry = { ...entry, matchIndex }
     }
-  }
-
-  // Step down if the election no-op fails instead of retrying in this term.
-  _leaderAppendNoOp() {
-    if (!this.isOpen) { return }
-    if (this.state !== LEADER) { return }
-    const leaderReady = this._leaderReady
-    if (!leaderReady || leaderReady.term !== this.term ||
-        this._commitTerm === this.term) {
-      return
-    }
-    this._appendToSelfAndFollowers(Buffer.alloc(0)).catch((err) => {
-      if (this._closing) { return }
-      this._emitSafe('warn', err)
-      if (this._leaderReady !== leaderReady ||
-          this._commitTerm === leaderReady.term) {
-        return
-      }
-      this._monsterStepDownForTerm(leaderReady.term)
-    })
+    return super.append(pack(entry))
   }
 
   async _monsterAwaitDecision(command, term=null) {
@@ -811,16 +852,18 @@ class MonsterNode extends RaftNode {
 
   _monsterLeaderQueue(cmdItems) {
     const response = util.oneShot()
+    const resultPromise = this._raceShutdown(response.promise)
     const run = async () => {
-      await this._monsterLeaderSync
-      this._monsterAssertAvailable()
       this._monsterAssertLeader()
       const term = this.term
-      const appended = await this._monsterAppendEntry({ type: CMD, items: cmdItems })
-      this._throwIfClosing()
-      const [cmdSeq, applied] = appended
-      const command = { cmdSeq, localDigest: applied.localDigest }
+      await this._monsterLeaderSync
+      this._monsterAssertAvailable()
+      this._monsterAssertLeader(term)
       try {
+        const appended = await this._monsterAppendEntry({ type: CMD, items: cmdItems })
+        this._throwIfClosing()
+        const [cmdSeq, applied] = appended
+        const command = { cmdSeq, localDigest: applied.localDigest }
         const decision = await this._monsterAwaitDecision(command, term)
         const result = { cmdSeq, outcomes: applied.outcomes }
         if (decision.leaderAgrees) {
@@ -832,7 +875,10 @@ class MonsterNode extends RaftNode {
           response.reject(this._monsterRepairError(repairState))
         }
         if (decision.sync.quorum && !decision.leaderAgrees) {
+          // Let the caller send its response before fencing closes transport.
+          await resultPromise.catch(noop)
           await this._monsterFenceLeader()
+          return
         }
         const syncSeq = await this._monsterAppendSync(
           decision.sync,
@@ -840,12 +886,8 @@ class MonsterNode extends RaftNode {
         )
         return { cmdSeq, syncSeq }
       } catch (err) {
-        if (this._closing) { throw err }
-        const pending = await this._monsterRunDbGetCmd(command.cmdSeq)
-        if (pending !== null) {
-          // let another leader take over CMD to SYNC
-          this._monsterStepDownForTerm(term)
-        }
+        // Let another leader resolve an append whose outcome is uncertain.
+        this._monsterStepDownForTerm(term)
         throw err
       }
     }
@@ -856,7 +898,7 @@ class MonsterNode extends RaftNode {
       if (response.reject(err)) { return }
       if (!this._closing) { this._emitSafe('warn', err) }
     })
-    return this._raceShutdown(response.promise)
+    return resultPromise
   }
 
   // new leaders always resume CMD which need SYNC
@@ -890,7 +932,8 @@ class MonsterNode extends RaftNode {
       }
     }
     this._monsterLeaderSync = leaderSync().catch((err) => {
-      if (this._monsterStepDownForTerm(term)) { this._emitSafe('warn', err) }
+      this._monsterStepDownForTerm(term)
+      if (!this._closing) { this._emitSafe('warn', err) }
       throw err
     })
     this._monsterLeaderSync.catch(noop)
@@ -915,6 +958,7 @@ class MonsterNode extends RaftNode {
       return
     }
     try {
+      this._monsterAssertAvailable()
       const result = await this._monsterLeaderQueue(msg.items)
       this.send(from, {
         type: ACK,
@@ -925,6 +969,7 @@ class MonsterNode extends RaftNode {
       })
     } catch (err) {
       error(err)
+      if (!this._closing) { this._emitSafe('warn', err) }
     }
   }
 
@@ -1057,6 +1102,12 @@ class MonsterNode extends RaftNode {
             await this._delay(retryms)
           }
           this._throwIfClosing()
+        }
+        // Drain can close before a failed DB operation reaches fatal reporting.
+        if (this._monsterDbError !== null) {
+          const err = this._monsterDbError
+          this._monsterDbError = null
+          this._emitSafe('error', err)
         }
         this.close()
       })

@@ -1000,6 +1000,45 @@ test('fatal errors close synchronously and report after the closed change', asyn
     'fatal close removes listeners after public error reporting')
 })
 
+for (const throwingListener of [false, true]) {
+  const mode = throwingListener ? 'a throwing error listener' : 'no error listener'
+  test(`fatal reporting finishes cleanup with ${mode}`, async (t) => {
+    const first = new Error('first fatal')
+    const second = new Error('second fatal')
+    const closeFailure = new Error('close failed')
+    const log = lifecycleLog()
+    const closeLog = log.close.bind(log)
+    log.close = () => {
+      closeLog()
+      throw closeFailure
+    }
+    const node = new RaftNode('1', ids, () => {}, log, {
+      electionTimeout: 60_000,
+    })
+    const errors = []
+    if (throwingListener) {
+      node.on('error', (err) => {
+        errors.push(err)
+        throw new Error('error listener failed')
+      })
+    }
+    node.open()
+    node.emit('fatal', first)
+    node.emit('fatal', second)
+    t.notOk(node.isOpen, 'fatal handling still closes the node synchronously')
+
+    await Promise.resolve()
+    if (throwingListener) {
+      t.deepEqual(errors, [first, second, closeFailure],
+        'listener exceptions do not prevent later reports or get re-emitted')
+    }
+    t.deepEqual(node._fatalErrors, [], 'drains the fatal error queue')
+    t.deepEqual(node._fatalCloseErrors, [], 'drains the close error queue')
+    t.equal(node._fatalScheduled, false, 'finishes the scheduled reporting pass')
+    t.deepEqual(node.eventNames(), [], 'removes listeners after reporting')
+  })
+}
+
 test('close failure remains terminal while allowing storage cleanup retry', (t) => {
   const closeFailure = new Error('close failed')
   const log = lifecycleLog()

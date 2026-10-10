@@ -31,26 +31,26 @@ const validateCmdEntry = (node, entry, seq) => {
   if (!Array.isArray(entry.matchIndex) ||
       entry.matchIndex.length !== node.nodes.length) {
     throw new Err.ErrorWithCode(
-      'CMD entry matchIndex has illegal length',
-      Err.LOG_CORRUPT,
+      'CMD entry matchIndex has corrupt length',
+      Err.MONSTER_CORRUPT,
     )
   }
   if (!entry.matchIndex.every((match) => isSeq(match) && match < seq)) {
     throw new Err.ErrorWithCode(
-      'CMD entry matchIndex has illegal items',
-      Err.LOG_CORRUPT,
+      'CMD entry matchIndex has corrupt seq',
+      Err.MONSTER_CORRUPT,
     )
   }
   if (!Array.isArray(entry.items) || entry.items.length <= 0) {
     throw new Err.ErrorWithCode(
       'CMD entry items must be a non-empty array',
-      Err.LOG_CORRUPT,
+      Err.MONSTER_CORRUPT,
     )
   }
   if (!entry.items.every((item) => item instanceof Uint8Array)) {
     throw new Err.ErrorWithCode(
       'CMD entry items must be buffers',
-      Err.LOG_CORRUPT,
+      Err.MONSTER_CORRUPT,
     )
   }
 }
@@ -58,8 +58,8 @@ const validateCmdEntry = (node, entry, seq) => {
 const validateNodes = (node, nodes, name, minimum=0) => {
   if (!Array.isArray(nodes) || nodes.length < minimum) {
     throw new Err.ErrorWithCode(
-      `SYNC entry ${name} has illegal length`,
-      Err.LOG_CORRUPT,
+      `SYNC entry ${name} has corrupt length`,
+      Err.MONSTER_CORRUPT,
     )
   }
   const sorted = [...new Set(nodes)].sort()
@@ -67,8 +67,8 @@ const validateNodes = (node, nodes, name, minimum=0) => {
       !nodes.every((id) => node.nodes.includes(id)) ||
       !nodes.every((id, index) => id === sorted[index])) {
     throw new Err.ErrorWithCode(
-      `SYNC entry ${name} has illegal items`,
-      Err.LOG_CORRUPT,
+      `SYNC entry ${name} has corrupt id`,
+      Err.MONSTER_CORRUPT,
     )
   }
   return sorted
@@ -77,14 +77,14 @@ const validateNodes = (node, nodes, name, minimum=0) => {
 const validateSyncEntry = (node, entry) => {
   if (!isSeq(entry.cmdSeq) || entry.cmdSeq < 0n) {
     throw new Err.ErrorWithCode(
-      'SYNC entry cmdSeq is illegal',
-      Err.LOG_CORRUPT,
+      'SYNC entry cmdSeq is corrupt',
+      Err.MONSTER_CORRUPT,
     )
   }
   if (typeof entry.quorum !== 'boolean') {
     throw new Err.ErrorWithCode(
-      'SYNC entry quorum is illegal',
-      Err.LOG_CORRUPT,
+      'SYNC entry quorum is corrupt',
+      Err.MONSTER_CORRUPT,
     )
   }
   const agree = validateNodes(
@@ -95,13 +95,13 @@ const validateSyncEntry = (node, entry) => {
   if (!entry.quorum && agree.length !== 0) {
     throw new Err.ErrorWithCode(
       'SYNC entry quorum:false agree must be empty',
-      Err.LOG_CORRUPT,
+      Err.MONSTER_CORRUPT,
     )
   }
   if (entry.quorum && !isDigest(entry.digest)) {
     throw new Err.ErrorWithCode(
-      'SYNC entry digest is illegal',
-      Err.LOG_CORRUPT,
+      'SYNC entry digest is corrupt',
+      Err.MONSTER_CORRUPT,
     )
   }
   return { agree, disagree }

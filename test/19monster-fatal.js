@@ -1,8 +1,12 @@
 import crypto from 'node:crypto'
 import { spawnSync } from 'node:child_process'
+import { DatabaseSync } from 'node:sqlite'
+import { unpack } from 'msgpackr'
 import test from 'tape'
 import { MonsterFt, SQLiteLog } from '../src/index.js'
-import { APPLY_ERROR, ErrorWithCode, RAFT_ILLEGAL } from '../src/error.js'
+import {
+  APPEND_TIMEOUT, APPLY_ERROR, ErrorWithCode, MONSTER_ILLEGAL, SQLITE_ERROR,
+} from '../src/error.js'
 import { databasePath, sleep } from './util.js'
 
 const ids = ['1', '2', '3']
@@ -36,7 +40,7 @@ const failCommandLookup = (node, failure) => {
   node._monsterRunDbGetCmd = async () => { throw failure }
 }
 
-const makeFixture = (t, name) => {
+const makeFixture = (t, name, allowMessage=() => true) => {
   const unique = `${++fixtureId}-${process.pid}-${name}`
   const paths = new Map(ids.map((id) => [
     id,
@@ -49,6 +53,7 @@ const makeFixture = (t, name) => {
     const send = (to, msg) => {
       const target = current.get(to)
       if (!target) { return }
+      if (!allowMessage(id, to, msg)) { return }
       return target.onReceive(id, msg)
     }
     const node = new MonsterFt(id, ids, send, paths.get(id), {
@@ -73,6 +78,9 @@ const makeFixture = (t, name) => {
 
   return { nodes, warnings }
 }
+
+const appendsEntry = (msg, type) => msg.type === 'append' &&
+  msg.data?.some((buf) => buf.length > 8 && unpack(buf.subarray(8)).type === type)
 
 const elect = async (nodes) => {
   openNodes(nodes)
@@ -121,6 +129,11 @@ test('uncaught application errors retain their trace without an anonymous script
         byId.set(id, node)
         return node
       })
+      if (mode === 'startup') {
+        nodes[0].on('error', (err) => {
+          queueMicrotask(() => { throw err })
+        })
+      }
       nodes.forEach((node) => node.open())
       nodes[0]._voteForSelf()
       if (mode !== 'startup') {
@@ -199,8 +212,8 @@ test('MonsterFt treats an illegal repair state as fatal', async (t) => {
     'the illegal state throws ErrorWithCode')
   t.equal(thrown.message, 'repair state is illegal',
     'the illegal state throws the invariant error')
-  t.equal(thrown.code, RAFT_ILLEGAL,
-    'the illegal state has the Raft invariant code')
+  t.equal(thrown.code, MONSTER_ILLEGAL,
+    'the illegal state has the Monster invariant code')
   t.equal(thrown.sqlCode, null,
     'the illegal state has no SQLite error code')
   t.deepEqual(fatals, [thrown],
@@ -252,6 +265,241 @@ test('MonsterFt leader sync command lookup failure is fatal once',
     t.equal(leader.isOpen, false,
       'the lookup failure closes the leader')
   })
+
+test('MonsterFt replies to a failed forwarded CMD before warning locally', async (t) => {
+  const events = []
+  const fixture = makeFixture(t, 'forward-timeout', (from, to, msg) => {
+    if (from === '1' && to === '2' && msg.type === 'err') {
+      events.push('reply')
+    }
+    return !appendsEntry(msg, 'cmd')
+  })
+  const leader = await elect(fixture.nodes)
+  leader.opts.appendTimeout = 100
+  leader.on('warn', () => {
+    events.push('warn')
+    leader.close()
+  })
+
+  const rejected = await withTimeout(
+    fixture.nodes[1].append(Buffer.from('forwarded')).catch((err) => err),
+    'forwarded rejection',
+  )
+  t.equal(rejected.code, APPEND_TIMEOUT, 'the caller receives the append failure')
+  t.equal(rejected.message, 'quorum append timeout',
+    'the caller gets the leader failure rather than its own RPC timeout')
+  t.deepEqual(events, ['reply', 'warn'],
+    'the RPC reply is sent before a warning listener can close the leader')
+  t.equal(fixture.warnings.length, 1, 'the leader reports one local warning')
+  t.equal(fixture.warnings[0].id, leader.id, 'the warning belongs to the leader')
+  t.equal(fixture.warnings[0].err.stack, rejected.stack,
+    'the warning and RPC reply retain the same failure trace')
+  t.notOk(leader.isOpen, 'the warning listener can close the leader')
+})
+
+test('MonsterFt ordinary application rejections do not emit diagnostics', async (t) => {
+  const fixture = makeFixture(t, 'application-rejection')
+  const diagnostics = []
+  for (const node of fixture.nodes) {
+    node.on('error', (err) => diagnostics.push(err))
+    node.on('fatal', (err) => diagnostics.push(err))
+    node._monsterUserApply = (db, data, term, seq) => {
+      if (seq > 0n) { throw new Error('application rejected command') }
+    }
+  }
+  const leader = await elect(fixture.nodes)
+  for (const caller of fixture.nodes.slice(0, 2)) {
+    const rejected = await caller.append(Buffer.from('reject')).catch((err) => err)
+    t.equal(rejected.message, 'application rejected command',
+      `${caller === leader ? 'local' : 'forwarded'} caller receives the application rejection`)
+    await leader._monsterProtocol
+  }
+  t.deepEqual(fixture.warnings, [], 'agreed application rejections remain quiet')
+  t.deepEqual(diagnostics, [], 'agreed application rejections do not emit errors or fatals')
+})
+
+test('MonsterFt warns when recovery SYNC times out after stepping down', async (t) => {
+  let recovery = false
+  const fixture = makeFixture(t, 'recovery-timeout', (from, to, msg) => {
+    if (!recovery && msg.type === 'monster_outcome') { return false }
+    return !recovery || !appendsEntry(msg, 'sync')
+  })
+  const leader = await elect(fixture.nodes)
+  const original = leader.append(Buffer.from('pending')).catch((err) => err)
+  await waitFor(() => fixture.nodes.every((node) => node._monsterPendingCommand),
+    'pending CMD on every replica')
+  leader._toFollower()
+  await original
+  await leader._monsterProtocol
+  fixture.warnings.length = 0
+
+  recovery = true
+  leader.opts.appendTimeout = 100
+  leader._voteForSelf()
+  await waitFor(() => leader.state === 'leader', 'recovery election')
+  const rejected = await withTimeout(
+    leader._monsterLeaderSync.catch((err) => err), 'recovery SYNC timeout',
+  )
+  t.equal(rejected.code, APPEND_TIMEOUT, 'recovery fails with the append timeout')
+  t.equal(rejected.message, 'quorum append timeout', 'the failed operation is replication')
+  t.equal(leader.state, 'follower', 'the failed append already stepped down')
+  t.deepEqual(fixture.warnings, [{ id: leader.id, err: rejected }],
+    'background recovery still reports the original failure exactly once')
+  t.ok(leader.isOpen, 'the recovery timeout leaves the node open')
+})
+
+test('MonsterFt reports the original failure before a fatal rollback failure', async (t) => {
+  const fixture = makeFixture(t, 'rollback-failure')
+  const node = fixture.nodes[0]
+  const original = new TypeError('primary application failure')
+  const rollback = new Error('secondary rollback failure')
+  const diagnostics = []
+  node._monsterUserApply = () => { throw original }
+  node.on('warn', (err) => diagnostics.push({ type: 'warn', err }))
+  node.on('fatal', (err) => diagnostics.push({ type: 'fatal', err }))
+  const errored = new Promise((resolve) => node.on('error', (err) => {
+    diagnostics.push({ type: 'error', err })
+    if (err.code === SQLITE_ERROR) { resolve(err) }
+  }))
+  openNodes(fixture.nodes)
+  const exec = node.db.exec.bind(node.db)
+  node.db.exec = (sql) => {
+    if (sql === 'ROLLBACK') { throw rollback }
+    return exec(sql)
+  }
+  node._voteForSelf()
+  const reported = await withTimeout(errored, 'rollback fatal error')
+
+  t.deepEqual(diagnostics.map(({ type }) => type), ['error', 'fatal', 'error'],
+    'the original failure is reported before fatal shutdown')
+  t.ok(diagnostics[0].err instanceof ErrorWithCode, 'the original failure is normalized')
+  t.equal(diagnostics[0].err.message, original.message, 'the error event preserves the original message')
+  t.equal(diagnostics[0].err.stack, original.stack, 'the error event preserves the original stack')
+  t.equal(reported.code, SQLITE_ERROR, 'rollback failure remains fatal')
+  t.equal(reported.message, 'DB2 rollback secondary rollback failure',
+    'the fatal diagnostic identifies the rollback failure')
+  t.equal(reported.stack, rollback.stack, 'the rollback failure retains its own trace')
+  t.equal(diagnostics[1].err, reported, 'fatal and error share the rollback diagnostic')
+  t.notOk(node.isOpen, 'rollback failure closes the node')
+})
+
+for (const mode of ['conflict rollback', 'disk full', 'rollback cleanup', 'release cleanup']) {
+  test(`MonsterFt preserves the application error after ${mode}`, async (t) => {
+    const transactionLost = mode === 'conflict rollback' || mode === 'disk full'
+    const fixture = makeFixture(t, mode.replaceAll(' ', '-'))
+    const originals = new Map()
+    for (const node of fixture.nodes) {
+      node.on('error', () => {})
+      node._monsterUserApply = function applicationApply(db, data, term, seq, index) {
+        if (seq === 0n) {
+          db.exec(`
+            CREATE TABLE items (id INTEGER PRIMARY KEY, value BLOB);
+            INSERT INTO items VALUES (1, zeroblob(100));
+          `)
+          return
+        }
+        if (index === 0) {
+          db.exec('INSERT INTO items VALUES (2, zeroblob(100))')
+          return
+        }
+        try {
+          if (mode === 'conflict rollback') {
+            db.exec('INSERT OR ROLLBACK INTO items VALUES (1, NULL)')
+          } else if (mode === 'disk full') {
+            db.exec('INSERT INTO items VALUES (3, zeroblob(1048576))')
+          } else {
+            throw new TypeError('original item failure')
+          }
+        } catch (err) {
+          originals.set(node.id, err)
+          throw err
+        }
+      }
+    }
+    const leader = await elect(fixture.nodes)
+    const metaSql = 'SELECT * FROM monsterft_meta'
+    const before = leader.db.prepare(metaSql).get()
+    if (mode === 'disk full') {
+      for (const node of fixture.nodes) {
+        const { page_count: pages } = node.db.prepare('PRAGMA page_count').get()
+        node.db.exec(`PRAGMA max_page_count = ${pages}`)
+      }
+    }
+    const cleanupSql = []
+    const failingSql = mode === 'rollback cleanup'
+      ? 'ROLLBACK TO monsterft_item'
+      : mode === 'release cleanup' ? 'RELEASE monsterft_item' : null
+    const exec = leader.db.exec.bind(leader.db)
+    leader.db.exec = (sql) => {
+      if (originals.has(leader.id)) {
+        cleanupSql.push(sql)
+        if (sql === failingSql) {
+          throw new Error(`injected ${mode} failure`)
+        }
+      }
+      return exec(sql)
+    }
+    const diagnostics = []
+    leader.on('fatal', (err) => diagnostics.push({ type: 'fatal', err }))
+    const errored = new Promise((resolve) => leader.on('error', (err) => {
+      diagnostics.push({ type: 'error', err })
+      if (mode === 'release cleanup' && diagnostics.length === 1) {
+        throw new Error('error listener failure')
+      }
+      if (diagnostics.some(({ type }) => type === 'fatal')) { resolve(err) }
+    }))
+    const appended = leader.appendBatch([Buffer.from('write'), Buffer.from('fail')])
+      .catch((err) => err)
+    await withTimeout(errored, `${mode} fatal diagnostic`)
+    await withTimeout(appended, `${mode} append rejection`)
+
+    const original = originals.get(leader.id)
+    t.ok(original, 'the application receives the original thrown error')
+    const first = diagnostics[0]
+    t.equal(first.type, transactionLost ? 'fatal' : 'error',
+      transactionLost
+        ? 'the original error directly enters fatal shutdown'
+        : 'the original error is reported before fatal shutdown')
+    t.ok(first.err instanceof ErrorWithCode, 'the original error is normalized')
+    t.equal(first.err.message, `${transactionLost ? '(apply) ' : ''}${original.message}`,
+      'the original message is preserved with the applicable context')
+    t.equal(first.err.stack, original.stack, 'the original stack is preserved')
+    t.match(first.err.stack, /applicationApply/, 'the trace identifies the application callback')
+    const fatal = diagnostics.find(({ type }) => type === 'fatal').err
+    if (transactionLost) {
+      t.equal(first.err.code, APPLY_ERROR, 'the transaction loss is an application failure')
+      t.equal(first.err.sqlCode, mode === 'disk full' ? 13 : 1555,
+        'the original SQLite error code is preserved')
+      t.deepEqual(diagnostics, [
+        { type: 'fatal', err: fatal },
+        { type: 'error', err: fatal },
+      ], 'only the original error is reported through fatal and error events')
+      t.deepEqual(cleanupSql, [], 'no SQL cleanup is attempted after the transaction ended')
+    } else {
+      t.notEqual(fatal, first.err, 'cleanup failure retains its separate fatal diagnostic')
+      t.match(fatal.message, new RegExp(`injected ${mode} failure`),
+        'the fatal diagnostic identifies the failed cleanup')
+    }
+    if (mode === 'release cleanup') {
+      t.ok(diagnostics.some(({ err }) => err.message === 'error listener failure'),
+        'a throwing error listener does not interrupt cleanup and fatal shutdown')
+    }
+    t.notOk(leader.isOpen, 'the failed application transaction closes the node')
+
+    const restored = new DatabaseSync(leader._monsterDatabasePath, {
+      readOnly: true,
+      readBigInts: true,
+    })
+    try {
+      t.deepEqual(restored.prepare(metaSql).get(), before,
+        'the durable checkpoint and pending state are unchanged')
+      t.deepEqual(restored.prepare('SELECT id FROM items ORDER BY id').all()
+        .map(({ id }) => id), [1n], 'the earlier batch write is rolled back; existing data remains')
+    } finally {
+      restored.close()
+    }
+  })
+}
 
 test('MonsterFt OUTCOME DB FIFO failure fatally closes its receiver',
   async (t) => {

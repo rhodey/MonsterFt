@@ -62,7 +62,7 @@ class MonsterFt extends MonsterNode {
       if (meta === undefined) {
         throw new Err.ErrorWithCode(
           'MonsterFt certify metadata row is missing',
-          Err.LOG_CORRUPT,
+          Err.MONSTER_CORRUPT,
         )
       }
 

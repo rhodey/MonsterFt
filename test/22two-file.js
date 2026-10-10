@@ -10,8 +10,8 @@ import {
   DRAINING,
   ErrorWithCode,
   FS_ERROR,
-  LOG_CORRUPT,
   LOG_OPEN,
+  MONSTER_CORRUPT,
   NODE_NOT_OPEN,
   REPAIR_OUTSIDE_AGREEMENT,
   REPAIR_QUORUM_IMPOSSIBLE,
@@ -787,6 +787,120 @@ test('sequence-zero bootstrap failure rolls back and closes the node',
     replacement.close()
   })
 
+for (const asynchronous of [false, true]) {
+  const mode = asynchronous ? 'async' : 'sync'
+  test(`caught ${mode} bootstrap rollback leaves initialization retryable`,
+    async (t) => {
+      const paths = new Map(ids.map((id) => [
+        id, uniquePath(`bootstrap-caught-full-${mode}-${id}`),
+      ]))
+      const nodes = []
+      const bus = makeBus()
+      const fatals = []
+      const errors = []
+      const failed = deferred()
+      let attempts = 0
+      let original = null
+      let transactionAfterError = null
+      const build = (id) => {
+        const apply = (db, buf, term, seq) => {
+          if (seq !== 0n) { return applyApp(db, buf, term, seq) }
+          initializeApp(db)
+          if (id !== '3' || ++attempts !== 1) { return }
+          const { page_count: pages } = db.prepare('PRAGMA page_count').get()
+          db.exec(`PRAGMA max_page_count = ${pages}`)
+          try {
+            db.exec(`
+              INSERT INTO two_file_items VALUES (hex(zeroblob(1048576)), 1)
+            `)
+          } catch (err) {
+            original = err
+            transactionAfterError = db.isTransaction
+          }
+        }
+        const node = new MonsterFt(id, ids,
+          (to, msg) => bus.send(to, id, msg), paths.get(id), {
+            electionTimeout: Number(id) * 80,
+            pingTimeout: 300,
+            appendTimeout: 5_000,
+            apply: asynchronous ? async (...args) => {
+              const result = apply(...args)
+              await Promise.resolve()
+              return result
+            } : apply,
+          })
+        node.on('warn', noop)
+        node.on('fatal', (err) => fatals.push({ id, err }))
+        node.on('error', (err) => {
+          errors.push({ id, err })
+          if (id === '3') { failed.resolve(err) }
+        })
+        bus.register(node)
+        nodes.push(node)
+        return node
+      }
+      t.teardown(() => {
+        closeNodesQuietly(nodes)
+        for (const databasePath of paths.values()) { removePair(databasePath) }
+      })
+
+      const initial = ids.map(build)
+      openNodes(initial)
+      const failure = await withTimeout(failed.promise, 'caught bootstrap rollback')
+      t.equal(original?.errcode, 13, 'the callback catches native SQLITE_FULL')
+      t.equal(transactionAfterError, false, 'SQLite has rolled back the transaction')
+      t.equal(failure.code, APPLY_ERROR, 'the missing transaction is an application failure')
+      t.equal(failure.message, '(apply) DB2 seq0 transaction ended',
+        'the diagnostic identifies the lost bootstrap transaction')
+      t.deepEqual(fatals, [{ id: '3', err: failure }], 'fatal is emitted once')
+      t.deepEqual(errors, [{ id: '3', err: failure }], 'error is emitted once')
+      t.notOk(initial[2].isOpen, 'the failed node closes')
+      t.equal(initial[2].db, null, 'fatal cleanup releases DB2')
+      t.notOk(initial[2].log.isOpen, 'fatal cleanup releases DB1')
+
+      const databasePath = paths.get('3')
+      const db = new DatabaseSync(`${databasePath}2`, {
+        readOnly: true, readBigInts: true,
+      })
+      try {
+        const meta = db.prepare(`
+          SELECT applied_seq, applied_entry_hash, pending_cmd_seq,
+            pending_local_digest FROM monsterft_meta WHERE id = 1
+        `).get()
+        t.deepEqual({ ...meta }, {
+          applied_seq: -1n,
+          applied_entry_hash: null,
+          pending_cmd_seq: null,
+          pending_local_digest: null,
+        }, 'the durable checkpoint and pending state remain uninitialized')
+        t.deepEqual(tableNames(db), ['monsterft_meta'],
+          'the failed transaction leaves no application schema')
+      } finally {
+        db.close()
+      }
+
+      const replacement = build('3')
+      replacement.open()
+      await withTimeout(replacement.awaitLeader(true), 'replacement committed leader')
+      const synced = nextSync(replacement)
+      const [seq, result] = await withTimeout(
+        replacement.append(toBuf({ key: 'bootstrap-retry', value: 42 })),
+        'append after bootstrap retry',
+      )
+      await withTimeout(synced, 'replacement command SYNC')
+      t.equal(attempts, 2, 'a fresh instance reruns initialization')
+      t.deepEqual(result, { key: 'bootstrap-retry', value: 42 },
+        'a public append succeeds after the retry')
+      t.equal(valueAtPath(databasePath, 'bootstrap-retry'), 42,
+        'the application write is durable in the recreated schema')
+      const meta = monsterMetaAtPath(databasePath)
+      t.ok(meta.applied_seq > seq, 'the durable checkpoint includes command SYNC')
+      t.equal(meta.pending_cmd_seq, null, 'SYNC clears the pending command')
+      t.equal(meta.pending_local_digest, null, 'SYNC clears the pending digest')
+      t.equal(errors.length, 1, 'recovery and later commands emit no further errors')
+    })
+}
+
 test('DB2 open failure closes DB1 and requires a fresh object',
   async (t) => {
     const databasePath = uniquePath('db2-open-retry')
@@ -1391,6 +1505,134 @@ test('two-file cluster commits, checkpoints exact entries, and restarts',
       'normal two-file operation emits no fatal errors')
   })
 
+for (const missing of ['row', 'table', 'all DB2 tables']) {
+  test(`open rejects a missing metadata ${missing} without replaying application state`, async (t) => {
+    const fixture = clusterFixture(t, `missing-metadata-${missing}`)
+    const apply = (db, buf, term, seq) => {
+      if (seq === 0n) {
+        initializeApp(db)
+        return
+      }
+      db.prepare(`
+        INSERT INTO two_file_items (key, value) VALUES ('counter', 1)
+        ON CONFLICT(key) DO UPDATE SET value = value + 1
+      `).run()
+      return valueAt({ db }, 'counter')
+    }
+    const first = fixture.build({ apply })
+    const leader = await openAndElect(first.nodes)
+    const [cmdSeq] = await leader.append(toBuf({ increment: 1 }))
+    await leader._monsterProtocol
+    await waitApplied(first.nodes, cmdSeq + 1n)
+    t.deepEqual(first.nodes.map((node) => valueAt(node, 'counter')), [1, 1, 1],
+      'each replica applied the increment exactly once')
+    closeNodes(first.nodes)
+
+    const databasePath = fixture.paths.get(leader.id)
+    const db = new DatabaseSync(`${databasePath}2`)
+    if (missing === 'row') {
+      db.exec('DELETE FROM monsterft_meta')
+    } else {
+      db.exec('DROP TABLE monsterft_meta')
+      if (missing === 'all DB2 tables') { db.exec('DROP TABLE two_file_items') }
+    }
+    db.close()
+
+    const second = fixture.build({ apply })
+    const restored = second.nodes.find((node) => node.id === leader.id)
+    const beforeMessages = fixture.bus.messages.length
+    const err = errorOfCall(() => restored.open())
+    t.ok(err instanceof ErrorWithCode, 'missing metadata throws ErrorWithCode')
+    t.equal(err?.code, MONSTER_CORRUPT, 'missing metadata reports DB2 corruption')
+    t.equal(err?.message, `metadata ${missing === 'row' ? 'row' : 'table'} is missing`,
+      'the error identifies the missing metadata')
+    t.notOk(restored.isOpen || restored.log.isOpen || restored.db !== null,
+      'failed startup closes both databases')
+    t.equal(fixture.bus.messages.length, beforeMessages, 'startup sends no Raft messages')
+    t.deepEqual(second.applies, [], 'startup does not replay completed commands')
+
+    const saved = new DatabaseSync(`${databasePath}2`, { readOnly: true })
+    try {
+      if (missing === 'row') {
+        t.deepEqual(saved.prepare('SELECT * FROM monsterft_meta').all(), [],
+          'startup does not recreate the lost checkpoint row')
+      } else {
+        t.notOk(tableNames(saved).includes('monsterft_meta'),
+          'startup does not recreate the lost metadata table')
+      }
+      if (missing !== 'all DB2 tables') {
+        t.equal(Number(valueAt({ db: saved }, 'counter')), 1,
+          'the persisted increment remains applied once')
+      }
+    } finally {
+      saved.close()
+    }
+  })
+}
+
+test('an empty log does not allow reseeding existing DB2 state', (t) => {
+  for (const missing of ['row', 'table']) {
+    const fixture = clusterFixture(t, `empty-log-missing-${missing}`)
+    const original = fixture.build().nodes[0]
+    original.open()
+    t.equal(original.seq, -1n, 'the original log has no entries')
+    if (missing === 'row') {
+      original.db.exec('DELETE FROM monsterft_meta')
+    } else {
+      initializeApp(original.db)
+      original.db.exec('DROP TABLE monsterft_meta')
+    }
+    original.close()
+
+    const restored = fixture.build().nodes[0]
+    const err = errorOfCall(() => restored.open())
+    t.equal(err?.code, MONSTER_CORRUPT, `missing ${missing} is rejected despite an empty log`)
+    t.notOk(restored.isOpen || restored.log.isOpen || restored.db !== null,
+      'failed startup closes both databases')
+  }
+  t.end()
+})
+
+test('failed fresh metadata initialization leaves an empty pair that can be retried', (t) => {
+  const databasePath = uniquePath('metadata-init-rollback')
+  removePair(databasePath)
+  const nodes = []
+  t.teardown(() => {
+    closeNodesQuietly(nodes)
+    removePair(databasePath)
+  })
+
+  class FailedInit extends MonsterFt {
+    _monsterInit(db) {
+      const exec = db.exec.bind(db)
+      db.exec = (sql) => exec(sql.replace('INSERT INTO monsterft_meta', 'INSERT INTO missing_table'))
+      return super._monsterInit(db)
+    }
+  }
+  const opts = { electionTimeout: 60_000, pingTimeout: 60_000, apply: applyApp }
+  const failed = new FailedInit('1', ids, noop, databasePath, opts)
+  nodes.push(failed)
+  const err = errorOfCall(() => failed.open())
+  t.equal(err?.code, SQLITE_ERROR, 'an insert failure reports the SQLite error')
+  t.notOk(failed.isOpen || failed.log.isOpen || failed.db !== null,
+    'initialization failure closes both databases')
+  const saved = new DatabaseSync(`${databasePath}2`, { readOnly: true })
+  try {
+    t.deepEqual(tableNames(saved), [], 'the failed insertion also rolls back table creation')
+  } finally {
+    saved.close()
+  }
+
+  const restored = new MonsterFt('1', ids, noop, databasePath, opts)
+  nodes.push(restored)
+  restored.open()
+  t.ok(restored.isOpen, 'an existing empty pair initializes successfully on retry')
+  t.equal(restored._applySeq, -1n, 'the retry starts at the initial checkpoint')
+  t.equal(restored.db.prepare('SELECT count(*) AS count FROM monsterft_meta').get().count, 1n,
+    'the retry creates exactly one metadata row')
+  t.end()
+})
+
 test('open rejects a DB2 checkpoint hash mismatch', async (t) => {
   const fixture = clusterFixture(t, 'hash-mismatch')
   const first = fixture.build()
@@ -1416,8 +1658,8 @@ test('open rejects a DB2 checkpoint hash mismatch', async (t) => {
   const err = errorOfCall(() => second.nodes[0].open())
   t.ok(err instanceof ErrorWithCode,
     'the checkpoint hash mismatch throws ErrorWithCode')
-  t.equal(err?.code, LOG_CORRUPT,
-    'the checkpoint hash mismatch reports LOG_CORRUPT')
+  t.equal(err?.code, MONSTER_CORRUPT,
+    'the checkpoint hash mismatch reports MONSTER_CORRUPT')
   t.equal(err?.sqlCode, null,
     'the checkpoint hash mismatch has no SQLite error code')
   t.match(
@@ -1480,13 +1722,13 @@ test('checkpoint ahead of DB1 rejects and requires a fresh object',
     const err = errorOfCall(() => failed.open())
     t.ok(err instanceof ErrorWithCode,
       'the checkpoint ahead of DB1 throws ErrorWithCode')
-    t.equal(err?.code, LOG_CORRUPT,
-      'the checkpoint ahead of DB1 reports LOG_CORRUPT')
+    t.equal(err?.code, MONSTER_CORRUPT,
+      'the checkpoint ahead of DB1 reports MONSTER_CORRUPT')
     t.equal(err?.sqlCode, null,
       'the checkpoint ahead of DB1 has no SQLite error code')
     t.match(
       err?.message ?? '',
-      /applied sequence is illegal/,
+      /applied sequence is corrupt/,
       'MonsterFt rejects a DB2 checkpoint ahead of DB1',
     )
     t.notOk(failed.log.isOpen, 'invalid checkpoint cleanup closes DB1')
@@ -2277,6 +2519,197 @@ test('drain excludes an active follower CMD transaction that rolls back',
     t.equal(MonsterFt.certify(fixture.paths.get(follower.id)), meta.applied_seq,
       'the rolled-back donor pair passes default certification')
   })
+
+for (const scenario of ['normal listener', 'throwing listener', 'closing listener', 'after release']) {
+  test(`drain reports a native transaction failure: ${scenario}`,
+    async (t) => {
+      const fixture = clusterFixture(t, `drain-disk-full-${scenario.replaceAll(' ', '-')}`)
+      const entered = deferred()
+      const release = deferred()
+      const originals = new Map()
+      t.teardown(() => release.resolve())
+
+      const cluster = fixture.build({
+        apply: async function drainFailureApply(db, buf, term, seq, index, matchIndex, node) {
+          const result = applyApp(db, buf, term, seq, index, matchIndex)
+          if (seq === 0n) {
+            db.exec('CREATE TABLE drain_failure_blob (id INTEGER PRIMARY KEY, value BLOB)')
+            return result
+          }
+          if (node.id === '3') {
+            entered.resolve()
+            await release.promise
+          }
+          try {
+            db.exec('INSERT INTO drain_failure_blob VALUES (1, zeroblob(1048576))')
+          } catch (err) {
+            originals.set(node.id, err)
+            throw err
+          }
+          return result
+        },
+      })
+      const leader = await openAndElect(cluster.nodes)
+      await leader._monsterLeaderSync
+      await waitApplied(cluster.nodes, leader._commitSeq)
+      const follower = cluster.nodes.find((node) => node.id === '3')
+      const databasePath = fixture.paths.get(follower.id)
+      const before = monsterMetaAtPath(databasePath)
+      const { page_count: pages } = follower.db.prepare('PRAGMA page_count').get()
+      follower.db.exec(`PRAGMA max_page_count = ${pages}`)
+      const listenerFailure = new Error('injected drain error listener failure')
+      if (scenario === 'throwing listener') {
+        follower.on('error', () => { throw listenerFailure })
+      } else if (scenario === 'closing listener') {
+        follower.on('error', () => follower.close())
+      }
+
+      const synced = nextSync(leader)
+      const appending = leader.append(toBuf({ key: 'drain-disk-full', value: 88 }))
+      appending.catch(noop)
+      await withTimeout(entered.promise, 'native failure transaction entry')
+      const [cmdSeq, result] = await withTimeout(appending, 'healthy quorum result')
+      await withTimeout(synced, 'healthy quorum SYNC')
+      t.deepEqual(result, { key: 'drain-disk-full', value: 88 },
+        'the healthy quorum completes while the follower transaction is active')
+      t.ok(follower._applySeq < cmdSeq,
+        'the follower has not advanced its checkpoint through the command')
+
+      let drainSettled = false
+      let draining = null
+      if (scenario === 'after release') {
+        const afterRelease = deferred()
+        const releaseDb = follower._monsterReleaseDb
+        follower._monsterReleaseDb = function(work, value, failed) {
+          releaseDb.call(this, work, value, failed)
+          if (failed && value === originals.get(follower.id)) {
+            afterRelease.resolve(follower.drainCmd())
+          }
+        }
+        t.teardown(() => { follower._monsterReleaseDb = releaseDb })
+        draining = afterRelease.promise
+      } else {
+        draining = follower.drainCmd()
+      }
+      draining.finally(() => { drainSettled = true }).catch(noop)
+      await sleep(20)
+      t.notOk(drainSettled, 'drain has not completed while the transaction is active')
+      release.resolve()
+      const drainError = await withTimeout(errorOf(draining), 'drain after native transaction failure')
+      if (scenario === 'closing listener') {
+        t.ok(drainError === null || drainError.code === NODE_NOT_OPEN,
+          'a listener closing the node does not strand the drain')
+      } else {
+        t.equal(drainError, null, 'drain completes after the failed transaction rolls back')
+      }
+      await sleep(20)
+
+      const original = originals.get(follower.id)
+      t.ok(original, 'SQLite throws the original transaction failure')
+      t.equal(original?.errcode, 13, 'the native failure is SQLITE_FULL')
+      const diagnostics = fixture.errors.filter(({ id, err }) => {
+        return id === follower.id && err.stack === original?.stack
+      })
+      t.equal(diagnostics.length, 1,
+        'the original failure is emitted exactly once before drain removes listeners')
+      const reported = diagnostics[0]?.err
+      t.ok(reported instanceof ErrorWithCode, 'the emitted error is normalized')
+      t.ok(reported?.message.includes(original.message),
+        'the emitted error retains the native message')
+      t.equal(reported?.sqlCode, 13, 'the emitted error retains the native SQLite code')
+      t.equal(reported?.stack, original.stack, 'the emitted error retains the original trace')
+      t.match(reported?.stack ?? '', /drainFailureApply/,
+        'the trace identifies the application callback')
+      if (scenario === 'throwing listener') {
+        t.ok(fixture.errors.some(({ err }) => err === listenerFailure),
+          'a throwing listener does not interrupt the drain')
+      }
+      t.notOk(follower.isOpen, 'drain closes the failed follower before resolving')
+      t.equal(follower.db, null, 'drain closes DB2')
+      t.notOk(follower.log.isOpen, 'drain closes DB1')
+      t.equal(follower._monsterPendingCommand, null,
+        'the failed transaction does not publish a pending command')
+      t.deepEqual(monsterMetaAtPath(databasePath), before,
+        'the durable checkpoint and pending metadata survive unchanged')
+      t.equal(valueAtPath(databasePath, 'drain-disk-full'), null,
+        'the earlier application write rolls back with the failed transaction')
+      t.equal(MonsterFt.certify(databasePath), before.applied_seq,
+        'the rolled-back pair remains a valid drain donor')
+      t.equal(fixture.errors.filter(({ id }) => id !== follower.id).length, 0,
+        'the healthy quorum has no errors')
+    })
+}
+
+test('drain preserves the fatal path for a failing pending SYNC', async (t) => {
+  const fixture = clusterFixture(t, 'drain-sync-failure')
+  const cluster = fixture.build()
+  const leader = await openAndElect(cluster.nodes)
+  await leader._monsterLeaderSync
+  await waitApplied(cluster.nodes, leader._commitSeq)
+  const follower = cluster.nodes.find((node) => node.id === '3')
+  const databasePath = fixture.paths.get(follower.id)
+  const entered = deferred()
+  const release = deferred()
+  const applySync = follower._monsterApplySync
+  follower._monsterApplySync = async function(...args) {
+    entered.resolve()
+    await release.promise
+    return applySync.apply(this, args)
+  }
+  t.teardown(() => {
+    follower._monsterApplySync = applySync
+    release.resolve()
+  })
+  follower.db.exec(`
+    CREATE TRIGGER fail_pending_sync
+    BEFORE UPDATE OF pending_cmd_seq ON monsterft_meta
+    WHEN NEW.pending_cmd_seq IS NULL
+    BEGIN
+      SELECT RAISE(ABORT, 'injected pending SYNC failure');
+    END
+  `)
+  const fatals = []
+  follower.on('fatal', (err) => fatals.push(err))
+  const synced = nextSync(leader)
+  const [cmdSeq, result] = await leader.append(toBuf({ key: 'drain-sync-failure', value: 99 }))
+  await withTimeout(synced, 'healthy quorum SYNC before failure')
+  await withTimeout(entered.promise, 'follower blocked before failing SYNC')
+  t.deepEqual(result, { key: 'drain-sync-failure', value: 99 },
+    'the command succeeds before follower SYNC failure')
+  const before = monsterMetaAtPath(databasePath)
+  t.equal(before.pending_cmd_seq, cmdSeq,
+    'the follower has a durable pending command to drain')
+
+  let drainSettled = false
+  const draining = follower.drainCmd()
+  draining.finally(() => { drainSettled = true }).catch(noop)
+  await sleep(20)
+  t.notOk(drainSettled, 'drain waits for the pending SYNC')
+  release.resolve()
+  const drainError = await withTimeout(errorOf(draining), 'drain after fatal SYNC failure')
+  await sleep(20)
+  t.ok(drainError instanceof ErrorWithCode,
+    'drain rejects when the pending command cannot complete')
+  t.equal(fatals.length, 1, 'the SYNC storage failure follows the normal fatal path')
+  const diagnostics = fixture.errors.filter(({ id }) => id === follower.id)
+  t.equal(diagnostics.length, 1,
+    'drain does not duplicate the fatal error diagnostic')
+  const reported = diagnostics[0]?.err
+  t.equal(reported, fatals[0], 'fatal and error events share the failure')
+  t.match(reported?.message ?? '', /injected pending SYNC failure/,
+    'the original SQLite failure remains visible')
+  t.equal(reported?.code, APPLY_ERROR, 'the failed SYNC is an application failure')
+  t.equal(reported?.sqlCode, 1811, 'the native SQLite trigger error code survives')
+  t.notOk(follower.isOpen, 'fatal shutdown closes the follower')
+  t.equal(follower.db, null, 'fatal shutdown closes DB2')
+  t.notOk(follower.log.isOpen, 'fatal shutdown closes DB1')
+  t.deepEqual(monsterMetaAtPath(databasePath), before,
+    'SYNC rollback preserves the pending command and its durable checkpoint')
+  t.equal(valueAtPath(databasePath, 'drain-sync-failure'), 99,
+    'the previously committed command output is retained')
+  t.equal(fixture.errors.filter(({ id }) => id !== follower.id).length, 0,
+    'the healthy quorum remains operational')
+})
 
 test('drain prevents a later replicated CMD from entering application',
   async (t) => {
