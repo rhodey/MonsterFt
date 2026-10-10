@@ -5,7 +5,7 @@ import { logFixture, toEntry } from './util.js'
 const collect = (log, seq=0n, opts={}) => {
   const entries = []
   for (const entry of log.iter(seq, opts)) {
-    entries.push(entry.subarray(8).toString())
+    entries.push(entry.entry.toString())
   }
   return entries
 }
@@ -25,8 +25,10 @@ test('SQLiteLog return values and iteration', (t) => {
   ]), 1n, 'appendBatch returns its first seq directly')
 
   const iter = log.iter(0n)
-  t.deepEqual(Array.from(iter, (entry) => entry.subarray(8).toString()),
+  t.deepEqual(Array.from(iter, (entry) => entry.entry.toString()),
     ['zero', 'one', 'two'], 'iterator yields entries')
+  t.deepEqual(Array.from(log.iter(), (entry) => entry.term),
+    [1n, 2n, 3n], 'iterator preserves each term in a mixed-term batch')
   log.trim(0n)
   log.close()
   log.del()

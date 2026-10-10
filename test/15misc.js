@@ -103,7 +103,7 @@ test('test elect n=3 then del 1 follower', async (t) => {
   for (const node of nodes) {
     let count = 0n
     for (let next of node.log.iter(count)) {
-      next = next.subarray(8)
+      next = next.entry
       if (next.length <= 0) { continue }
       next = toObj(next)
       t.deepEqual(next, data[count], `node ${node.id} data ${count} ok`)
@@ -176,7 +176,7 @@ test('test elect n=3 then del 1 leader', async (t) => {
   for (const node of nodes) {
     let count = 0n
     for (let next of node.log.iter(count)) {
-      next = next.subarray(8)
+      next = next.entry
       if (next.length <= 0) { continue }
       next = toObj(next)
       t.deepEqual(next, data[count], `node ${node.id} data ${count} ok`)

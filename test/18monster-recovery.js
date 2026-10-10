@@ -31,12 +31,10 @@ const monsterPath = (database) => `${database}2`
 const toBuf = (value) => Buffer.from(JSON.stringify(value), 'utf8')
 const toObj = (buf) => JSON.parse(Buffer.from(buf).toString('utf8'))
 
-const raftEntry = (term, record) => {
-  const prefix = Buffer.alloc(8)
-  prefix.writeBigUInt64LE(term)
-  if (record === null) { return prefix }
-  return Buffer.concat([prefix, Buffer.from(pack(record))])
-}
+const raftEntry = (term, record) => ({
+  term,
+  entry: record === null ? Buffer.alloc(0) : Buffer.from(pack(record)),
+})
 
 const withTimeout = (promise, name, ms=10_000) => {
   let timer = null
@@ -131,7 +129,7 @@ const syncSeqAt = (node, cmdSeq) => {
     ORDER BY seq
   `).all(cmdSeq)
   const match = rows.find(({ entry }) => {
-    const payload = Buffer.from(entry).subarray(8)
+    const payload = Buffer.from(entry)
     if (payload.length === 0) { return false }
     const record = unpack(payload)
     return record.type === 'sync' && record.cmdSeq === cmdSeq
@@ -144,7 +142,7 @@ const raftRecordAt = (node, seq) => {
     SELECT entry FROM raft_log WHERE seq = ?
   `).get(seq)
   if (row === undefined) { return null }
-  return unpack(Buffer.from(row.entry).subarray(8))
+  return unpack(Buffer.from(row.entry))
 }
 
 const raftRecordAtPath = (database, seq) => {
@@ -157,7 +155,7 @@ const raftRecordAtPath = (database, seq) => {
       SELECT entry FROM raft_log WHERE seq = ?
     `).get(seq)
     if (row === undefined) { return null }
-    return unpack(Buffer.from(row.entry).subarray(8))
+    return unpack(Buffer.from(row.entry))
   } finally {
     db.close()
   }
@@ -170,9 +168,10 @@ const raftBytesAtPath = (database) => {
   })
   try {
     return db.prepare(`
-      SELECT seq, entry FROM raft_log ORDER BY seq
-    `).all().map(({ seq, entry }) => ({
+      SELECT seq, term, entry FROM raft_log ORDER BY seq
+    `).all().map(({ seq, term, entry }) => ({
       seq,
+      term,
       entry: Buffer.from(entry),
     }))
   } finally {
@@ -187,11 +186,11 @@ const appendRaftAtPath = (database, entries) => {
       SELECT COALESCE(MAX(seq), -1) AS tail FROM raft_log
     `).get()
     const insert = db.prepare(`
-      INSERT INTO raft_log (seq, entry) VALUES (?, ?)
+      INSERT INTO raft_log (seq, term, entry) VALUES (?, ?, ?)
     `)
-    return entries.map((entry, index) => {
+    return entries.map(({ term, entry }, index) => {
       const seq = tail + 1n + BigInt(index)
-      insert.run(seq, entry)
+      insert.run(seq, term, entry)
       return seq
     })
   } finally {
@@ -557,9 +556,9 @@ for (const waitingState of ['follower', 'candidate']) {
 
       for (const node of cluster.nodes) {
         const records = raftBytesAtPath(fixture.paths.get(node.id))
-          .filter(({ entry }) => entry.length > 8)
+          .filter(({ entry }) => entry.length > 0)
           .map(({ seq, entry }) => {
-            const record = unpack(entry.subarray(8))
+            const record = unpack(entry)
             return [record.type, record.cmdSeq ?? seq]
           })
         t.deepEqual(records, [

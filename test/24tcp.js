@@ -413,3 +413,48 @@ test('tcp transports structured outcome arrays in the enclosing message', async 
   await timeout(clientClosed, 'structured outcome client close')
   await closeServer(server)
 })
+
+test('tcp transports Raft records with separate bigint terms and Buffer payloads', async (t) => {
+  await sodium.ready
+  const key = Buffer.from(sodium.crypto_secretstream_xchacha20poly1305_keygen())
+  let receive
+  const received = new Promise((res) => { receive = res })
+  const server = await tcpServer(key, 0, (pack, msg) => {
+    receive(msg)
+    pack.write(msg)
+  }, noop)
+  let echo
+  const echoed = new Promise((res) => { echo = res })
+  const client = await tcpClient(key, server.address().port, '127.0.0.1', echo)
+  client.on('error', noop)
+  try {
+    const message = {
+      type: 'append',
+      cid: 'separate-terms',
+      term: 9_223_372_036_854_775_807n,
+      termP: -1n,
+      seqP: -1n,
+      commitSeq: 2n,
+      data: [
+        { term: 0n, entry: Buffer.alloc(0) },
+        { term: 1n, entry: Buffer.from([255]) },
+        { term: 9_223_372_036_854_775_807n, entry: Buffer.from([0, 255, 0, 127]) },
+      ],
+    }
+    client.write(message)
+    const replies = await timeout(Promise.all([received, echoed]), 'Raft record round trip')
+    for (const [index, reply] of replies.entries()) {
+      const side = index === 0 ? 'server' : 'client'
+      t.deepEqual(reply, message, `${side}: preserves every envelope and record field`)
+      t.ok(reply.data.every((record) => typeof record.term === 'bigint'),
+        `${side}: preserves bigint terms including zero and the signed maximum`)
+      t.ok(reply.data.every((record) => Buffer.isBuffer(record.entry)),
+        `${side}: preserves empty, short, and binary payloads as Buffers`)
+    }
+  } finally {
+    const clientClosed = closed(client)
+    client.destroy()
+    await timeout(clientClosed, 'Raft record client close')
+    await closeServer(server)
+  }
+})

@@ -1197,7 +1197,7 @@ test('malformed message values and append payloads are ignored or rejected', asy
   await node.onReceive('2', {
     type: 'append', cid: 'overflow-entry', term: 0n,
     termP: 0n, seqP: 9_223_372_036_854_775_807n, commitSeq: -1n,
-    data: [Buffer.alloc(8)],
+    data: [{ term: 0n, entry: Buffer.alloc(0) }],
   })
   t.equal(sent.length, 2, 'overflowing AppendEntries receives one reply')
   t.equal(sent[1][1].type, 'err', 'overflowing AppendEntries receives ERR')
@@ -1549,8 +1549,7 @@ test('higher-term AppendEntries stops when election persistence fails', async (t
   const errored = new Promise((resolve) => node.once('error', resolve))
   node.open()
 
-  const entry = Buffer.alloc(8)
-  entry.writeBigUInt64LE(1n)
+  const entry = { term: 1n, entry: Buffer.alloc(0) }
   await node.onReceive('2', {
     type: 'append',
     term: 1n,
@@ -2205,8 +2204,7 @@ test('leader only commits current-term entries by replica count', async (t) => {
   node._rxVote({ term: 2n, voteGranted: true }, '2')
   node._rxVote({ term: 2n, voteGranted: true }, '3')
 
-  const oldEntry = Buffer.alloc(8)
-  oldEntry.writeBigUInt64LE(1n)
+  const oldEntry = { term: 1n, entry: Buffer.alloc(0) }
   entries.set(4n, oldEntry)
   node._replicationState('2', node.term, node.seq + 1n).matchIndex = 4n
   node._replicationState('3', node.term, node.seq + 1n).matchIndex = 4n
@@ -2216,8 +2214,7 @@ test('leader only commits current-term entries by replica count', async (t) => {
   t.equal(node._commitSeq, -1n, 'does not commit an old-term entry from replica count')
   t.deepEqual(commits, [], 'does not emit a commit for the old-term entry')
 
-  const currentEntry = Buffer.alloc(8)
-  currentEntry.writeBigUInt64LE(2n)
+  const currentEntry = { term: 2n, entry: Buffer.alloc(0) }
   entries.set(5n, currentEntry)
   log.seq = 5n
   node._replicationState('2', node.term, node.seq + 1n).matchIndex = 5n
@@ -2229,8 +2226,7 @@ test('leader only commits current-term entries by replica count', async (t) => {
 
 test('commit term is read before commit publication', async (t) => {
   const order = []
-  const entry = Buffer.alloc(8)
-  entry.writeBigUInt64LE(2n)
+  const entry = { term: 2n, entry: Buffer.alloc(0) }
   const log = {
     *iter() {
       order.push('read')
@@ -2290,8 +2286,7 @@ test('commit log read failure closes the node', async (t) => {
 })
 
 test('replica count does not report success for an uncommitted old-term entry', async (t) => {
-  const entry = Buffer.alloc(8)
-  entry.writeBigUInt64LE(1n)
+  const entry = { term: 1n, entry: Buffer.alloc(0) }
   const log = {
     *iter() {
       yield entry

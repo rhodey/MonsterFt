@@ -11,7 +11,7 @@ import {
   SQLITE_ERROR,
 } from '../src/error.js'
 import { SQLiteLog } from '../src/index.js'
-import { logFixture, toBuf, toObj, toEntry } from './util.js'
+import { logFixture, toBuf, toEntry } from './util.js'
 
 const MAX_SEQ = 9_223_372_036_854_775_807n
 const sqliteFiles = (file) => [
@@ -159,9 +159,7 @@ test('election term and vote state persist', (t) => {
     'writes term and candidate together')
   t.equal(log.elec.term, 3n, 'caches the updated term')
   t.equal(log.elec.votedFor, 'node-a', 'caches the updated candidate')
-  const entry = Buffer.alloc(8)
-  entry.writeBigUInt64LE(2n)
-  log.append(entry)
+  log.append(toEntry(Buffer.alloc(0), 2n))
   t.equal(log.term, 2n, 'head term can differ from election term')
 
   log.close()
@@ -358,13 +356,13 @@ test('failed log initialization rolls back tables and election state', (t) => {
   t.end()
 })
 
-test('append buffers persist across reopen', (t) => {
+test('append records persist terms and exact payloads across reopen', (t) => {
   const { create } = logFixture(t, '02-append')
   let log = create()
   log.del()
   log.open()
 
-  const entries = [Buffer.alloc(0), Buffer.from('x'), toBuf({ value: 3 })]
+  const entries = [Buffer.alloc(0), Buffer.from([0, 255]), toBuf({ value: 3 })]
   for (let i = 0; i < entries.length; i++) {
     const seq = log.append(toEntry(entries[i], BigInt(i)))
     t.equal(seq, BigInt(i), `append returns ${i}`)
@@ -372,6 +370,9 @@ test('append buffers persist across reopen', (t) => {
     t.equal(log.seq, BigInt(i), `head seq ${i}`)
     t.equal(log.term, BigInt(i), `head term ${i}`)
     t.ok(log.head.equals(entries[i]), `head buffer ${i}`)
+    const row = log.db.prepare('SELECT term, entry FROM raft_log WHERE seq = ?').get(seq)
+    t.equal(row.term, BigInt(i), `SQL term ${i} is stored separately`)
+    t.deepEqual(Buffer.from(row.entry), entries[i], `SQL payload ${i} has no prefix`)
   }
 
   t.equal(log.append(toEntry('stable', 3n)), 3n, 'append returns 3')
@@ -410,6 +411,31 @@ test('append batch updates first seq and head', (t) => {
   log.open()
   t.equal(log.seq, 3n, 'batch seq persists')
   t.ok(log.head.equals(entries[2]), 'batch head persists')
+  t.end()
+})
+
+test('empty payloads can be appended after reading and from zero-byte views', (t) => {
+  const source = new SQLiteLog(':memory:')
+  const target = new SQLiteLog(':memory:')
+  t.teardown(() => { source.close(); target.close() })
+  source.open()
+  target.open()
+  source.append(toEntry(Buffer.alloc(0), 2n))
+  const readback = source.iter().next().value
+  const view = toEntry(Buffer.from(new ArrayBuffer(0)), 3n)
+
+  for (const record of [readback, view]) {
+    target.append(record)
+    t.equal(target.head, record.entry, 'append keeps ownership of the original empty buffer')
+    target.appendBatch([record])
+    t.equal(target.head, record.entry, 'appendBatch keeps ownership of the original empty buffer')
+  }
+  const rows = target.db.prepare('SELECT term, typeof(entry) AS type, length(entry) AS size FROM raft_log').all()
+  t.deepEqual(rows.map((row) => row.term), [2n, 2n, 3n, 3n], 'both append paths preserve terms')
+  t.ok(rows.every((row) => row.type === 'blob' && row.size === 0n),
+    'all empty payloads bind as zero-length BLOBs rather than NULL')
+  t.deepEqual([...target.iter()], [readback, readback, view, view],
+    'readback records and external zero-byte views remain readable')
   t.end()
 })
 
@@ -464,9 +490,9 @@ test('append and trim validate arguments', (t) => {
     }
   }
 
-  t.throws(() => log.append('nope'), /data must be buffer/, 'append requires buffer')
-  t.throws(() => log.append(Buffer.alloc(7)), /length must be >= 8/,
-    'append requires a term prefix')
+  t.throws(() => log.append('nope'), /data must be record/, 'append requires a record')
+  t.throws(() => log.append({ term: 0n, entry: 'nope' }), /entry must be buffer/,
+    'append requires a buffer payload')
   t.throws(() => log.append(Buffer.alloc(0), -1n), /seq must be >= 0/,
     'append rejects negative seq')
   throwsInvalidArgument(
@@ -478,10 +504,10 @@ test('append and trim validate arguments', (t) => {
     () => log.appendBatch('nope'), /data must be array/, 'batch non-array data')
   throwsInvalidArgument(
     () => log.appendBatch([]), /length > 0/, 'batch empty data')
-  t.throws(() => log.appendBatch([toEntry(Buffer.alloc(0)), 'nope']), /data must be buffer/,
-    'batch requires buffers')
-  t.throws(() => log.appendBatch([Buffer.alloc(7)]), /length must be >= 8/,
-    'batch requires term prefixes')
+  t.throws(() => log.appendBatch([toEntry(Buffer.alloc(0)), 'nope']), /data must be record/,
+    'batch requires records')
+  t.throws(() => log.appendBatch([{ entry: Buffer.alloc(0) }]), /term must be bigint/,
+    'batch requires explicit terms')
   throwsInvalidArgument(
     () => log.appendBatch([toEntry(Buffer.alloc(0))], 1n),
     /next 0 !== 1/, 'batch sequence gap')
@@ -525,26 +551,119 @@ test('entry terms stay within the supported range', (t) => {
   t.end()
 })
 
-test('stored out-of-range entry terms report log corruption', (t) => {
-  const { create } = logFixture(t, '02-corrupt-entry-term')
+test('append prevalidates every record before writing', (t) => {
+  const { create } = logFixture(t, '02-record-validation')
   const log = create()
   log.del()
   log.open()
-  const invalid = toEntry('invalid', MAX_SEQ + 1n)
-  const insert = log.db.prepare('INSERT INTO raft_log (seq, entry) VALUES (?, ?)')
-  insert.run(0n, invalid)
-  insert.run(1n, toEntry('valid', 1n))
-  log.close()
+  const seed = toEntry('seed', 2n)
+  log.append(seed)
+
+  const cases = [
+    ['null record', null],
+    ['array record', []],
+    ['old buffer format', Buffer.alloc(8)],
+    ['missing term', { entry: Buffer.alloc(0) }],
+    ['number term', toEntry('invalid', 1)],
+    ['negative term', toEntry('invalid', -1n)],
+    ['overflow term', toEntry('invalid', MAX_SEQ + 1n)],
+    ['missing payload', { term: 0n }],
+    ['null payload', { term: 0n, entry: null }],
+    ['typed array payload', { term: 0n, entry: new Uint8Array(1) }],
+  ]
+  const exec = log.db.exec.bind(log.db)
+  const insert = log._statements.insert.run.bind(log._statements.insert)
+  let writes = 0
+  log.db.exec = (...args) => { writes++; return exec(...args) }
+  log._statements.insert.run = (...args) => { writes++; return insert(...args) }
+  try {
+    for (const [name, record] of cases) {
+      t.throws(() => log.append(record), (err) => err.code === ARGUMENT_ILLEGAL,
+        `append rejects ${name}`)
+      t.throws(() => log.appendBatch([toEntry('valid', 3n), record]),
+        (err) => err.code === ARGUMENT_ILLEGAL, `batch rejects ${name}`)
+    }
+  } finally {
+    delete log.db.exec
+    delete log._statements.insert.run
+  }
+  t.equal(writes, 0, 'invalid records reach neither transaction setup nor inserts')
+  t.equal(log.seq, 0n, 'invalid records leave the cached sequence unchanged')
+  t.deepEqual([...log.iter()], [seed], 'invalid records leave stored history unchanged')
+  t.end()
+})
+
+test('stored invalid entry terms and payloads report log corruption', (t) => {
+  const cases = [
+    ['negative-term', -1n, Buffer.alloc(0), /term must be >= 0/],
+    ['null-term', null, Buffer.alloc(0), /term must be bigint/],
+    ['text-term', '1', Buffer.alloc(0), /term must be bigint/],
+    ['real-term', 1.5, Buffer.alloc(0), /term must be bigint/],
+    ['oversized-term', Number(MAX_SEQ) * 2, Buffer.alloc(0), /term must be bigint/],
+    ['null-payload', 1n, null, /entry must be blob/],
+    ['text-payload', 1n, 'payload', /entry must be blob/],
+    ['integer-payload', 1n, 2n, /entry must be blob/],
+  ]
+  for (const [name, term, entry, message] of cases) {
+    const { create } = logFixture(t, `02-corrupt-entry-${name}`)
+    const log = create()
+    log.del()
+    log.open()
+    // Remove affinities and constraints to exercise restoration checks.
+    log.db.exec(`
+      DROP TABLE raft_log;
+      CREATE TABLE raft_log (seq INTEGER PRIMARY KEY, term, entry);
+    `)
+    const insert = log.db.prepare('INSERT INTO raft_log (seq, term, entry) VALUES (?, ?, ?)')
+    insert.run(0n, term, entry)
+    insert.run(1n, 1n, Buffer.from('valid'))
+    log.close()
+    log.open()
+
+    const corrupt = (err) => err.code === LOG_CORRUPT && message.test(err.message)
+    t.throws(() => [...log.iter()], corrupt, `${name}: iteration rejects an invalid interior row`)
+
+    log.db.prepare('UPDATE raft_log SET term = ?, entry = ? WHERE seq = 1').run(term, entry)
+    log.close()
+    t.throws(() => log.open(), corrupt, `${name}: open rejects an invalid head row`)
+    t.notOk(log.isOpen, `${name}: failed open leaves the log closed`)
+    t.equal(log.db, null, `${name}: failed open releases the database`)
+  }
+  t.end()
+})
+
+test('old log schemas fail without migration or data loss', (t) => {
+  const { create, file } = logFixture(t, '02-old-schema')
+  const log = create()
+  log.del()
   log.open()
-
-  const corrupt = (err) => err.code === LOG_CORRUPT &&
-    err.message.includes(`term must be <= ${MAX_SEQ}`)
-  t.throws(() => [...log.iter()], corrupt, 'iteration rejects an invalid interior term')
-
-  log.db.prepare('UPDATE raft_log SET entry = ? WHERE seq = 1').run(invalid)
+  log.election(4n, 'node-a')
+  log.db.exec(`
+    DROP TABLE raft_log;
+    CREATE TABLE raft_log (seq INTEGER PRIMARY KEY, entry BLOB NOT NULL) STRICT;
+  `)
+  const prefix = Buffer.alloc(8)
+  prefix.writeBigUInt64LE(4n)
+  const entry = Buffer.concat([prefix, Buffer.from('saved history')])
+  log.db.prepare('INSERT INTO raft_log (seq, entry) VALUES (?, ?)').run(0n, entry)
   log.close()
-  t.throws(() => log.open(), corrupt, 'open rejects an invalid head term')
-  t.notOk(log.isOpen, 'failed open leaves the log closed')
+
+  t.throws(() => log.open(), (err) => err.code === SQLITE_ERROR && /term/.test(err.message),
+    'statement preparation rejects the old schema')
+  t.notOk(log.isOpen, 'failed open remains closed')
+  t.equal(log.db, null, 'failed open releases the database')
+  const db = new DatabaseSync(file, { readBigInts: true })
+  try {
+    t.deepEqual(db.prepare('PRAGMA table_info(raft_log)').all().map((row) => row.name),
+      ['seq', 'entry'], 'no column or table migration occurs')
+    t.deepEqual(Buffer.from(db.prepare('SELECT entry FROM raft_log WHERE seq = 0').get().entry),
+      entry, 'old payload bytes remain untouched')
+    const election = db.prepare('SELECT current_term, voted_for FROM raft_election').get()
+    t.equal(election.current_term, 4n, 'old election term remains untouched')
+    t.equal(election.voted_for, 'node-a', 'old vote remains untouched')
+  } finally {
+    db.close()
+  }
   t.end()
 })
 
@@ -554,7 +673,7 @@ test('stored invalid sequences report log corruption', (t) => {
   seed.del()
   seed.open()
   seed.db.prepare(
-    'INSERT INTO raft_log (seq, entry) VALUES (?, ?)').run(-2n, toEntry('invalid'))
+    'INSERT INTO raft_log (seq, term, entry) VALUES (?, ?, ?)').run(-2n, 0n, Buffer.from('invalid'))
   seed.close()
 
   const log = create()

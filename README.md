@@ -196,7 +196,7 @@ licenses and other inquiries. Opening GitHub issues is also encouraged.
 
 ### Install
 
-This software is on NPM with version `0.5.2` for educational purposes. It
+This software is on NPM with version `0.6.0` for educational purposes. It
 may be the case that I cut a `1.0.0` release before releasing what is on
 the roadmap as `2.0.0` but I don't feel pressured to commit to this now.
 
