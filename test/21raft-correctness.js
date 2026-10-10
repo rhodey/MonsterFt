@@ -5,6 +5,7 @@ import {
   ErrorWithCode,
   LOG_CORRUPT,
   NO_LEADER,
+  RAFT_ILLEGAL,
   RPC_ILLEGAL,
 } from '../src/error.js'
 import { RaftNode as ProductionRaftNode } from '../src/index.js'
@@ -25,9 +26,7 @@ const RaftNode = TestRaftNode
 const ids = ['1', '2', '3']
 
 const entry = (term, data=null) => {
-  const prefix = Buffer.alloc(8)
-  prefix.writeBigUInt64LE(term)
-  return data === null ? prefix : Buffer.concat([prefix, Buffer.from(data)])
+  return { term, entry: data === null ? Buffer.alloc(0) : Buffer.from(data) }
 }
 
 const rejection = async (promise) => {
@@ -352,7 +351,7 @@ test('a returning stale candidate cannot postpone elections indefinitely', async
     const db = new DatabaseSync(files[idx], { readOnly: true })
     try {
       return db.prepare('SELECT entry FROM raft_log ORDER BY seq').all()
-        .map(({ entry }) => Buffer.from(entry).subarray(8).toString())
+        .map(({ entry }) => Buffer.from(entry).toString())
         .filter(Boolean)
     } finally { db.close() }
   }
@@ -691,8 +690,8 @@ test('follower readiness uses the committed entry term and accepts an internal n
 
   t.equal(node._commitSeq, 1n, 'the current-term no-op becomes committed')
   t.equal(node._commitTerm, 2n, 'the no-op supplies the current commit term')
-  t.equal(log.seq, 1n, 'the term-only entry is appended')
-  t.equal(log.head.length, 0, 'the term-only entry has an empty application payload')
+  t.equal(log.seq, 1n, 'the no-op entry is appended')
+  t.equal(log.head.length, 0, 'the no-op entry has an empty application payload')
   t.deepEqual(applied, ['old-term-command', null],
     'the internal no-op is applied as null')
   t.deepEqual(appliedTerms, [1n, 2n], 'application observes each stored entry term')
@@ -700,7 +699,7 @@ test('follower readiness uses the committed entry term and accepts an internal n
   node.close()
 })
 
-test('invalid replicated entry terms are rejected before state changes or trimming', async (t) => {
+test('invalid replicated records are rejected before state changes or trimming', async (t) => {
   const fixture = logFixture(t, '21-invalid-replicated-terms')
   const log = fixture.create()
   const sent = []
@@ -727,6 +726,17 @@ test('invalid replicated entry terms are rejected before state changes or trimmi
     ['append', 2n, 1n, [entry(tooLarge, 'invalid')]],
     ['replace', 1n, 0n, [entry(tooLarge, 'invalid')]],
     ['later-entry', 2n, 0n, [entry(2n, 'replacement'), entry(unsignedMax, 'invalid')]],
+    ['negative-term', 2n, 0n, [entry(-1n, 'invalid')]],
+    ['number-term', 2n, 0n, [entry(1, 'invalid')]],
+    ['string-term', 2n, 0n, [entry('1', 'invalid')]],
+    ['missing-term', 2n, 0n, [{ entry: Buffer.from('invalid') }]],
+    ['missing-entry', 2n, 0n, [{ term: 1n }]],
+    ['string-entry', 2n, 0n, [{ term: 1n, entry: 'invalid' }]],
+    ['typed-array-entry', 2n, 0n, [{ term: 1n, entry: new Uint8Array([1]) }]],
+    ['null-entry', 2n, 0n, [{ term: 1n, entry: null }]],
+    ['null-record', 2n, 0n, [null]],
+    ['array-record', 2n, 0n, [[]]],
+    ['old-prefixed-buffer', 2n, 0n, [Buffer.from([1, 0, 0, 0, 0, 0, 0, 0, 97])]],
   ]) {
     await node.onReceive(term === 1n ? '2' : '3', {
       type: 'append', cid, term, termP: 1n, seqP, commitSeq: 1n, data,
@@ -740,8 +750,8 @@ test('invalid replicated entry terms are rejected before state changes or trimmi
     t.deepEqual(log.elec, election, `${cid}: preserves the durable election state`)
     t.equal(node._commitSeq, 0n, `${cid}: does not advance commitment`)
   }
-  t.deepEqual(changes, [], 'invalid entry terms publish no state changes')
-  t.deepEqual(errors, [], 'invalid entry terms produce no fatal errors')
+  t.deepEqual(changes, [], 'invalid records publish no state changes')
+  t.deepEqual(errors, [], 'invalid records produce no fatal errors')
 
   const replacement = entry(1n, 'valid replacement')
   await node.onReceive('2', {
@@ -773,6 +783,125 @@ test('replicated entry terms accept both legal bounds', async (t) => {
   t.equal(node._commitTerm, maximum, 'the maximum term can be committed')
   t.equal(node._applySeq, 1n, 'both entries are applied')
   t.ok(node.isOpen, 'the follower remains open')
+})
+
+test('reconciliation compares both record term and payload without replacing committed history', async (t) => {
+  for (const [label, replacement] of [
+    ['term conflict', entry(2n, 'same payload')],
+    ['payload conflict', entry(1n, 'different payload')],
+  ]) {
+    for (const committed of [false, true]) {
+      const name = `${label}, ${committed ? 'committed' : 'uncommitted'}`
+      const fixture = logFixture(t, `21-record-conflict-${label.replace(' ', '-')}-${committed}`)
+      fixture.create().del()
+      const log = fixture.create()
+      const sent = []
+      const errors = []
+      const applied = []
+      const node = new RaftNode('1', ids, (to, msg) => sent.push(msg), log, {
+        ...opts,
+        apply: (node, bufs, seqs, terms) => {
+          applied.push(...bufs.map((buf, index) => [terms[index], buf?.toString()]))
+          return bufs
+        },
+      })
+      t.teardown(() => node.close())
+      node.on('error', (err) => errors.push(err))
+      node.open()
+      const original = [entry(1n, 'prefix'), entry(1n, 'same payload'), entry(1n, 'suffix')]
+      await node.onReceive('2', {
+        type: 'append', cid: 'seed-records', term: 2n,
+        termP: -1n, seqP: -1n, commitSeq: committed ? 1n : 0n, data: original,
+      })
+      await node._applyPrev
+      sent.length = 0
+      const failed = committed ? new Promise((res) => node.once('error', res)) : null
+      await node.onReceive('2', {
+        type: 'append', cid: 'replace-record', term: 2n,
+        termP: 1n, seqP: 0n, commitSeq: 1n, data: [replacement],
+      })
+      if (committed) {
+        const err = await failed
+        t.equal(err.code, RAFT_ILLEGAL, `${name}: rejects a committed conflict`)
+        t.notOk(node.isOpen, `${name}: closes on the invariant failure`)
+        t.deepEqual(sent, [], `${name}: does not acknowledge the conflict`)
+        const probe = fixture.create()
+        probe.open()
+        t.deepEqual([...probe.iter()], original, `${name}: preserves every durable record`)
+        probe.close()
+      } else {
+        await node._applyPrev
+        t.equal(sent[0]?.type, 'ack', `${name}: acknowledges reconciliation`)
+        t.deepEqual([...log.iter()], [original[0], replacement],
+          `${name}: replaces the differing record and drops the suffix`)
+        t.deepEqual(applied, [[1n, 'prefix'], [replacement.term, replacement.entry.toString()]],
+          `${name}: applies only the retained and replacement records`)
+        t.equal(node._commitTerm, replacement.term, `${name}: commits the replacement term`)
+        t.deepEqual(errors, [], `${name}: produces no application failure`)
+      }
+      node.close()
+    }
+  }
+})
+
+test('replication pages retain mixed terms and raw payloads through a public election and append', async (t) => {
+  const history = [entry(0n), entry(1n, 'a'), entry(1n, Buffer.from([0, 255])), entry(2n, 'last')]
+  const byId = new Map()
+  const pages = []
+  const applied = new Map()
+  const errors = []
+  const nodes = ids.map((id) => {
+    const fixture = logFixture(t, `21-mixed-record-pages-${id}`)
+    const seed = fixture.create()
+    seed.del()
+    seed.open()
+    if (id !== '3') { seed.appendBatch(history) }
+    seed.election(2n, null)
+    seed.close()
+    applied.set(id, [])
+    const send = (to, msg) => {
+      if (id === '1' && to === '3' && Array.isArray(msg.data)) {
+        pages.push({ seqP: msg.seqP, termP: msg.termP, data: msg.data })
+      }
+      return byId.get(to).onReceive(id, msg)
+    }
+    const node = new ProductionRaftNode(id, ids, send, fixture.file, {
+      electionTimeout: id === '1' ? 50 : 60_000,
+      pingTimeout: 100,
+      appendTimeout: 2_000,
+      rpcMax: 2,
+      applyMax: 2,
+      apply: (node, bufs, seqs, terms) => {
+        applied.get(id).push(...bufs.map((buf, i) => ({ term: terms[i], entry: buf })))
+        return bufs
+      },
+    })
+    node.on('error', (err) => errors.push(err))
+    byId.set(id, node)
+    return node
+  })
+  t.teardown(() => nodes.forEach((node) => node.close()))
+  nodes.forEach((node) => node.open())
+  await Promise.all(nodes.map((node) => node.awaitLeader(true)))
+  const [leader, , follower] = nodes
+  const payload = Buffer.from([255, 0, 1])
+  await follower.append(payload)
+  await waitFor(() => nodes.every((node) => node._applySeq === leader.seq))
+
+  t.equal(leader.state, 'leader', 'the seeded node becomes leader through an election')
+  t.deepEqual(pages.find((page) => page.seqP === -1n)?.data, history.slice(0, 2),
+    'the first page preserves an empty payload and two distinct terms')
+  const second = pages.find((page) => page.seqP === 1n)
+  t.equal(second?.termP, 1n, 'the next page reads the predecessor term from its record')
+  t.deepEqual(second?.data, history.slice(2), 'the next page preserves binary bytes and mixed terms')
+  const expected = [...history, entry(leader.term), entry(leader.term, payload)]
+  for (const node of nodes) {
+    t.deepEqual([...node.log.iter()], expected, `${node.id}: stores identical record fields`)
+    t.deepEqual(applied.get(node.id), expected.map(({ term, entry }) => ({
+      term, entry: entry.length ? entry : null,
+    })), `${node.id}: application receives payloads and separate terms, with null no-ops`)
+  }
+  t.deepEqual(errors, [], 'election, replication, and forwarded append complete without errors')
 })
 
 test('empty public commands are rejected before forwarding or log mutation', async (t) => {

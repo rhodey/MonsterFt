@@ -80,7 +80,7 @@ const makeFixture = (t, name, allowMessage=() => true) => {
 }
 
 const appendsEntry = (msg, type) => msg.type === 'append' &&
-  msg.data?.some((buf) => buf.length > 8 && unpack(buf.subarray(8)).type === type)
+  msg.data?.some(({ entry }) => entry.length > 0 && unpack(entry).type === type)
 
 const elect = async (nodes) => {
   openNodes(nodes)

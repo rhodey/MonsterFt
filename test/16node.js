@@ -46,9 +46,7 @@ const rejection = async (promise) => {
 }
 
 const entry = (term, data) => {
-  const prefix = Buffer.alloc(8)
-  prefix.writeBigUInt64LE(term)
-  return Buffer.concat([prefix, Buffer.from(data)])
+  return { term, entry: Buffer.from(data) }
 }
 
 const applyNull = (node, bufs) => bufs.map(() => null)

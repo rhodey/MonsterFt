@@ -494,7 +494,8 @@ class MonsterNode extends RaftNode {
         Err.MONSTER_CORRUPT,
       )
     }
-    const expected = crypto.createHash('sha256').update(found.value).digest()
+    const { term, entry } = found.value
+    const expected = digestEntry(term, entry)
     if (!asBuffer(appliedEntryHash).equals(expected)) {
       throw new Err.ErrorWithCode(
         'applied entry hash does not match',

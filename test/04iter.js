@@ -8,7 +8,7 @@ const collect = (iter) => {
   return entries
 }
 
-const strings = (entries) => entries.map((entry) => entry.subarray(8).toString())
+const strings = (entries) => entries.map((entry) => entry.entry.toString())
 const toEntries = (entries) => entries.map((entry) => toEntry(entry))
 
 test('iterate all entries and from an offset', (t) => {
@@ -17,11 +17,11 @@ test('iterate all entries and from an offset', (t) => {
   log.del()
   log.open()
 
-  const entries = [toEntry(Buffer.alloc(0)), toEntry('x'), toEntry('longer')]
+  const entries = [toEntry(Buffer.alloc(0), 0n), toEntry('x', 1n), toEntry('longer', 2n)]
   log.appendBatch(entries)
   let found = collect(log.iter(0n))
   t.equal(found.length, 3, 'all entries returned')
-  found.forEach((entry, idx) => t.ok(entry.equals(entries[idx]), `entry ${idx} matches`))
+  found.forEach((entry, idx) => t.deepEqual(entry, entries[idx], `entry ${idx} matches`))
 
   found = collect(log.iter(1n))
   t.deepEqual(strings(found), ['x', 'longer'], 'offset entries returned')
@@ -51,7 +51,7 @@ test('iterator batches lazily and preserves order', (t) => {
   }
   const iter = log.iter(0n, { iterStepSize: 2 })
   t.equal(reads, 0, 'creating an iterator does not read rows')
-  t.equal(iter.next().value.subarray(8).toString(), 'zero', 'first row is available')
+  t.equal(iter.next().value.entry.toString(), 'zero', 'first row is available')
   t.equal(reads, 1, 'first step reads one batch')
   t.deepEqual(strings(collect(iter)), ['one', 'two', 'three', 'four'],
     'remaining batches preserve order')
@@ -93,7 +93,7 @@ test('iteration can stop early', (t) => {
 
   let count = 0
   for (const entry of log.iter(0n)) {
-    t.equal(entry.subarray(8).toString(), 'zero', 'first entry')
+    t.equal(entry.entry.toString(), 'zero', 'first entry')
     count++
     break
   }

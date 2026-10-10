@@ -24,8 +24,9 @@ const max = (a, b) => a > b ? a : b
 const min = (a, b) => a < b ? a : b
 const rand = (min, max) => Math.floor(Math.random() * (max - min)) + min
 const isEntries = (data) => Array.isArray(data) && data.length > 0 &&
-  data.every((entry) => Buffer.isBuffer(entry) && entry.length >= 8 &&
-    util.isTerm(entry.readBigUInt64LE()))
+  data.every((record) => record !== null && typeof record === 'object' &&
+    !Array.isArray(record) && util.isTerm(record.term) &&
+    Buffer.isBuffer(record.entry))
 const isForwardData = (data) =>
   (Buffer.isBuffer(data) && data.length > 0) ||
   (Array.isArray(data) && data.length > 0 &&
@@ -401,9 +402,9 @@ class RaftNode extends EventEmitter {
         let next = begin
         const arr = []
         try {
-          for (const buf of this.log.iter(begin)) {
+          for (const record of this.log.iter(begin)) {
             if (this._closing) { return }
-            arr.push(buf)
+            arr.push(record)
             next++
             if (arr.length >= this.opts.applyMax || next > end) { break }
           }
@@ -416,9 +417,9 @@ class RaftNode extends EventEmitter {
         if (arr.length <= 0) { break }
 
         try {
-          const data = arr.map((buf) => buf.length > 8 ? buf.subarray(8) : null)
+          const data = arr.map(({ entry }) => entry.length > 0 ? entry : null)
           const seqs = data.map((buf, idx) => begin + BigInt(idx))
-          const terms = arr.map((buf) => buf.readBigUInt64LE())
+          const terms = arr.map(({ term }) => term)
           let results = this.opts.apply(this, data, seqs, terms)
           if (results instanceof Promise) { results = await results }
           if (this._closing) { return }
@@ -730,7 +731,7 @@ class RaftNode extends EventEmitter {
       const term = this.term
       let entryTerm = null
       for (const entry of this.log.iter(match)) {
-        entryTerm = entry.readBigUInt64LE()
+        entryTerm = entry.term
         break
       }
       if (entryTerm === null) {
@@ -776,10 +777,10 @@ class RaftNode extends EventEmitter {
         this._emitSafe('warn', err)
         return false
       }
-      for (const buf of this.log.iter(b)) {
+      for (const entry of this.log.iter(b)) {
         if (!this._replicationActive(state)) { return false }
-        if (termP !== null) { data.push(buf) }
-        termP = termP ?? buf.readBigUInt64LE()
+        if (termP !== null) { data.push(entry) }
+        termP = termP ?? entry.term
         if (BigInt(data.length) >= count) { break }
       }
     } catch (err) {
@@ -958,10 +959,8 @@ class RaftNode extends EventEmitter {
   _appendToSelfAndFollowers(data) {
     const batch = Array.isArray(data)
     const raftTerm = this.term
-    const term = Buffer.allocUnsafe(8)
-    term.writeBigUInt64LE(raftTerm)
     data = batch ? data : [data]
-    data = data.map((buf) => Buffer.concat([term, buf]))
+    data = data.map((entry) => ({ term: raftTerm, entry }))
 
     let seq = null
     try {
@@ -1119,7 +1118,7 @@ class RaftNode extends EventEmitter {
         if (next <= this._commitSeq) { return ack() }
         let commitTerm = null
         for (const entry of this.log.iter(next)) {
-          commitTerm = entry.readBigUInt64LE()
+          commitTerm = entry.term
           break
         }
         if (commitTerm === null) {
@@ -1170,14 +1169,16 @@ class RaftNode extends EventEmitter {
         error(`seqP ${seqP} not found`, Err.REPL_BACKTRACK)
         return
       }
-      termPF = seqP >= 0n ? have[0].readBigUInt64LE() : -1n
+      termPF = seqP >= 0n ? have[0].term : -1n
       if (termPF !== termP) {
         error(`termP mismatch at seqP ${seqP}`, Err.REPL_BACKTRACK)
         return
       }
       if (seqP >= 0n) { have = have.slice(1) }
       let same = 0
-      while (same < data.length && have[same] && have[same].equals(data[same])) {
+      while (same < data.length && have[same] &&
+          have[same].term === data[same].term &&
+          have[same].entry.equals(data[same].entry)) {
         same++
       }
 

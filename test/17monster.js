@@ -73,8 +73,8 @@ const monsterState = (basePath, cmdSeq=null) => {
       let decision = null
       for (const row of rows) {
         const entry = Buffer.from(row.entry)
-        if (entry.byteLength === 8) { continue }
-        const record = unpack(entry.subarray(8))
+        if (entry.byteLength === 0) { continue }
+        const record = unpack(entry)
         if (record.type !== 'sync' || record.cmdSeq !== cmdSeq) { continue }
         decision = { quorum: record.quorum, sync_seq: row.seq }
         break
@@ -197,13 +197,13 @@ const raftRecordAt = (node, seq) => {
   const { entry } = node.log.db.prepare(`
     SELECT entry FROM raft_log WHERE seq = ?
   `).get(seq)
-  return unpack(Buffer.from(entry).subarray(8))
+  return unpack(Buffer.from(entry))
 }
 const raftTermAt = (node, seq) => {
-  const { entry } = node.log.db.prepare(`
-    SELECT entry FROM raft_log WHERE seq = ?
+  const { term } = node.log.db.prepare(`
+    SELECT term FROM raft_log WHERE seq = ?
   `).get(seq)
-  return Buffer.from(entry).readBigUInt64LE()
+  return term
 }
 
 const makeBus = (messages, intercept=null) => {
@@ -1033,7 +1033,7 @@ test('MonsterFt wraps an empty buffer instead of treating it as a Raft no-op', a
   const row = leader.log.db.prepare(`
     SELECT entry FROM raft_log WHERE seq = ?
   `).get(cmdSeq)
-  const record = unpack(Buffer.from(row.entry).subarray(8))
+  const record = unpack(Buffer.from(row.entry))
   t.equal(record.type, 'cmd', 'the Raft entry is a wrapped CMD, not a no-op')
   t.equal(record.items.length, 1, 'the CMD contains one user item')
   t.equal(record.items[0].length, 0, 'the wrapped item remains empty')

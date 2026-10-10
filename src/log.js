@@ -3,6 +3,8 @@ import * as Err from './error.js'
 import * as util from './util.js'
 
 const MAX_SEQ = 9_223_372_036_854_775_807n
+// node:sqlite can bind zero-byte ArrayBuffer views as NULL instead of an empty BLOB.
+const EMPTY_ENTRY = Buffer.alloc(0)
 
 const defaults = {
   // fetch records in batches of N when iterating
@@ -62,14 +64,14 @@ class SQLiteLog {
     }
   }
 
-  _validateEntry(entry, code=Err.ARGUMENT_ILLEGAL) {
-    if (!Buffer.isBuffer(entry)) {
-      throw new Err.ErrorWithCode('data must be buffer', code)
+  _validateEntry(data, code=Err.ARGUMENT_ILLEGAL) {
+    if (data === null || typeof data !== 'object' || Array.isArray(data)) {
+      throw new Err.ErrorWithCode('data must be record', code)
     }
-    if (entry.length < 8) {
-      throw new Err.ErrorWithCode('data buffer length must be >= 8', code)
+    this._validateSeq(data.term, false, code, 'term')
+    if (!Buffer.isBuffer(data.entry)) {
+      throw new Err.ErrorWithCode('entry must be buffer', code)
     }
-    this._validateSeq(entry.readBigUInt64LE(), false, code, 'term')
   }
 
   _validateElection(term, votedFor, code=Err.ARGUMENT_ILLEGAL) {
@@ -90,8 +92,9 @@ class SQLiteLog {
       throw new Err.ErrorWithCode('entry must be blob', Err.LOG_CORRUPT)
     }
     const entry = Buffer.from(row.entry.buffer, row.entry.byteOffset, row.entry.byteLength)
-    this._validateEntry(entry, Err.LOG_CORRUPT)
-    return entry
+    const data = { term: row.term, entry }
+    this._validateEntry(data, Err.LOG_CORRUPT)
+    return data
   }
 
   readHead() {
@@ -101,10 +104,10 @@ class SQLiteLog {
     let head = null
 
     if (row !== undefined) {
-      const entry = this._entryFromRow(row)
+      const data = this._entryFromRow(row)
       seq = row.seq
-      term = entry.readBigUInt64LE()
-      head = entry.subarray(8)
+      term = data.term
+      head = data.entry
     }
 
     const election = this._statements.electionGet.get()
@@ -147,6 +150,7 @@ class SQLiteLog {
           BEGIN IMMEDIATE;
           CREATE TABLE raft_log (
             seq INTEGER PRIMARY KEY,
+            term INTEGER NOT NULL,
             entry BLOB NOT NULL
           ) STRICT;
 
@@ -170,11 +174,11 @@ class SQLiteLog {
 
       this.db = db
       this._statements = {
-        insert: db.prepare('INSERT INTO raft_log (seq, entry) VALUES (?, ?)'),
-        head: db.prepare('SELECT seq, entry FROM raft_log ORDER BY seq DESC LIMIT 1'),
+        insert: db.prepare('INSERT INTO raft_log (seq, term, entry) VALUES (?, ?, ?)'),
+        head: db.prepare('SELECT seq, term, entry FROM raft_log ORDER BY seq DESC LIMIT 1'),
         begin: db.prepare('SELECT seq FROM raft_log ORDER BY seq LIMIT 1'),
         range: db.prepare(`
-          SELECT seq, entry FROM raft_log
+          SELECT seq, term, entry FROM raft_log
           WHERE seq >= ? AND seq <= ?
           ORDER BY seq
           LIMIT ?
@@ -242,9 +246,8 @@ class SQLiteLog {
           `next ${next} !== ${seq}`, Err.ARGUMENT_ILLEGAL)
       }
 
-      const term = data.readBigUInt64LE()
-      const head = data.subarray(8)
-      this._statements.insert.run(seq, data)
+      const { term, entry: head } = data
+      this._statements.insert.run(seq, term, head.length ? head : EMPTY_ENTRY)
       this.term = term
       this.head = head
       this.seq = seq
@@ -279,13 +282,12 @@ class SQLiteLog {
       const end = seq + BigInt(data.length - 1)
       this._validateSeq(end)
       const last = data[data.length - 1]
-      const term = last.readBigUInt64LE()
-      const head = last.subarray(8)
+      const { term, entry: head } = last
 
       this.db.exec('BEGIN IMMEDIATE')
       transaction = true
-      data.forEach((entry, idx) => {
-        this._statements.insert.run(seq + BigInt(idx), entry)
+      data.forEach(({ term, entry }, idx) => {
+        this._statements.insert.run(seq + BigInt(idx), term, entry.length ? entry : EMPTY_ENTRY)
       })
       this.db.exec('COMMIT')
       transaction = false

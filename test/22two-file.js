@@ -43,16 +43,8 @@ const closeNodesQuietly = (nodes) => {
 
 const toBuf = (value) => Buffer.from(JSON.stringify(value), 'utf8')
 const toObj = (buf) => JSON.parse(Buffer.from(buf).toString('utf8'))
-const toEntry = (term, record) => {
-  const prefix = Buffer.alloc(8)
-  prefix.writeBigUInt64LE(term)
-  return Buffer.concat([prefix, Buffer.from(pack(record))])
-}
-const toNoopEntry = (term) => {
-  const entry = Buffer.alloc(8)
-  entry.writeBigUInt64LE(term)
-  return entry
-}
+const toEntry = (term, record) => ({ term, entry: Buffer.from(pack(record)) })
+const toNoopEntry = (term) => ({ term, entry: Buffer.alloc(0) })
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms))
 
 const deferred = () => {
@@ -188,7 +180,7 @@ const raftEntryAtPath = (databasePath, seq) => {
       SELECT entry FROM raft_log WHERE seq = ?
     `).get(seq)
     if (row === undefined) { return null }
-    return unpack(Buffer.from(row.entry).subarray(8))
+    return unpack(Buffer.from(row.entry))
   } finally {
     db.close()
   }
@@ -1423,6 +1415,23 @@ test('two-file cluster commits, checkpoints exact entries, and restarts',
       ['monsterft_meta', 'two_file_items'],
       ['monsterft_meta', 'two_file_items'],
     ], 'sequence-zero application commits schema on every member')
+    for (const node of first.nodes) {
+      const { term, entry } = node.log.db.prepare(`
+        SELECT term, entry FROM raft_log WHERE seq = 0
+      `).get()
+      const prefix = Buffer.alloc(8)
+      prefix.writeBigUInt64LE(term)
+      const expected = crypto.createHash('sha256').update(prefix).digest()
+      const { applied_entry_hash: hash } = node.db.prepare(`
+        SELECT applied_entry_hash FROM monsterft_meta WHERE id = 1
+      `).get()
+      t.equal(term, leader.term,
+        `node ${node.id} stores the initial no-op term separately`)
+      t.equal(entry.length, 0,
+        `node ${node.id} stores no prefix in the empty no-op payload`)
+      t.deepEqual(Buffer.from(hash), expected,
+        `node ${node.id} preserves the no-op checkpoint hash bytes`)
+    }
 
     const synced = nextSync(leader)
     const [cmdSeq, result] = await leader.append(toBuf({
@@ -1450,15 +1459,18 @@ test('two-file cluster commits, checkpoints exact entries, and restarts',
         FROM monsterft_meta WHERE id = 1
       `).get()
       const row = node.log.db.prepare(`
-        SELECT entry FROM raft_log WHERE seq = ?
+        SELECT term, entry FROM raft_log WHERE seq = ?
       `).get(meta.applied_seq)
+      const prefix = Buffer.alloc(8)
+      prefix.writeBigUInt64LE(row.term)
       const expected = crypto.createHash('sha256')
+        .update(prefix)
         .update(Buffer.from(row.entry))
         .digest()
       t.equal(meta.applied_seq, node._applySeq,
         `node ${node.id} publishes its durable DB2 checkpoint`)
       t.ok(Buffer.from(meta.applied_entry_hash).equals(expected),
-        `node ${node.id} hashes the complete term-prefixed DB1 entry`)
+        `node ${node.id} preserves the term-and-payload checkpoint hash`)
       t.equal(meta.pending_cmd_seq, null,
         `node ${node.id} clears the resolved pending sequence`)
       t.equal(meta.pending_local_digest, null,
@@ -1674,6 +1686,61 @@ test('open rejects a DB2 checkpoint hash mismatch', async (t) => {
   t.notOk(second.nodes[0].isOpen,
     'a mismatched pair is never published as open')
 })
+
+for (const field of ['term', 'entry']) {
+  test(`open rejects a changed DB1 checkpoint ${field} before applying`, async (t) => {
+    const fixture = clusterFixture(t, `checkpoint-${field}-change`)
+    const first = fixture.build()
+    const leader = await openAndElect(first.nodes)
+    const synced = nextSync(leader)
+    await leader.append(toBuf({ key: 'checkpoint', value: 17 }))
+    const { syncSeq } = await withTimeout(synced, 'checkpoint SYNC')
+    await waitApplied(first.nodes, syncSeq)
+    closeNodes(first.nodes)
+
+    const databasePath = fixture.paths.get('1')
+    const db = new DatabaseSync(databasePath, { readBigInts: true })
+    const readEntry = db.prepare(`
+      SELECT term, entry FROM raft_log WHERE seq = ?
+    `)
+    const before = readEntry.get(syncSeq)
+    const changed = field === 'term'
+      ? before.term + 1n
+      : Buffer.from(pack({ ...unpack(before.entry), digest: Buffer.alloc(32, 0xff) }))
+    db.prepare(`UPDATE raft_log SET ${field} = ? WHERE seq = ?`).run(changed, syncSeq)
+    const after = readEntry.get(syncSeq)
+    t.equal(after.term, field === 'term' ? changed : before.term,
+      'only the selected field changes the stored term')
+    t.deepEqual(Buffer.from(after.entry),
+      Buffer.from(field === 'entry' ? changed : before.entry),
+      'only the selected field changes the stored payload')
+    db.close()
+
+    const second = fixture.build()
+    const err = errorOfCall(() => second.nodes[0].open())
+    t.equal(err?.code, MONSTER_CORRUPT,
+      'a valid SQL value with a different checkpoint hash is Monster corruption')
+    t.match(err?.message ?? '', /applied entry hash does not match/,
+      'the stored checkpoint authenticates both the term and payload')
+    t.deepEqual(second.applies, [],
+      'checkpoint validation rejects before invoking application callbacks')
+    t.notOk(second.nodes[0].isOpen || second.nodes[0].log.isOpen,
+      'failed startup releases DB1 without publishing an open node')
+    t.equal(second.nodes[0].db, null, 'failed startup releases DB2')
+
+    const repaired = new DatabaseSync(databasePath)
+    repaired.prepare(`UPDATE raft_log SET ${field} = ? WHERE seq = ?`)
+      .run(before[field], syncSeq)
+    repaired.close()
+    const third = fixture.build()
+    third.nodes[0].open()
+    t.equal(valueAt(third.nodes[0], 'checkpoint'), 17,
+      'restoring the original field restores the valid database pair')
+    t.deepEqual(third.applies, [],
+      'a valid restart does not reapply completed commands')
+    third.nodes[0].close()
+  })
+}
 
 test('checkpoint ahead of DB1 rejects and requires a fresh object',
   async (t) => {

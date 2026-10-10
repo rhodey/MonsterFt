@@ -101,7 +101,7 @@ const valueAt = (node, key) => {
 }
 
 const raftRows = (node) => node.log.db.prepare(`
-  SELECT seq, entry FROM raft_log ORDER BY seq
+  SELECT seq, term, entry FROM raft_log ORDER BY seq
 `).all()
 
 const raftSeqs = (node) => raftRows(node).map(({ seq }) => seq)
@@ -111,7 +111,7 @@ const retainedCount = (node) => node.log.begin < 0n
   : node.log.seq - node.log.begin + 1n
 
 const raftTypes = (node) => raftRows(node).map(({ entry }) => {
-  const payload = Buffer.from(entry).subarray(8)
+  const payload = Buffer.from(entry)
   return payload.length === 0 ? 'noop' : unpack(payload).type
 })
 
@@ -254,7 +254,7 @@ const readPair = (databasePath) => {
   const db = new DatabaseSync(`${databasePath}2`, { readOnly: true, readBigInts: true })
   try {
     return {
-      rows: raft.prepare('SELECT seq, entry FROM raft_log ORDER BY seq').all(),
+      rows: raft.prepare('SELECT seq, term, entry FROM raft_log ORDER BY seq').all(),
       meta: metaAt({ db }),
     }
   } finally {
@@ -487,8 +487,7 @@ test('startup prunes validated applied history while preserving an uncommitted t
   await waitApplied(first.nodes, last.syncSeq)
   const hashes = first.nodes.map((node) => Buffer.from(metaAt(node).applied_entry_hash))
   for (const node of first.nodes) {
-    const noopEntry = Buffer.alloc(8)
-    noopEntry.writeBigUInt64LE(node.term)
+    const noopEntry = { term: node.term, entry: Buffer.alloc(0) }
     node.log.appendBatch(Array.from({ length: 4 }, () => noopEntry))
   }
   closeNodesQuietly(first.nodes)

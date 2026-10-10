@@ -346,7 +346,7 @@ const raftRecordAtPath = (databasePath, seq) => {
     const { entry } = db.prepare(`
       SELECT entry FROM raft_log WHERE seq = ?
     `).get(seq)
-    return unpack(Buffer.from(entry).subarray(8))
+    return unpack(Buffer.from(entry))
   } finally {
     db.close()
   }
@@ -2236,6 +2236,16 @@ test('MonsterFt recovery reuses a stored digest without reapplication', async (t
       `node ${node.id} stores the unresolved CMD in metadata`)
     t.deepEqual(cachedPendingAt(node), pending,
       `node ${node.id} publishes matching cached pending state`)
+    const { term, entry } = node.log.db.prepare(`
+      SELECT term, entry FROM raft_log WHERE seq = ?
+    `).get(cmdSeq)
+    const prefix = Buffer.alloc(8)
+    prefix.writeBigUInt64LE(term)
+    const expected = crypto.createHash('sha256')
+      .update(prefix).update(entry).digest()
+    const meta = metadataAtPath(fixture.paths.get(node.id))
+    t.deepEqual(meta.appliedEntryHash, expected,
+      `node ${node.id} preserves the pending CMD checkpoint hash bytes`)
     return [node.id, pending]
   }))
   t.deepEqual(

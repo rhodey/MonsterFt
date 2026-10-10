@@ -13,10 +13,7 @@ const toBuf = (obj) => {
 }
 
 const toEntry = (data, term=0n) => {
-  data = Buffer.isBuffer(data) ? data : Buffer.from(data)
-  const prefix = Buffer.alloc(8)
-  prefix.writeBigUInt64LE(term)
-  return Buffer.concat([prefix, data])
+  return { term, entry: Buffer.isBuffer(data) ? data : Buffer.from(data) }
 }
 
 const toObj = (buf) => {
