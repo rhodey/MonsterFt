@@ -2,7 +2,7 @@
   "name": "monsterft",
   "author": "rhodey",
   "description": "Integrity layer for Raft.",
-  "version": "0.5.1",
+  "version": "0.5.2",
   "license": "AGPL-3.0-only",
   "type": "module",
   "main": "src/index.js",
