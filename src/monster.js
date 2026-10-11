@@ -1097,33 +1097,31 @@ class MonsterNode extends RaftNode {
   // it would be wrong because CMD outcome from 1 node would be counted as coming from 2 nodes
   drainCmd() {
     if (this._monsterDrainWork) { return this._monsterDrainWork }
-    this._monsterDraining = true
-    let work = null
     if (!this.isOpen) {
-      work = Promise.reject(
+      return Promise.reject(
         new Err.ErrorWithCode('node not open', Err.NODE_NOT_OPEN),
       )
-    } else {
-      const retryms = Math.max(2, this.opts.pingTimeout * 0.1)
-      work = this._monsterRunDbGetCmd().then(async (pending) => {
-        this._throwIfClosing()
-        if (pending !== null) {
-          const { cmdSeq } = pending
-          while (await this._monsterRunDbGetCmd(cmdSeq) !== null) {
-            this._throwIfClosing()
-            await this._delay(retryms)
-          }
-          this._throwIfClosing()
-        }
-        // Drain can close before a failed DB operation reaches fatal reporting.
-        if (this._monsterDbError !== null) {
-          const err = this._monsterDbError
-          this._monsterDbError = null
-          this._emitSafe('error', err)
-        }
-        this.close()
-      })
     }
+    this._monsterDraining = true
+    const retryms = Math.max(2, this.opts.pingTimeout * 0.1)
+    const work = this._monsterRunDbGetCmd().then(async (pending) => {
+      this._throwIfClosing()
+      if (pending !== null) {
+        const { cmdSeq } = pending
+        while (await this._monsterRunDbGetCmd(cmdSeq) !== null) {
+          this._throwIfClosing()
+          await this._delay(retryms)
+        }
+        this._throwIfClosing()
+      }
+      // Drain can close before a failed DB operation reaches fatal reporting.
+      if (this._monsterDbError !== null) {
+        const err = this._monsterDbError
+        this._monsterDbError = null
+        this._emitSafe('error', err)
+      }
+      this.close()
+    })
     this._monsterDrainWork = this._raceShutdown(work)
     this._monsterDrainWork.catch(noop)
     return this._monsterDrainWork
