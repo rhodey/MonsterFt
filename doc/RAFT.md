@@ -73,10 +73,7 @@ later listeners still run. Attempts to emit each listener failure as an
 
 ### findings
 
-- **Accepted: `errorMonitor` listeners are not notified.** This helper calls
-  listeners directly, bypassing `emit`, so an `error` sent through it does
-  not reach `errorMonitor`. Errors emitted with `emit('error')` still do.
-  Nothing in the project uses `errorMonitor`.
+None.
 
 ## `_change`
 
