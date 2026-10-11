@@ -129,6 +129,7 @@ class MonsterNode extends RaftNode {
     this._monsterRepairState = REPAIR_NONE
     this._monsterPendingCommand = null
     this._monsterPendingReports = new Map()
+    this._monsterReportWake = null
 
     this._monsterLeaderSync = Promise.resolve()
     this._monsterLeaderSyncTerm = null
@@ -526,9 +527,9 @@ class MonsterNode extends RaftNode {
   }
 
   _monsterRememberReport(from, digest) {
-    if (!this._monsterPendingReports.has(from)) {
-      this._monsterPendingReports.set(from, asBuffer(digest))
-    }
+    if (this._monsterPendingReports.has(from)) { return }
+    this._monsterPendingReports.set(from, asBuffer(digest))
+    this._monsterReportWake?.resolve()
   }
 
   _monsterDecision() {
@@ -806,14 +807,26 @@ class MonsterNode extends RaftNode {
 
     let decision = null
     const retryms = Math.max(2, this.opts.pingTimeout * 0.15)
+    let requested = -Infinity
     while (true) {
       this._monsterAssertLeader(term)
       decision = this._monsterDecision()
       if (decision.agreement || decision.impossible) { break }
-      this.nodes.filter((id) => id !== this.id).forEach((to) => {
-        this.send(to, { type: OUTCOME_REQUEST, cmdSeq: command.cmdSeq })
-      })
-      await this._delay(retryms)
+      if (Date.now() - requested >= retryms) {
+        requested = Date.now()
+        this.nodes.filter((id) => id !== this.id).forEach((to) => {
+          this.send(to, { type: OUTCOME_REQUEST, cmdSeq: command.cmdSeq })
+        })
+      }
+      const wake = util.oneShot()
+      this._monsterReportWake = wake
+      const timer = setTimeout(wake.resolve, retryms)
+      try {
+        await this._raceShutdown(wake.promise)
+      } finally {
+        clearTimeout(timer)
+        if (this._monsterReportWake === wake) { this._monsterReportWake = null }
+      }
     }
 
     let sync = null

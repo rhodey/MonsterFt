@@ -452,10 +452,12 @@ None.
 
 ## `_monsterAwaitDecision`
 
-Registers the leader's own digest and repeatedly requests follower outcomes
-until a quorum agrees or agreement becomes impossible, checking leadership
-throughout. Builds the corresponding SYNC record and determines whether the
-leader's local result belongs to the agreed group.
+Registers the leader's own digest and requests follower outcomes until a
+quorum agrees or agreement becomes impossible, checking leadership
+throughout. Each newly recorded report wakes the wait to check again, and
+requests are re-sent at most once per `0.15 * pingTimeout`. Builds the
+corresponding SYNC record and determines whether the leader's local result
+belongs to the agreed group.
 
 ### findings
 

@@ -1102,6 +1102,41 @@ test('MonsterFt serializes concurrent local and forwarded submissions', async (t
     [[1, 2], [1, 2], [1, 2]], 'both serialized submissions commit on every node')
 })
 
+test('MonsterFt decides as soon as delayed follower outcomes arrive', async (t) => {
+  const fixture = makeFixture(t, 'outcome-wake')
+  fixture.clear()
+  let cluster = null
+  const deliveries = new Set()
+  t.teardown(() => {
+    for (const timer of deliveries) { clearTimeout(timer) }
+  })
+  // Delayed delivery makes each outcome arrive after the leader's first
+  // check, and pingTimeout 10s sets the leader's retry interval to 1.5s.
+  cluster = fixture.build({
+    opts: { pingTimeout: 10_000 },
+    intercept: (to, from, msg) => {
+      const timer = setTimeout(() => {
+        deliveries.delete(timer)
+        cluster.nodes.find((node) => node.id === to).onReceive(from, msg)
+      }, 1)
+      deliveries.add(timer)
+      return false
+    },
+  })
+  const leader = await openAndElect(cluster)
+
+  for (const key of ['wake-a', 'wake-b', 'wake-c']) {
+    const started = Date.now()
+    const [, value] = await withTimeout(
+      leader.append(toBuf({ op: 'set', key, value: 1 })), `append ${key}`,
+    )
+    const elapsed = Date.now() - started
+    t.deepEqual(value, { key, value: 1 }, `${key} is applied`)
+    t.ok(elapsed < 750,
+      `${key} settles well before the 1500 ms retry interval (${elapsed} ms)`)
+  }
+})
+
 test('MonsterFt compares throws, rolls back failed items, and continues', async (t) => {
   const fixture = makeFixture(t, 'throws')
   fixture.clear()
