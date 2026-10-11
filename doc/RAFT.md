@@ -53,9 +53,9 @@ shutdown state and the fatal-error handler.
   timeout selection is left to the user for now.
 - **Deferred: an explicit `undefined` does not select a default.**
   `{ ...defaults, ...opts }` keeps it, so `electionTimeout`, `pingTimeout`,
-  `appendTimeout`, `rpcMax`, `applyMax`, and SQLiteLog's `iterStepSize` throw
-  `ARGUMENT_ILLEGAL`. `apply` and `quorum` do fall back to their defaults.
-  Decision: valid, but not a current focus.
+  `appendTimeout`, `rpcMax`, `rpcMaxBytes`, `applyMax`, and SQLiteLog's
+  `iterStepSize` throw `ARGUMENT_ILLEGAL`. `apply` and `quorum` do fall back
+  to their defaults. Decision: valid, but not a current focus.
 
 ## `_throwIfClosing`
 
@@ -429,12 +429,13 @@ None.
 ## `_replicationPage`
 
 Reads and sends one bounded page of entries with its predecessor term and
-sequence, fetching only those log rows, and stops if the required history
-has been forgotten. Retries a predecessor mismatch immediately from one
-sequence earlier. Delays other retryable RPC failures, and handles
-cancellation or fatal log errors. On success, advances the peer's match and
-next indexes, checks commitment, and schedules resolution of satisfied
-waiters.
+sequence, and stops if the required history has been forgotten. A page holds
+at most `rpcMax` entries and `rpcMaxBytes` of entry data, but always at least
+one entry. Entry sizes are read first, so only the rows sent are fetched.
+Retries a predecessor mismatch immediately from one sequence earlier. Delays
+other retryable RPC failures, and handles cancellation or fatal log errors.
+On success, advances the peer's match and next indexes, checks commitment,
+and schedules resolution of satisfied waiters.
 
 ### findings
 

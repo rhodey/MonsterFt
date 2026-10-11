@@ -183,6 +183,12 @@ class SQLiteLog {
           ORDER BY seq
           LIMIT ?
         `),
+        sizes: db.prepare(`
+          SELECT length(entry) AS bytes FROM raft_log
+          WHERE seq >= ? AND seq <= ?
+          ORDER BY seq
+          LIMIT ?
+        `),
         trim: db.prepare('DELETE FROM raft_log WHERE seq > ?'),
         electionGet: db.prepare(`
           SELECT current_term AS term, voted_for AS votedFor
@@ -369,6 +375,21 @@ class SQLiteLog {
       })()
     } catch (err) {
       throw this._wrapError(err, 'iter')
+    }
+  }
+
+  sizes(seq, limit) {
+    try {
+      this._assertOpen()
+      this._validateSeq(seq)
+      if (!Number.isSafeInteger(limit) || limit <= 0) {
+        throw new Err.ErrorWithCode(
+          'limit must be int > 0', Err.ARGUMENT_ILLEGAL)
+      }
+      return this._statements.sizes.all(seq, this.seq, limit)
+        .map((row) => Number(row.bytes))
+    } catch (err) {
+      throw this._wrapError(err, 'sizes')
     }
   }
 

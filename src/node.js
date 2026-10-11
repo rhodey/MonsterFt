@@ -44,6 +44,8 @@ const defaults = {
   appendTimeout: 1_500,
   // send <= rpcMax bufs per rpc
   rpcMax: 1024,
+  // send <= rpcMaxBytes per rpc, or one larger entry
+  rpcMaxBytes: 67_108_864,
   // state machine
   apply: applyNull,
   // apply <= applyMax bufs per call
@@ -126,6 +128,10 @@ class RaftNode extends EventEmitter {
     if (!Number.isSafeInteger(opts.rpcMax) || opts.rpcMax <= 0) {
       throw new Err.ErrorWithCode(
         'rpcMax must be int > 0', Err.ARGUMENT_ILLEGAL)
+    }
+    if (!Number.isSafeInteger(opts.rpcMaxBytes) || opts.rpcMaxBytes <= 0) {
+      throw new Err.ErrorWithCode(
+        'rpcMaxBytes must be int > 0', Err.ARGUMENT_ILLEGAL)
     }
     if (!Number.isSafeInteger(opts.applyMax) || opts.applyMax <= 0) {
       throw new Err.ErrorWithCode(
@@ -774,7 +780,6 @@ class RaftNode extends EventEmitter {
     const data = []
     let count = 1n + end - begin
     count = min(this.opts.rpcMax, count)
-    const rows = Number(max(1n, count + (seqP < 0n ? 0n : 1n)))
 
     try {
       if (!this._replicationActive(state)) { return false }
@@ -788,6 +793,18 @@ class RaftNode extends EventEmitter {
         this._emitSafe('warn', err)
         return false
       }
+      if (count > 0n) {
+        // Keep the page within rpcMaxBytes, but always send at least one entry.
+        let bytes = 0
+        let fit = 0
+        for (const size of this.log.sizes(begin, Number(count))) {
+          bytes += size
+          if (fit > 0 && bytes > this.opts.rpcMaxBytes) { break }
+          fit++
+        }
+        count = BigInt(max(1, fit))
+      }
+      const rows = Number(max(1n, count + (seqP < 0n ? 0n : 1n)))
       for (const entry of this.log.iter(b, { iterStepSize: rows })) {
         if (!this._replicationActive(state)) { return false }
         if (termP !== null) { data.push(entry) }

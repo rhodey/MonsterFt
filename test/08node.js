@@ -103,6 +103,9 @@ test('numeric quorum configuration', (t) => {
     'accepts an explicit quorum')
   t.equal(new RaftNode('1', ids4, send, log, { rpcMax: 1 }).opts.rpcMax, 1n,
     'normalizes a valid RPC page size')
+  t.equal(node.opts.rpcMaxBytes, 67_108_864, 'defaults to a 64 MiB RPC page')
+  t.equal(new RaftNode('1', ids4, send, log, { rpcMaxBytes: 1 }).opts.rpcMaxBytes, 1,
+    'accepts a valid RPC page byte limit')
   t.equal(new RaftNode('1', ids4, send, log, { applyMax: 1 }).opts.applyMax, 1,
     'accepts a valid apply batch size')
   t.ok(new RaftNode('1', ids, send, log, { quorum: 3 })._isQuorumErr(['2']),
@@ -165,6 +168,10 @@ test('node configuration requires a viable fixed cluster', (t) => {
   for (const rpcMax of [0, -1, 1.5, NaN, '1', 1n]) {
     throwsInvalidArgument(() => new RaftNode('1', ids, send, log, { rpcMax }),
       /rpcMax must be int > 0/, `rejects invalid rpcMax ${rpcMax}`)
+  }
+  for (const rpcMaxBytes of [0, -1, 1.5, NaN, '1', 1n]) {
+    throwsInvalidArgument(() => new RaftNode('1', ids, send, log, { rpcMaxBytes }),
+      /rpcMaxBytes must be int > 0/, `rejects invalid rpcMaxBytes ${rpcMaxBytes}`)
   }
   for (const applyMax of [0, -1, 1.5, NaN, '1', 1n]) {
     throwsInvalidArgument(() => new RaftNode('1', ids, send, log, { applyMax }),
