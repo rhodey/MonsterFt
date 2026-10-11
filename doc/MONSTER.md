@@ -150,8 +150,8 @@ log boundaries after deleting rows.
   replica whose required history was pruned. Copying a donor pair to that
   replica and reopening only the donor and target leaves it stuck at the
   copied checkpoint until leadership changes or the leader restarts.
-  REPAIR.md should require that. Decision: deferred pending a possible
-  retention redesign.
+  REPAIR.md should require that. Decision: deferred pending possible
+  bigger changes to retention.
 
 ## `_monsterFatalError`
 
