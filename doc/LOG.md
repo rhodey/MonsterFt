@@ -181,6 +181,17 @@ failure.
   behavior. RaftNode's application and replication paths check that they
   received the range they required.
 
+## `sizes`
+
+Validates the starting sequence and row limit, then returns the byte lengths
+of up to that many entries from the start through the head. SQLite reads each
+length from the row header without loading the entry, so RaftNode can bound a
+replication page by bytes before fetching it.
+
+### findings
+
+None.
+
 ## `del`
 
 Requires the log to be closed, then delegates deletion of the SQLite files

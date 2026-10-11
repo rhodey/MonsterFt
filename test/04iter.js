@@ -165,3 +165,31 @@ test('iterator rejects an out-of-order row after a gap', (t) => {
   }
   t.end()
 })
+
+test('sizes reports entry byte lengths without reading past the head', (t) => {
+  const { create } = logFixture(t, '04-sizes')
+  const log = create()
+  log.del()
+  log.open()
+  log.appendBatch([toEntry(Buffer.alloc(0), 0n), toEntry('x', 1n), toEntry('longer', 2n)])
+
+  t.deepEqual(log.sizes(0n, 99), [0, 1, 6], 'returns every entry length in order')
+  t.deepEqual(log.sizes(1n, 1), [1], 'stops at the limit')
+  t.deepEqual(log.sizes(3n, 5), [], 'head plus one is empty')
+
+  for (const [run, message, label] of [
+    [() => log.sizes(-1n, 1), /\(log sizes\) seq must be >= 0/, 'negative start'],
+    [() => log.sizes(0, 1), /\(log sizes\) seq must be bigint/, 'non-bigint start'],
+    [() => log.sizes(0n, 0), /\(log sizes\) limit must be int > 0/, 'zero limit'],
+    [() => log.sizes(0n, 1.5), /\(log sizes\) limit must be int > 0/, 'fractional limit'],
+  ]) {
+    try {
+      run()
+      t.fail(`${label} should throw`)
+    } catch (err) {
+      t.match(err.message, message, `${label} includes sizes context`)
+      t.equal(err.code, ARGUMENT_ILLEGAL, `${label} has ARGUMENT_ILLEGAL code`)
+    }
+  }
+  t.end()
+})

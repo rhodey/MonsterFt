@@ -17,6 +17,7 @@ import {
 } from '../src/error.js'
 import { MonsterFt, SQLiteLog } from '../src/index.js'
 import { MonsterNode } from '../src/monster.js'
+import { MAX_SQLITE_BYTES } from '../src/node.js'
 import { MonsterFt as DirectMonsterFt } from '../src/monsterft.js'
 import { databasePath, sleep, ready, leaders, followers } from './util.js'
 
@@ -1101,6 +1102,41 @@ test('MonsterFt serializes concurrent local and forwarded submissions', async (t
     [[1, 2], [1, 2], [1, 2]], 'both serialized submissions commit on every node')
 })
 
+test('MonsterFt decides as soon as delayed follower outcomes arrive', async (t) => {
+  const fixture = makeFixture(t, 'outcome-wake')
+  fixture.clear()
+  let cluster = null
+  const deliveries = new Set()
+  t.teardown(() => {
+    for (const timer of deliveries) { clearTimeout(timer) }
+  })
+  // Delayed delivery makes each outcome arrive after the leader's first
+  // check, and pingTimeout 10s sets the leader's retry interval to 1.5s.
+  cluster = fixture.build({
+    opts: { pingTimeout: 10_000 },
+    intercept: (to, from, msg) => {
+      const timer = setTimeout(() => {
+        deliveries.delete(timer)
+        cluster.nodes.find((node) => node.id === to).onReceive(from, msg)
+      }, 1)
+      deliveries.add(timer)
+      return false
+    },
+  })
+  const leader = await openAndElect(cluster)
+
+  for (const key of ['wake-a', 'wake-b', 'wake-c']) {
+    const started = Date.now()
+    const [, value] = await withTimeout(
+      leader.append(toBuf({ op: 'set', key, value: 1 })), `append ${key}`,
+    )
+    const elapsed = Date.now() - started
+    t.deepEqual(value, { key, value: 1 }, `${key} is applied`)
+    t.ok(elapsed < 750,
+      `${key} settles well before the 1500 ms retry interval (${elapsed} ms)`)
+  }
+})
+
 test('MonsterFt compares throws, rolls back failed items, and continues', async (t) => {
   const fixture = makeFixture(t, 'throws')
   fixture.clear()
@@ -1279,6 +1315,51 @@ test('MonsterFt rejects application results that MessagePack cannot encode',
     const [, later] = await leader.append(toBuf({ op: 'get', key: 'before' }))
     t.deepEqual(later, { key: 'before', value: 1 },
       'the cluster accepts later commands')
+  })
+
+test('MonsterFt rejects commands too large to store without stepping down',
+  async (t) => {
+    const fixture = makeFixture(t, 'oversized')
+    fixture.clear()
+    const cluster = fixture.build()
+    const leader = await openAndElect(cluster)
+    const follower = followers(cluster.nodes)[0]
+    const term = leader.term
+    // Untouched, so it reserves address space rather than resident memory.
+    const big = Buffer.allocUnsafe(MAX_SQLITE_BYTES)
+    const half = MAX_SQLITE_BYTES / 2
+    const message = `command must encode to <= ${MAX_SQLITE_BYTES} bytes`
+
+    for (const [label, call] of [
+      ['a local append', () => leader.append(big)],
+      ['a forwarded append', () => follower.append(big)],
+      ['a batch whose items fit individually',
+        () => leader.appendBatch([big.subarray(0, half), big.subarray(half)])],
+    ]) {
+      const err = await rejectsCode(t, call(), ARGUMENT_ILLEGAL,
+        `${label} is rejected with ARGUMENT_ILLEGAL`)
+      t.equal(err?.message, message, `${label} names the encoded limit`)
+    }
+
+    await leader.onReceive(follower.id, {
+      type: 'fwd_cmd', cid: 'oversized-forward', term: leader.term, items: [big],
+    })
+    const reply = cluster.messages.find(({ from, to, msg }) => {
+      return from === leader.id && to === follower.id &&
+        msg.cid === 'oversized-forward'
+    })
+    t.equal(reply?.msg.code, RPC_ILLEGAL,
+      'the leader rejects an oversized forwarded command as malformed')
+
+    await sleep(100)
+    t.equal(leader.state, 'leader', 'the leader keeps its leadership')
+    t.equal(leader.term, term, 'no new term begins')
+    t.ok(cluster.nodes.every((node) => node.isOpen), 'every node stays open')
+    const [, value] = await leader.append(toBuf({
+      op: 'set', key: 'after-oversized', value: 1,
+    }))
+    t.deepEqual(value, { key: 'after-oversized', value: 1 },
+      'a normal command still succeeds')
   })
 
 test('MonsterFt accepts a slow matching outcome after a clean quorum SYNC', async (t) => {

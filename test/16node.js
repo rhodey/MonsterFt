@@ -48,6 +48,8 @@ const rejection = async (promise) => {
 const entry = (term, data) => {
   return { term, entry: Buffer.from(data) }
 }
+// Mock logs report empty entries, so rpcMaxBytes never shortens their pages.
+const zeroSizes = (seq, limit) => new Array(limit).fill(0)
 
 const applyNull = (node, bufs) => bufs.map(() => null)
 
@@ -489,6 +491,7 @@ test('replication pump retries remote errors and coalesces follower targets', as
   const log = {
     seq: 2n,
     term: 0n,
+    sizes: zeroSizes,
     *iter(begin) {
       for (let seq = begin; seq <= this.seq; seq++) { yield data[Number(seq)] }
     },
@@ -533,6 +536,7 @@ test('appendToFollowers preserves lagging progress and eagerly announces commit'
   const log = {
     seq: 4n,
     term: 0n,
+    sizes: zeroSizes,
     *iter(begin) {
       for (let seq = begin; seq <= this.seq; seq++) { yield data[Number(seq)] }
     },
@@ -594,6 +598,7 @@ test('appends committed together share one commit announcement', async (t) => {
   const log = {
     seq: 4n,
     term: 0n,
+    sizes: zeroSizes,
     *iter(begin) {
       for (let seq = begin; seq <= this.seq; seq++) { yield data[Number(seq)] }
     },
@@ -635,6 +640,7 @@ test('an older overlapping target does not rewind acknowledged replication', asy
   const log = {
     seq: 3n,
     term: 0n,
+    sizes: zeroSizes,
     *iter(begin) {
       for (let seq = begin; seq <= this.seq; seq++) { yield data[Number(seq)] }
     },
@@ -685,6 +691,7 @@ test('heartbeat ACK catches a discovered follower up to the current head', async
   const log = {
     seq: 0n,
     term: 0n,
+    sizes: zeroSizes,
     *iter(begin) {
       if (begin <= this.seq) { yield data }
     },
@@ -737,6 +744,7 @@ test('backtrack to nextIndex zero still attempts the genesis page', async (t) =>
     begin: 0n,
     seq: 1n,
     term: 0n,
+    sizes: zeroSizes,
     *iter(begin) {
       for (let seq = begin; seq <= this.seq; seq++) { yield data[Number(seq)] }
     },
@@ -792,6 +800,7 @@ test('forgotten replication response cancels without backtracking', async (t) =>
     begin: 0n,
     seq: 1n,
     term: 0n,
+    sizes: zeroSizes,
     *iter(begin) {
       for (let seq = begin; seq <= this.seq; seq++) { yield data[Number(seq)] }
     },
@@ -847,6 +856,7 @@ test('an in-flight backtrack above the root does not cancel lowered shared state
       begin: 0n,
       seq: 1n,
       term: 0n,
+      sizes: zeroSizes,
       *iter(begin) {
         for (let seq = begin; seq <= this.seq; seq++) { yield data[Number(seq)] }
       },
@@ -896,6 +906,7 @@ test('backtrack rejecting the genesis page cancels replication', async (t) => {
     begin: 0n,
     seq: 0n,
     term: 0n,
+    sizes: zeroSizes,
     *iter() { yield data },
   }
   let attempts = 0
@@ -997,6 +1008,7 @@ test('local replication log errors close the node and reject its waiter', async 
     isOpen: true,
     seq: 0n,
     term: 0n,
+    sizes: zeroSizes,
     *iter() { throw failure },
     close() { this.isOpen = false },
   }
@@ -1033,6 +1045,7 @@ test('retained floor warns a leader asked for a forgotten predecessor',
       seq: 6n,
       term: 0n,
       begin: 5n,
+      sizes: zeroSizes,
       *iter(begin) {
         iterBegins.push(begin)
         for (let seq = begin; seq <= this.seq; seq++) {
@@ -1122,6 +1135,7 @@ test('retained follower warns on a page below its log begin',
       seq: 6n,
       term: 0n,
       begin: 5n,
+      sizes: zeroSizes,
       *iter(begin) {
         iterBegins.push(begin)
         for (let seq = begin; seq <= this.seq; seq++) {
@@ -1231,6 +1245,7 @@ test('expired waiters are removed while the follower worker keeps replicating', 
   const log = {
     seq: 0n,
     term: 0n,
+    sizes: zeroSizes,
     *iter() { yield data },
   }
   let reply = false
@@ -1268,6 +1283,7 @@ test('stepdown immediately rejects outstanding replication waiters', async (t) =
   const log = {
     seq: 0n,
     term: 0n,
+    sizes: zeroSizes,
     *iter() { yield data },
   }
   const node = new RaftNode('1', ids, () => {}, log, { appendTimeout: 60_000 })
@@ -1403,6 +1419,78 @@ test('large and concurrent commands route results across rpc and apply batches',
   t.equal(leader._applyWaiters.size, 0, 'completed result subscriptions are removed')
 })
 
+test('log reads fetch no more rows than applyMax and rpcMax use', async (t) => {
+  t.teardown(() => close(nodes))
+  const coms = comms()
+  const nodes = connect(coms, 3, null, { rpcMax: 1, applyMax: 1 })
+  await reset(nodes)
+  open(nodes)
+  await ready(nodes, null, true)
+
+  let largestPage = 0
+  for (const node of nodes) {
+    const range = node.log._statements.range
+    const all = range.all.bind(range)
+    range.all = (...args) => {
+      const rows = all(...args)
+      largestPage = Math.max(largestPage, rows.length)
+      return rows
+    }
+  }
+  const leader = leaders(nodes)[0]
+  const values = Array.from({ length: 20 }, (_, idx) => Buffer.from(`v${idx}`))
+  const [seq] = await leader.appendBatch(values)
+  const end = seq + BigInt(values.length - 1)
+  await waitFor(() => nodes.every((node) => node._applySeq >= end), 5_000)
+
+  t.ok(largestPage <= 2,
+    `each read fetches at most one entry and its predecessor (largest ${largestPage})`)
+  t.ok(nodes.every((node) => node.log.seq === leader.log.seq),
+    'every node stores the whole batch')
+})
+
+test('replication pages stay within rpcMaxBytes and still send one larger entry',
+  async (t) => {
+    t.teardown(() => close(nodes))
+    const coms = comms()
+    const nodes = connect(coms, 3, null, { rpcMaxBytes: 10 })
+    await reset(nodes)
+    open(nodes)
+    await ready(nodes, null, true)
+
+    const leader = leaders(nodes)[0]
+    const pages = new Map(leader.followers.map((id) => [id, []]))
+    const send = leader.send
+    leader.send = (to, msg) => {
+      if (msg.type === 'append' && msg.data?.length > 0) {
+        pages.get(to).push(msg.data.map(({ entry }) => entry.toString()))
+      }
+      return send(to, msg)
+    }
+    let largestRead = 0
+    const range = leader.log._statements.range
+    const all = range.all.bind(range)
+    range.all = (...args) => {
+      const rows = all(...args)
+      largestRead = Math.max(largestRead, rows.length)
+      return rows
+    }
+
+    const values = ['aaaa', 'bbbb', 'cccc', 'dddddddddddd', 'eeee']
+    const [seq] = await leader.appendBatch(values.map((value) => Buffer.from(value)))
+    const end = seq + BigInt(values.length - 1)
+    await waitFor(() => nodes.every((node) => node._applySeq >= end), 5_000)
+
+    for (const [id, sent] of pages) {
+      t.deepEqual(sent, [['aaaa', 'bbbb'], ['cccc'], ['dddddddddddd'], ['eeee']],
+        `follower ${id} receives pages of at most 10 bytes, or one larger entry`)
+    }
+    t.ok(largestRead <= 3,
+      `the leader reads only the rows it sends plus a predecessor (largest ${largestRead})`)
+    t.ok(nodes.every((node) => node.log.seq === leader.log.seq),
+      'every node stores the whole batch')
+  })
+
 test('timed out commands discard results while replication and application continue', async (t) => {
   t.teardown(() => close(nodes))
   let allowed = true
@@ -1499,6 +1587,7 @@ test('async application and invalid results are fatal', async (t) => {
       isOpen: true,
       seq: 0n,
       term: 0n,
+      sizes: zeroSizes,
       *iter() { yield data },
       close() { this.isOpen = false },
     }
@@ -1627,6 +1716,7 @@ test('log iteration failure during apply closes the node', async (t) => {
     isOpen: true,
     seq: 0n,
     term: 0n,
+    sizes: zeroSizes,
     *iter() { throw failure },
     close() { this.isOpen = false },
   }
@@ -1660,6 +1750,7 @@ test('log iteration failure during apply closes the node', async (t) => {
 test('short application rejects its waiter with the Raft invariant error', async (t) => {
   const log = {
     isOpen: true,
+    sizes: zeroSizes,
     *iter() {},
     close() { this.isOpen = false },
   }
@@ -1704,6 +1795,7 @@ test('close does not wait for apply and suppresses its late settlement', async (
       isOpen: true,
       seq: 0n,
       term: 0n,
+      sizes: zeroSizes,
       *iter() { yield entry(0n, 'pending') },
       close() { this.isOpen = false },
     }

@@ -3,7 +3,7 @@ import fs from 'node:fs'
 import { DatabaseSync } from 'node:sqlite'
 import { pack, unpack } from 'msgpackr'
 import * as Err from './error.js'
-import { RaftNode } from './node.js'
+import { RaftNode, MAX_SQLITE_BYTES } from './node.js'
 import * as util from './util.js'
 import * as utilm from './utilm.js'
 
@@ -69,6 +69,17 @@ const assertEncodable = (value) => {
   }
 }
 
+// Upper bound on a packed CMD entry
+const cmdBytes = (items, nodeCount) =>
+  items.reduce((total, item) => total + item.byteLength + 5, 64 + 9 * nodeCount)
+
+const assertCmdSize = (items, nodeCount) => {
+  if (cmdBytes(items, nodeCount) <= MAX_SQLITE_BYTES) { return }
+  throw new Err.ErrorWithCode(
+    `command must encode to <= ${MAX_SQLITE_BYTES} bytes`, Err.ARGUMENT_ILLEGAL,
+  )
+}
+
 class MonsterNode extends RaftNode {
   constructor(id, nodes, send, databasePath, opts={}) {
     opts = typeof opts === 'function' ? opts() : opts
@@ -118,6 +129,7 @@ class MonsterNode extends RaftNode {
     this._monsterRepairState = REPAIR_NONE
     this._monsterPendingCommand = null
     this._monsterPendingReports = new Map()
+    this._monsterReportWake = null
 
     this._monsterLeaderSync = Promise.resolve()
     this._monsterLeaderSyncTerm = null
@@ -497,7 +509,7 @@ class MonsterNode extends RaftNode {
         'applied entry hash is corrupt', Err.MONSTER_CORRUPT,
       )
     }
-    const found = this.log.iter(this._applySeq).next()
+    const found = this.log.iter(this._applySeq, { iterStepSize: 1 }).next()
     if (found.done) {
       throw new Err.ErrorWithCode(
         'applied log entry not found',
@@ -515,9 +527,9 @@ class MonsterNode extends RaftNode {
   }
 
   _monsterRememberReport(from, digest) {
-    if (!this._monsterPendingReports.has(from)) {
-      this._monsterPendingReports.set(from, asBuffer(digest))
-    }
+    if (this._monsterPendingReports.has(from)) { return }
+    this._monsterPendingReports.set(from, asBuffer(digest))
+    this._monsterReportWake?.resolve()
   }
 
   _monsterDecision() {
@@ -795,14 +807,26 @@ class MonsterNode extends RaftNode {
 
     let decision = null
     const retryms = Math.max(2, this.opts.pingTimeout * 0.15)
+    let requested = -Infinity
     while (true) {
       this._monsterAssertLeader(term)
       decision = this._monsterDecision()
       if (decision.agreement || decision.impossible) { break }
-      this.nodes.filter((id) => id !== this.id).forEach((to) => {
-        this.send(to, { type: OUTCOME_REQUEST, cmdSeq: command.cmdSeq })
-      })
-      await this._delay(retryms)
+      if (Date.now() - requested >= retryms) {
+        requested = Date.now()
+        this.nodes.filter((id) => id !== this.id).forEach((to) => {
+          this.send(to, { type: OUTCOME_REQUEST, cmdSeq: command.cmdSeq })
+        })
+      }
+      const wake = util.oneShot()
+      this._monsterReportWake = wake
+      const timer = setTimeout(wake.resolve, retryms)
+      try {
+        await this._raceShutdown(wake.promise)
+      } finally {
+        clearTimeout(timer)
+        if (this._monsterReportWake === wake) { this._monsterReportWake = null }
+      }
     }
 
     let sync = null
@@ -957,7 +981,8 @@ class MonsterNode extends RaftNode {
     const error = (err) => {
       this.send(from, util.errorRpc(this.term, msg.cid, err))
     }
-    if (!utilm.isFwdCmdMsg(msg)) {
+    if (!utilm.isFwdCmdMsg(msg) ||
+        cmdBytes(msg.items, this.nodes.length) > MAX_SQLITE_BYTES) {
       error(new Err.ErrorWithCode('forward CMD illegal', Err.RPC_ILLEGAL))
       return
     }
@@ -1069,6 +1094,7 @@ class MonsterNode extends RaftNode {
     if (!Buffer.isBuffer(data)) {
       throw new Err.ErrorWithCode('data must be buffer', Err.ARGUMENT_ILLEGAL)
     }
+    assertCmdSize([data], this.nodes.length)
     const [cmdSeq, outcomes] = await this._raceShutdown(
       this._monsterAppendOrFwdCmd([data]),
     )
@@ -1089,6 +1115,7 @@ class MonsterNode extends RaftNode {
       throw new Err.ErrorWithCode(
         'data must be array of buffers', Err.ARGUMENT_ILLEGAL)
     }
+    assertCmdSize(data, this.nodes.length)
     return this._raceShutdown(this._monsterAppendOrFwdCmd(data))
   }
 

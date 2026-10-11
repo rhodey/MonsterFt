@@ -27,10 +27,13 @@ const isEntries = (data) => Array.isArray(data) && data.length > 0 &&
   data.every((record) => record !== null && typeof record === 'object' &&
     !Array.isArray(record) && util.isTerm(record.term) &&
     Buffer.isBuffer(record.entry))
+
+const MAX_SQLITE_BYTES = 999_999_000
 const isForwardData = (data) =>
-  (Buffer.isBuffer(data) && data.length > 0) ||
+  (Buffer.isBuffer(data) && data.length > 0 && data.length <= MAX_SQLITE_BYTES) ||
   (Array.isArray(data) && data.length > 0 &&
-    data.every((buf) => Buffer.isBuffer(buf) && buf.length > 0))
+    data.every((buf) => Buffer.isBuffer(buf) && buf.length > 0 &&
+      buf.length <= MAX_SQLITE_BYTES))
 
 const defaults = {
   // how long before nodes try to elect themselves
@@ -41,6 +44,8 @@ const defaults = {
   appendTimeout: 1_500,
   // send <= rpcMax bufs per rpc
   rpcMax: 1024,
+  // send <= rpcMaxBytes per rpc, or one larger entry
+  rpcMaxBytes: 67_108_864,
   // state machine
   apply: applyNull,
   // apply <= applyMax bufs per call
@@ -123,6 +128,10 @@ class RaftNode extends EventEmitter {
     if (!Number.isSafeInteger(opts.rpcMax) || opts.rpcMax <= 0) {
       throw new Err.ErrorWithCode(
         'rpcMax must be int > 0', Err.ARGUMENT_ILLEGAL)
+    }
+    if (!Number.isSafeInteger(opts.rpcMaxBytes) || opts.rpcMaxBytes <= 0) {
+      throw new Err.ErrorWithCode(
+        'rpcMaxBytes must be int > 0', Err.ARGUMENT_ILLEGAL)
     }
     if (!Number.isSafeInteger(opts.applyMax) || opts.applyMax <= 0) {
       throw new Err.ErrorWithCode(
@@ -402,8 +411,9 @@ class RaftNode extends EventEmitter {
         const begin = this._applySeq + 1n
         let next = begin
         const arr = []
+        const rows = Number(min(BigInt(this.opts.applyMax), 1n + end - begin))
         try {
-          for (const record of this.log.iter(begin)) {
+          for (const record of this.log.iter(begin, { iterStepSize: rows })) {
             if (this._closing) { return }
             arr.push(record)
             next++
@@ -736,7 +746,7 @@ class RaftNode extends EventEmitter {
 
       const term = this.term
       let entryTerm = null
-      for (const entry of this.log.iter(match)) {
+      for (const entry of this.log.iter(match, { iterStepSize: 1 })) {
         entryTerm = entry.term
         break
       }
@@ -783,7 +793,19 @@ class RaftNode extends EventEmitter {
         this._emitSafe('warn', err)
         return false
       }
-      for (const entry of this.log.iter(b)) {
+      if (count > 0n) {
+        // Keep the page within rpcMaxBytes, but always send at least one entry.
+        let bytes = 0
+        let fit = 0
+        for (const size of this.log.sizes(begin, Number(count))) {
+          bytes += size
+          if (fit > 0 && bytes > this.opts.rpcMaxBytes) { break }
+          fit++
+        }
+        count = BigInt(max(1, fit))
+      }
+      const rows = Number(max(1n, count + (seqP < 0n ? 0n : 1n)))
+      for (const entry of this.log.iter(b, { iterStepSize: rows })) {
         if (!this._replicationActive(state)) { return false }
         if (termP !== null) { data.push(entry) }
         termP = termP ?? entry.term
@@ -1131,7 +1153,7 @@ class RaftNode extends EventEmitter {
         const next = min(commitSeq, matchedEnd)
         if (next <= this._commitSeq) { return ack() }
         let commitTerm = null
-        for (const entry of this.log.iter(next)) {
+        for (const entry of this.log.iter(next, { iterStepSize: 1 })) {
           commitTerm = entry.term
           break
         }
@@ -1174,7 +1196,7 @@ class RaftNode extends EventEmitter {
         return
       }
       const haveMax = data.length + (seqP >= 0n ? 1 : 0)
-      for (const next of this.log.iter(begin)) {
+      for (const next of this.log.iter(begin, { iterStepSize: haveMax })) {
         have.push(next)
         if (have.length >= haveMax) { break }
       }
@@ -1318,6 +1340,10 @@ class RaftNode extends EventEmitter {
       throw new Err.ErrorWithCode(
         'data must be non-empty buffer', Err.ARGUMENT_ILLEGAL)
     }
+    if (data.length > MAX_SQLITE_BYTES) {
+      throw new Err.ErrorWithCode(
+        `data must be <= ${MAX_SQLITE_BYTES} bytes`, Err.ARGUMENT_ILLEGAL)
+    }
     const isLeader = this.state === LEADER
     const work = isLeader ? this._appendToSelfAndFollowers(data) : this._fwdToLeader(data)
     return this._raceShutdown(work)
@@ -1334,6 +1360,10 @@ class RaftNode extends EventEmitter {
     if (!data.every((buf) => Buffer.isBuffer(buf) && buf.length > 0)) {
       throw new Err.ErrorWithCode(
         'data must be array of non-empty buffers', Err.ARGUMENT_ILLEGAL)
+    }
+    if (data.some((buf) => buf.length > MAX_SQLITE_BYTES)) {
+      throw new Err.ErrorWithCode(
+        `each buffer must be <= ${MAX_SQLITE_BYTES} bytes`, Err.ARGUMENT_ILLEGAL)
     }
     const isLeader = this.state === LEADER
     const work = isLeader ? this._appendToSelfAndFollowers(data) : this._fwdToLeader(data)
@@ -1445,4 +1475,4 @@ class RaftNode extends EventEmitter {
   }
 }
 
-export { RaftNode, ACK_OPERATION }
+export { RaftNode, ACK_OPERATION, MAX_SQLITE_BYTES }

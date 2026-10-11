@@ -17,7 +17,7 @@ import {
   SQLITE_ERROR,
 } from '../src/error.js'
 import { RaftNode as ProductionRaftNode } from '../src/index.js'
-import { ACK_OPERATION } from '../src/node.js'
+import { ACK_OPERATION, MAX_SQLITE_BYTES } from '../src/node.js'
 import { databasePath } from './util.js'
 
 let injectedLogId = 0
@@ -103,6 +103,9 @@ test('numeric quorum configuration', (t) => {
     'accepts an explicit quorum')
   t.equal(new RaftNode('1', ids4, send, log, { rpcMax: 1 }).opts.rpcMax, 1n,
     'normalizes a valid RPC page size')
+  t.equal(node.opts.rpcMaxBytes, 67_108_864, 'defaults to a 64 MiB RPC page')
+  t.equal(new RaftNode('1', ids4, send, log, { rpcMaxBytes: 1 }).opts.rpcMaxBytes, 1,
+    'accepts a valid RPC page byte limit')
   t.equal(new RaftNode('1', ids4, send, log, { applyMax: 1 }).opts.applyMax, 1,
     'accepts a valid apply batch size')
   t.ok(new RaftNode('1', ids, send, log, { quorum: 3 })._isQuorumErr(['2']),
@@ -165,6 +168,10 @@ test('node configuration requires a viable fixed cluster', (t) => {
   for (const rpcMax of [0, -1, 1.5, NaN, '1', 1n]) {
     throwsInvalidArgument(() => new RaftNode('1', ids, send, log, { rpcMax }),
       /rpcMax must be int > 0/, `rejects invalid rpcMax ${rpcMax}`)
+  }
+  for (const rpcMaxBytes of [0, -1, 1.5, NaN, '1', 1n]) {
+    throwsInvalidArgument(() => new RaftNode('1', ids, send, log, { rpcMaxBytes }),
+      /rpcMaxBytes must be int > 0/, `rejects invalid rpcMaxBytes ${rpcMaxBytes}`)
   }
   for (const applyMax of [0, -1, 1.5, NaN, '1', 1n]) {
     throwsInvalidArgument(() => new RaftNode('1', ids, send, log, { applyMax }),
@@ -2243,6 +2250,40 @@ test('append and appendBatch validate their input', async (t) => {
     /^data must be array of non-empty buffers$/,
     'batch requires non-empty buffers')
 
+  node.close()
+})
+
+test('payloads above MAX_SQLITE_BYTES are rejected before any log write', async (t) => {
+  const log = lifecycleLog()
+  const sent = []
+  const node = new RaftNode('1', ids, (to, msg) => sent.push([to, msg]), log, {
+    electionTimeout: 60_000,
+    pingTimeout: 60_000,
+  })
+  node.open()
+  const oversized = Buffer.allocUnsafe(MAX_SQLITE_BYTES + 1)
+  const largest = oversized.subarray(0, MAX_SQLITE_BYTES)
+
+  const appendErr = await rejection(node.append(oversized))
+  t.equal(appendErr?.code, ARGUMENT_ILLEGAL, 'append rejects an oversized payload')
+  t.equal(appendErr?.message, `data must be <= ${MAX_SQLITE_BYTES} bytes`,
+    'append names the limit')
+  const batchErr = await rejection(node.appendBatch([Buffer.from('ok'), oversized]))
+  t.equal(batchErr?.code, ARGUMENT_ILLEGAL, 'appendBatch rejects an oversized buffer')
+  t.equal(batchErr?.message, `each buffer must be <= ${MAX_SQLITE_BYTES} bytes`,
+    'appendBatch names the limit')
+  const boundaryErr = await rejection(node.append(largest))
+  t.equal(boundaryErr?.code, NO_LEADER,
+    'a payload at the limit passes validation and is forwarded')
+
+  node.state = 'leader'
+  node.leader = node.id
+  await node.onReceive('2', {
+    type: 'append', cid: 'oversized-forward', term: node.term, data: oversized,
+  })
+  t.equal(sent.at(-1)?.[1].code, RPC_ILLEGAL,
+    'a leader rejects an oversized forwarded append as malformed')
+  t.ok(node.isOpen, 'the leader stays open')
   node.close()
 })
 

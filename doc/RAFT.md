@@ -53,9 +53,9 @@ shutdown state and the fatal-error handler.
   timeout selection is left to the user for now.
 - **Deferred: an explicit `undefined` does not select a default.**
   `{ ...defaults, ...opts }` keeps it, so `electionTimeout`, `pingTimeout`,
-  `appendTimeout`, `rpcMax`, `applyMax`, and SQLiteLog's `iterStepSize` throw
-  `ARGUMENT_ILLEGAL`. `apply` and `quorum` do fall back to their defaults.
-  Decision: valid, but not a current focus.
+  `appendTimeout`, `rpcMax`, `rpcMaxBytes`, `applyMax`, and SQLiteLog's
+  `iterStepSize` throw `ARGUMENT_ILLEGAL`. `apply` and `quorum` do fall back
+  to their defaults. Decision: valid, but not a current focus.
 
 ## `_throwIfClosing`
 
@@ -224,12 +224,12 @@ None.
 ## `_apply`
 
 Serializes application work through `_applyPrev` and reads committed entries
-in batches up to the requested boundary. Calls the configured application
-function with payloads, sequences, and terms, representing no-ops as null
-payloads. Validates the result array against the batch's own length,
-advances `_applySeq`, delivers results, and emits `apply`. Log failures,
-application failures, or an incomplete read reject application waiters and
-trigger fatal shutdown.
+in batches up to the requested boundary, fetching no more log rows than the
+batch applies. Calls the configured application function with payloads,
+sequences, and terms, representing no-ops as null payloads. Validates the
+result array against the batch's own length, advances `_applySeq`, delivers
+results, and emits `apply`. Log failures, application failures, or an
+incomplete read reject application waiters and trigger fatal shutdown.
 
 ### findings
 
@@ -429,11 +429,13 @@ None.
 ## `_replicationPage`
 
 Reads and sends one bounded page of entries with its predecessor term and
-sequence, stopping if the required history has been forgotten. Retries a
-predecessor mismatch immediately from one sequence earlier. Delays other
-retryable RPC failures, and handles cancellation or fatal log errors. On
-success, advances the peer's match and next indexes, checks commitment, and
-schedules resolution of satisfied waiters.
+sequence, and stops if the required history has been forgotten. A page holds
+at most `rpcMax` entries and `rpcMaxBytes` of entry data, but always at least
+one entry. Entry sizes are read first, so only the rows sent are fetched.
+Retries a predecessor mismatch immediately from one sequence earlier. Delays
+other retryable RPC failures, and handles cancellation or fatal log errors.
+On success, advances the peer's match and next indexes, checks commitment,
+and schedules resolution of satisfied waiters.
 
 ### findings
 
@@ -549,11 +551,11 @@ result count for batches and returns the leader's sequence and results.
 
 ## `_rxAppendToLeader`
 
-Validates a forwarded append's correlation ID, term, and payload, rejecting
-invalid or mismatched requests through the RPC error envelope. Replies
-`NOT_LEADER` when the node is not leading. Appends valid requests locally and
-to followers, then replies with their sequence and application results or
-the resulting error.
+Validates a forwarded append's correlation ID, term, and payload, including
+`MAX_SQLITE_BYTES`, rejecting invalid or mismatched requests through the RPC
+error envelope. Replies `NOT_LEADER` when the node is not leading. Appends
+valid requests locally and to followers, then replies with their sequence
+and application results or the resulting error.
 
 ### findings
 
@@ -609,9 +611,12 @@ None.
 
 ## `append`
 
-Requires an open node and a nonempty Buffer, then appends locally if leader
-or forwards to the known leader. Races the operation against shutdown and
-returns its sequence and application result.
+Requires an open node and a nonempty Buffer of at most `MAX_SQLITE_BYTES`
+(999,999,000), then appends locally if leader or forwards to the known
+leader. The limit keeps each log row under SQLite's default
+1,000,000,000-byte limit, because a failed local append is fatal on the
+leader. Races the operation against shutdown and returns its sequence and
+application result.
 
 ### findings
 
@@ -619,9 +624,10 @@ None.
 
 ## `appendBatch`
 
-Requires an open node and a nonempty array of nonempty Buffers, then appends
-locally if leader or forwards the batch. Races the operation against
-shutdown and returns its starting sequence and application results.
+Requires an open node and a nonempty array of nonempty Buffers, each at most
+`MAX_SQLITE_BYTES`, then appends locally if leader or forwards the batch.
+Races the operation against shutdown and returns its starting sequence and
+application results.
 
 ### findings
 
