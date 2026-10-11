@@ -1,4 +1,5 @@
 import test from 'tape'
+import { NOT_LEADER } from '../src/error.js'
 import { sleep, comms, connect } from './util.js'
 import { open, close, ready } from './util.js'
 import { leaders, followers } from './util.js'
@@ -305,4 +306,37 @@ test('leader publishes follower removal and a single step-down change', async (t
     'losing quorum publishes a change')
   t.equal(changes[0]?.state, 'follower',
     'the first change after losing quorum is the step-down')
+})
+
+test('a leader that stepped down rejects a forwarded append with NOT_LEADER', async (t) => {
+  t.teardown(() => close(nodes))
+
+  let dropAcksTo = null
+  const allowSend = (to, from, msg) => !(to === dropAcksTo && msg.type === 'ack')
+  const coms = comms(allowSend)
+  const nodes = connect(coms, 3, null, { pingTimeout: 300 })
+  await reset(nodes)
+  open(nodes)
+  t.equal(await readyWithin(nodes, 10_000), 'ready', 'cluster elects a leader')
+  const leader = leaders(nodes)[0]
+  const follower = nodes.find((node) => node !== leader)
+  const term = leader.term
+  let outcome = null
+  leader.on('change', (change) => {
+    if (change.state !== 'follower' || outcome) { return }
+    outcome = {
+      term: change.term,
+      followerLeader: follower.leader,
+      result: follower.append(Buffer.from('forwarded')).then(() => null, (err) => err),
+    }
+  })
+
+  dropAcksTo = leader.id
+  t.ok(await waitFor(() => outcome !== null, 5_000),
+    'the leader steps down after losing acknowledgements')
+  t.equal(outcome?.term, term, 'the leader steps down within its term')
+  t.equal(outcome?.followerLeader, leader.id,
+    'the follower still forwards to the former leader')
+  const err = await outcome?.result
+  t.equal(err?.code, NOT_LEADER, 'the forwarded append is rejected with NOT_LEADER')
 })

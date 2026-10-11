@@ -1061,6 +1061,8 @@ class RaftNode extends EventEmitter {
       return
     } else if (!util.isTerm(term)) {
       return error('term is illegal', Err.RPC_ILLEGAL)
+    } else if (this.state !== LEADER) {
+      return error('node not leader', Err.NOT_LEADER)
     } else if (term > this.term) {
       return error('higher term append routed to leader', Err.TERM_DIFF)
     } else if (this.term !== term) {
@@ -1239,7 +1241,8 @@ class RaftNode extends EventEmitter {
         break
 
       case APPEND:
-        if (this.state === LEADER && (!util.isTerm(term) || term <= this.term)) {
+        if (!Object.hasOwn(msg, 'termP') ||
+            (this.state === LEADER && (!util.isTerm(term) || term <= this.term))) {
           this._rxAppendToLeader(msg, from)
         } else {
           this._rxAppendToFollower(msg, from)
@@ -1400,14 +1403,10 @@ class RaftNode extends EventEmitter {
     }
     queueMicrotask(() => {
       while (this._fatalErrors.length > 0) {
-        try {
-          this.emit('error', this._fatalErrors.shift())
-        } catch {}
+        this._emitSafe('error', this._fatalErrors.shift())
       }
       while (this._fatalCloseErrors.length > 0) {
-        try {
-          this.emit('error', this._fatalCloseErrors.shift())
-        } catch {}
+        this._emitSafe('error', this._fatalCloseErrors.shift())
       }
       this._fatalScheduled = false
       this._removeListenersAfterClose()
