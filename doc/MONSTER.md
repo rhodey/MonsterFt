@@ -2,10 +2,9 @@
 
 Function notes for [src/monster.js](../src/monster.js) and
 [src/monsterft.js](../src/monsterft.js), in source order. The notes cover the
-module helpers and every MonsterNode method; the empty `noop` helper is
-omitted. Each findings area lists only unresolved items: open, deferred,
-skipped by decision, or accepted. "None" means no unresolved item is
-recorded. Review rules are in [RAFT.md](RAFT.md).
+module helpers and every MonsterNode method. Each findings area lists only
+unresolved items: open, deferred, skipped by decision, or accepted. "None"
+means no unresolved item is recorded. Review rules are in [RAFT.md](RAFT.md).
 
 ## Policies and accepted limitations
 
