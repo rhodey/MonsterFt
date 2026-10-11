@@ -2336,6 +2336,84 @@ test('drain latches admission and waits for the local SYNC',
       'the drained object cannot reopen')
   })
 
+test('certify refuses a pair while a running node has it open', (t) => {
+  const databasePath = uniquePath('certify-live')
+  removePair(databasePath)
+  const make = () => {
+    const node = new MonsterFt('1', ids, noop, databasePath, {
+      electionTimeout: 60_000,
+      apply: applyApp,
+    })
+    node.on('warn', noop)
+    node.on('error', noop)
+    return node
+  }
+  let node = make()
+  t.teardown(() => {
+    closeNodesQuietly([node])
+    removePair(databasePath)
+  })
+  node.open()
+  node.close()
+  const setup = new DatabaseSync(`${databasePath}2`)
+  setup.prepare('UPDATE monsterft_meta SET repair_state = 1 WHERE id = 1').run()
+  setup.close()
+  const repairState = () => {
+    const db = new DatabaseSync(`${databasePath}2`, {
+      readOnly: true,
+      readBigInts: true,
+    })
+    try {
+      return db.prepare('SELECT repair_state FROM monsterft_meta WHERE id = 1')
+        .get().repair_state
+    } finally {
+      db.close()
+    }
+  }
+
+  node = make()
+  node.open()
+  t.ok(node.isOpen, 'repair state 1 reopens a live node')
+  const err = errorOfCall(() => MonsterFt.certify(databasePath))
+  t.ok(err instanceof ErrorWithCode, 'certification of an open pair fails')
+  t.equal(err?.code, SQLITE_ERROR, 'the refusal uses SQLITE_ERROR')
+  t.equal(err?.sqlCode, 5, 'the refusal reports SQLITE_BUSY')
+  t.ok(node.isOpen, 'the running node remains open')
+  t.equal(repairState(), 1n, 'the refused certification leaves repair state 1')
+
+  node.close()
+  t.equal(MonsterFt.certify(databasePath), monsterMetaAtPath(databasePath).applied_seq,
+    'certification succeeds after the node closes')
+  t.equal(repairState(), 0n, 'certification then clears the repair state')
+  t.end()
+})
+
+test('drain before open leaves no draining state', async (t) => {
+  const databasePath = uniquePath('drain-before-open')
+  removePair(databasePath)
+  const node = new MonsterFt('1', ids, noop, databasePath, {
+    electionTimeout: 60_000,
+    pingTimeout: 150,
+    apply: applyApp,
+  })
+  node.on('warn', noop)
+  node.on('error', noop)
+  t.teardown(() => {
+    closeNodesQuietly([node])
+    removePair(databasePath)
+  })
+
+  const early = await errorOf(node.drainCmd())
+  t.equal(early?.code, NODE_NOT_OPEN, 'drain before open rejects as not open')
+  node.open()
+  const appendErr = await errorOf(node.append(toBuf({ key: 'after', value: 1 })))
+  t.notEqual(appendErr?.code, DRAINING,
+    'an opened node does not reject commands as draining')
+  t.equal(await errorOf(withTimeout(node.drainCmd(), 'drain after open')), null,
+    'a later drain runs instead of returning the earlier rejection')
+  t.notOk(node.isOpen, 'the later drain closes the node')
+})
+
 test('drain closes a candidate before resolving', async (t) => {
   const databasePath = uniquePath('drain-candidate')
   removePair(databasePath)

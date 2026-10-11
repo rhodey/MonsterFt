@@ -22,3 +22,13 @@ have trouble with elections but there is no risk to data corruption.
 A future nodejs and rust impl are planned to cover this case, and to
 improve other things related to Raft being a "strong leader" protocol
 but MonsterFt wanting things a little different.
+
+## Docs
+
+The [doc/](doc/) folder has a section for each function of moderate
+complexity in the core sources. Each section describes the function and
+references any open, deferred, or accepted known issues:
+[RAFT.md](doc/RAFT.md) covers RaftNode, [LOG.md](doc/LOG.md) covers
+SQLiteLog, and [MONSTER.md](doc/MONSTER.md) covers MonsterNode and
+MonsterFt. Check these before reporting an issue, and record new
+findings there.

@@ -7,6 +7,7 @@ import {
   LOG_NOT_OPEN,
   NO_LEADER,
   NODE_NOT_OPEN,
+  NOT_LEADER,
   TERM_DIFF,
   NOT_COMMIT,
   PING_TIMEOUT,
@@ -132,11 +133,18 @@ test('node configuration requires a viable fixed cluster', (t) => {
       /nodes must be non-empty string array/,
       `rejects member id ${String(invalid)}`)
   }
-  for (const invalid of [null, undefined]) {
+  for (const [label, invalid] of [
+    ['null', null],
+    ['undefined', undefined],
+    ['digit string', '123'],
+    ['comma-separated string', '1,2,3'],
+    ['Set', new Set(ids)],
+    ['array-like object', { 0: '1', 1: '2', 2: '3', length: 3 }],
+  ]) {
     throwsInvalidArgument(
       () => new RaftNode('1', invalid, send, log),
       /nodes must be non-empty string array/,
-      `rejects nodes ${String(invalid)}`)
+      `rejects nodes as ${label}`)
   }
   throwsInvalidArgument(() => new RaftNode('1', ['1', '2'], send, log),
     /nodes must contain at least 3 ids/,
@@ -689,6 +697,48 @@ test('node lifecycle calls are idempotent', (t) => {
   t.end()
 })
 
+test('later change listeners run after an earlier listener throws', (t) => {
+  const node = new RaftNode('1', ids, () => {}, lifecycleLog(), {
+    electionTimeout: 60_000,
+    pingTimeout: 60_000,
+  })
+  const failure = new Error('change listener failure')
+  const errors = []
+  const seen = []
+  node.on('error', (err) => errors.push(err))
+  node.on('change', () => { throw failure })
+  node.on('change', function(change) {
+    seen.push(['later', change.open, this === node])
+  })
+  node.once('change', (change) => seen.push(['once', change.open]))
+
+  node.open()
+  node.close()
+  t.deepEqual(seen, [['later', true, true], ['once', true], ['later', false, true]],
+    'later listeners receive each change with the node as this; once runs once')
+  t.deepEqual(errors, [failure, failure], 'each listener failure emits one error')
+  t.end()
+})
+
+test('later error listeners run after an earlier error listener throws', (t) => {
+  const node = new RaftNode('1', ids, () => {}, lifecycleLog())
+  const original = new Error('original error')
+  const failure = new Error('error listener failure')
+  const later = []
+  node.on('error', (err) => {
+    if (err === original) { throw failure }
+  })
+  node.on('error', (err) => later.push(err))
+
+  node._emitSafe('error', original)
+  t.deepEqual(later, [failure, original],
+    'the later listener receives the listener failure and the original error')
+  t.doesNotThrow(
+    () => new RaftNode('1', ids, () => {}, lifecycleLog())._emitSafe('error', original),
+    'an error without listeners is discarded')
+  t.end()
+})
+
 test('awaitEvent rejects every value thrown by its callback', async (t) => {
   const node = new RaftNode('1', ids, () => {}, lifecycleLog(), {
     electionTimeout: 60_000,
@@ -1000,6 +1050,27 @@ test('fatal errors close synchronously and report after the closed change', asyn
     'fatal close removes listeners after public error reporting')
 })
 
+test('later error listeners receive fatal errors after an earlier listener throws',
+  async (t) => {
+    const node = new RaftNode('1', ids, () => {}, lifecycleLog(), {
+      electionTimeout: 60_000,
+    })
+    const fatal = new Error('fatal')
+    const failure = new Error('error listener failure')
+    const later = []
+    node.on('error', (err) => {
+      if (err === fatal) { throw failure }
+    })
+    node.on('error', (err) => later.push(err))
+    node.open()
+    node.emit('fatal', fatal)
+
+    await Promise.resolve()
+    t.deepEqual(later, [failure, fatal],
+      'the later listener receives the listener failure and the fatal error')
+    t.deepEqual(node.eventNames(), [], 'removes listeners after reporting')
+  })
+
 for (const throwingListener of [false, true]) {
   const mode = throwingListener ? 'a throwing error listener' : 'no error listener'
   test(`fatal reporting finishes cleanup with ${mode}`, async (t) => {
@@ -1029,8 +1100,11 @@ for (const throwingListener of [false, true]) {
 
     await Promise.resolve()
     if (throwingListener) {
-      t.deepEqual(errors, [first, second, closeFailure],
-        'listener exceptions do not prevent later reports or get re-emitted')
+      t.deepEqual(errors.map((err) => err.message), [
+        'first fatal', 'error listener failed',
+        'second fatal', 'error listener failed',
+        'close failed', 'error listener failed',
+      ], 'listener exceptions do not prevent later reports and are reported once')
     }
     t.deepEqual(node._fatalErrors, [], 'drains the fatal error queue')
     t.deepEqual(node._fatalCloseErrors, [], 'drains the close error queue')
@@ -1272,6 +1346,39 @@ test('Raft RPC handlers report different terms consistently', async (t) => {
       `${label} uses TERM_DIFF`)
     t.equal(sent[index][1].sqlCode, null,
       `${label} has no SQLite code`)
+  }
+  node.close()
+})
+
+test('non-leaders reject forwarded appends with NOT_LEADER', async (t) => {
+  const log = lifecycleLog()
+  const sent = []
+  const node = new RaftNode('1', ids, (to, msg) => sent.push([to, msg]), log, {
+    electionTimeout: 60_000,
+    pingTimeout: 60_000,
+  })
+  node.open()
+
+  for (const [state, leader, term] of [
+    ['follower', null, 0n],
+    ['follower', '3', 0n],
+    ['candidate', null, 0n],
+    ['follower', '3', 5n],
+  ]) {
+    const label = `${state} with leader ${leader} and request term ${term}`
+    node.state = state
+    node.leader = leader
+    sent.length = 0
+    await node.onReceive('2', {
+      type: 'append', cid: `forward-${label}`, term, data: Buffer.from('value'),
+    })
+    t.equal(sent.length, 1, `${label} replies once`)
+    t.equal(sent[0]?.[1].type, 'err', `${label} replies with ERR`)
+    t.equal(sent[0]?.[1].code, NOT_LEADER, `${label} uses NOT_LEADER`)
+    t.equal(sent[0]?.[1].term, 0n, `${label} replies with its own term`)
+    t.equal(node.state, state, `${label} keeps its state`)
+    t.equal(node.leader, leader, `${label} keeps its leader`)
+    t.equal(node.term, 0n, `${label} keeps its term`)
   }
   node.close()
 })

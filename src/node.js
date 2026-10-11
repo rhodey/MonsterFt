@@ -72,14 +72,8 @@ class RaftNode extends EventEmitter {
       throw new Err.ErrorWithCode(
         'id must be non-empty string', Err.ARGUMENT_ILLEGAL)
     }
-    let nodeIds = null
-    try {
-      nodeIds = Array.from(nodes)
-    } catch {
-      throw new Err.ErrorWithCode(
-        'nodes must be non-empty string array', Err.ARGUMENT_ILLEGAL)
-    }
-    if (!nodeIds.every((nodeId) => typeof nodeId === 'string' && nodeId.length > 0)) {
+    const nodeIds = Array.isArray(nodes) ? [...nodes] : null
+    if (!nodeIds?.every((nodeId) => typeof nodeId === 'string' && nodeId.length > 0)) {
       throw new Err.ErrorWithCode(
         'nodes must be non-empty string array', Err.ARGUMENT_ILLEGAL)
     }
@@ -159,6 +153,7 @@ class RaftNode extends EventEmitter {
 
     this._commitSeq = -1n
     this._commitTerm = -1n
+    this._commitAnnounced = -1n
     this._applySeq = -1n
     this._applyPrev = ready
     this._applyWaiters = new Set()
@@ -196,15 +191,21 @@ class RaftNode extends EventEmitter {
   }
 
   _emitSafe(type, data) {
-    try {
-      this.emit(type, data)
-    } catch (err) {
-      try { this.emit('error', err) } catch {}
+    // Call listeners one at a time so one failure cannot hide the event from
+    // later listeners, including internal waiters.
+    for (const listener of this.rawListeners(type)) {
+      try {
+        listener.call(this, data)
+      } catch (err) {
+        try { this.emit('error', err) } catch {}
+      }
     }
   }
 
   _change() {
-    const { id, nodes, state, leader, followers, term } = this
+    const { id, state, leader, term } = this
+    const nodes = [...this.nodes]
+    const followers = [...this.followers]
     const change = { id, nodes, state, leader, followers, term }
     change.open = this.isOpen
     this._emitSafe('change', change)
@@ -528,6 +529,7 @@ class RaftNode extends EventEmitter {
     this._acks.clear()
     this._commitSeq = -1n
     this._commitTerm = -1n
+    this._commitAnnounced = -1n
     this._stopTimers()
   }
 
@@ -564,8 +566,12 @@ class RaftNode extends EventEmitter {
       delay = Date.now() - delay
       return delay >= this.opts.pingTimeout
     })
-    this.followers = this.followers.filter((id) => !rm.includes(id))
-    return this._isQuorum()
+    const followers = this.followers.filter((id) => !rm.includes(id))
+    const removed = followers.length < this.followers.length
+    this.followers = followers
+    if (!this._isQuorum()) { return false }
+    removed && this._change()
+    return true
   }
 
   _startElectionTimer() {
@@ -945,7 +951,7 @@ class RaftNode extends EventEmitter {
         if (this._commitSeq < end) {
           throw new Err.ErrorWithCode('append not commit', Err.NOT_COMMIT)
         }
-        this._pingFollowers()
+        this._announceCommit()
         res()
       }).catch((err) => {
         if (err?.code === Err.NOT_COMMIT) { return rej(err) }
@@ -954,6 +960,12 @@ class RaftNode extends EventEmitter {
     }))
     work.catch(noop).finally(() => clearTimeout(timer))
     return work
+  }
+
+  _announceCommit() {
+    if (this._commitSeq <= this._commitAnnounced) { return }
+    this._commitAnnounced = this._commitSeq
+    this._pingFollowers()
   }
 
   _appendToSelfAndFollowers(data) {
@@ -1049,6 +1061,8 @@ class RaftNode extends EventEmitter {
       return
     } else if (!util.isTerm(term)) {
       return error('term is illegal', Err.RPC_ILLEGAL)
+    } else if (this.state !== LEADER) {
+      return error('node not leader', Err.NOT_LEADER)
     } else if (term > this.term) {
       return error('higher term append routed to leader', Err.TERM_DIFF)
     } else if (this.term !== term) {
@@ -1227,7 +1241,8 @@ class RaftNode extends EventEmitter {
         break
 
       case APPEND:
-        if (this.state === LEADER && (!util.isTerm(term) || term <= this.term)) {
+        if (!Object.hasOwn(msg, 'termP') ||
+            (this.state === LEADER && (!util.isTerm(term) || term <= this.term))) {
           this._rxAppendToLeader(msg, from)
         } else {
           this._rxAppendToFollower(msg, from)
@@ -1388,14 +1403,10 @@ class RaftNode extends EventEmitter {
     }
     queueMicrotask(() => {
       while (this._fatalErrors.length > 0) {
-        try {
-          this.emit('error', this._fatalErrors.shift())
-        } catch {}
+        this._emitSafe('error', this._fatalErrors.shift())
       }
       while (this._fatalCloseErrors.length > 0) {
-        try {
-          this.emit('error', this._fatalCloseErrors.shift())
-        } catch {}
+        this._emitSafe('error', this._fatalCloseErrors.shift())
       }
       this._fatalScheduled = false
       this._removeListenersAfterClose()

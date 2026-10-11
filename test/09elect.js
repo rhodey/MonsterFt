@@ -1,4 +1,5 @@
 import test from 'tape'
+import { NOT_LEADER } from '../src/error.js'
 import { sleep, comms, connect } from './util.js'
 import { open, close, ready } from './util.js'
 import { leaders, followers } from './util.js'
@@ -205,4 +206,137 @@ test('test elect n=5 and 2 delayed', async (t) => {
   t.equal(count, 4, '4 followers')
   total >= timeout && t.fail('timeout')
   t.end()
+})
+
+const readyWithin = async (nodes, ms) => {
+  let timer = null
+  const timedOut = new Promise((res) => { timer = setTimeout(res, ms, 'timeout') })
+  try {
+    return await Promise.race([ready(nodes).then(() => 'ready'), timedOut])
+  } finally {
+    clearTimeout(timer)
+  }
+}
+
+test('a throwing change listener does not hide leadership from awaitLeader', async (t) => {
+  t.teardown(() => close(nodes))
+
+  const coms = comms()
+  const nodes = connect(coms, 3)
+  await reset(nodes)
+  const failure = new Error('change listener failure')
+  const errors = []
+  nodes.forEach((node) => {
+    node.on('change', (change) => {
+      if (change.leader !== null) { throw failure }
+    })
+    node.on('error', (err) => errors.push(err))
+  })
+  open(nodes)
+
+  t.equal(await readyWithin(nodes, 10_000), 'ready',
+    'awaitLeader resolves on every node')
+  t.equal(leaders(nodes).length, 1, '1 leader')
+  t.ok(nodes.every((node) => node.leader !== null), 'every node knows the leader')
+  t.ok(errors.length > 0 && errors.every((err) => err === failure),
+    'listener failures are reported as errors')
+})
+
+test('change payloads copy membership and followers', async (t) => {
+  t.teardown(() => close(nodes))
+
+  const coms = comms()
+  const nodes = connect(coms, 3)
+  await reset(nodes)
+  let shared = 0
+  nodes.forEach((node) => {
+    node.on('change', (change) => {
+      if (change.nodes === node.nodes || change.followers === node.followers) {
+        shared++
+      }
+      change.nodes.push('mutated')
+      change.followers.push('mutated')
+    })
+  })
+  open(nodes)
+
+  t.equal(await readyWithin(nodes, 10_000), 'ready', 'cluster elects a leader')
+  t.equal(shared, 0, 'payload arrays are never the node arrays')
+  for (const node of nodes) {
+    t.deepEqual(node.nodes, ['1', '2', '3'],
+      `listener mutation leaves node ${node.id} membership unchanged`)
+  }
+  t.notOk(leaders(nodes)[0].followers.includes('mutated'),
+    'listener mutation leaves leader followers unchanged')
+})
+
+const waitFor = async (fn, ms) => {
+  const end = Date.now() + ms
+  while (!fn() && Date.now() < end) { await sleep(5) }
+  return fn()
+}
+
+test('leader publishes follower removal and a single step-down change', async (t) => {
+  t.teardown(() => close(nodes))
+
+  const down = new Set()
+  const allowSend = (to, from) => !down.has(to) && !down.has(from)
+  const coms = comms(allowSend)
+  const nodes = connect(coms, 3, null, { pingTimeout: 300 })
+  await reset(nodes)
+  open(nodes)
+  t.equal(await readyWithin(nodes, 10_000), 'ready', 'cluster elects a leader')
+  const leader = leaders(nodes)[0]
+  t.ok(await waitFor(() => leader.followers.length === 2, 2_000),
+    'leader has both followers')
+  const changes = []
+  leader.on('change', (change) => changes.push(change))
+  const [lost, kept] = leader.followers
+
+  down.add(lost)
+  t.ok(await waitFor(() => changes.length > 0, 2_000),
+    'removing one follower publishes a change')
+  t.equal(changes[0]?.state, 'leader', 'the node is still leader')
+  t.deepEqual(changes[0]?.followers, [kept], 'the change omits the lost follower')
+  t.deepEqual(leader.followers, [kept], 'leader keeps the remaining follower')
+
+  changes.length = 0
+  down.add(kept)
+  t.ok(await waitFor(() => changes.length > 0, 2_000),
+    'losing quorum publishes a change')
+  t.equal(changes[0]?.state, 'follower',
+    'the first change after losing quorum is the step-down')
+})
+
+test('a leader that stepped down rejects a forwarded append with NOT_LEADER', async (t) => {
+  t.teardown(() => close(nodes))
+
+  let dropAcksTo = null
+  const allowSend = (to, from, msg) => !(to === dropAcksTo && msg.type === 'ack')
+  const coms = comms(allowSend)
+  const nodes = connect(coms, 3, null, { pingTimeout: 300 })
+  await reset(nodes)
+  open(nodes)
+  t.equal(await readyWithin(nodes, 10_000), 'ready', 'cluster elects a leader')
+  const leader = leaders(nodes)[0]
+  const follower = nodes.find((node) => node !== leader)
+  const term = leader.term
+  let outcome = null
+  leader.on('change', (change) => {
+    if (change.state !== 'follower' || outcome) { return }
+    outcome = {
+      term: change.term,
+      followerLeader: follower.leader,
+      result: follower.append(Buffer.from('forwarded')).then(() => null, (err) => err),
+    }
+  })
+
+  dropAcksTo = leader.id
+  t.ok(await waitFor(() => outcome !== null, 5_000),
+    'the leader steps down after losing acknowledgements')
+  t.equal(outcome?.term, term, 'the leader steps down within its term')
+  t.equal(outcome?.followerLeader, leader.id,
+    'the follower still forwards to the former leader')
+  const err = await outcome?.result
+  t.equal(err?.code, NOT_LEADER, 'the forwarded append is rejected with NOT_LEADER')
 })

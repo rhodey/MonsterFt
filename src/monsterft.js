@@ -49,6 +49,7 @@ class MonsterFt extends MonsterNode {
     try {
       db = new DatabaseSync(monsterDatabasePath, { readBigInts: true })
       db.exec('PRAGMA busy_timeout = 0')
+      db.exec('PRAGMA locking_mode = EXCLUSIVE')
       db.exec('BEGIN EXCLUSIVE')
       transaction = true
 
