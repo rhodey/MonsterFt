@@ -153,6 +153,7 @@ class RaftNode extends EventEmitter {
 
     this._commitSeq = -1n
     this._commitTerm = -1n
+    this._commitAnnounced = -1n
     this._applySeq = -1n
     this._applyPrev = ready
     this._applyWaiters = new Set()
@@ -528,6 +529,7 @@ class RaftNode extends EventEmitter {
     this._acks.clear()
     this._commitSeq = -1n
     this._commitTerm = -1n
+    this._commitAnnounced = -1n
     this._stopTimers()
   }
 
@@ -949,7 +951,7 @@ class RaftNode extends EventEmitter {
         if (this._commitSeq < end) {
           throw new Err.ErrorWithCode('append not commit', Err.NOT_COMMIT)
         }
-        this._pingFollowers()
+        this._announceCommit()
         res()
       }).catch((err) => {
         if (err?.code === Err.NOT_COMMIT) { return rej(err) }
@@ -958,6 +960,12 @@ class RaftNode extends EventEmitter {
     }))
     work.catch(noop).finally(() => clearTimeout(timer))
     return work
+  }
+
+  _announceCommit() {
+    if (this._commitSeq <= this._commitAnnounced) { return }
+    this._commitAnnounced = this._commitSeq
+    this._pingFollowers()
   }
 
   _appendToSelfAndFollowers(data) {

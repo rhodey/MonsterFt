@@ -588,6 +588,48 @@ test('appendToFollowers preserves lagging progress and eagerly announces commit'
   node._stopTimers()
 })
 
+test('appends committed together share one commit announcement', async (t) => {
+  const data = ['zero', 'one', 'two', 'three', 'four', 'five']
+    .map((value) => entry(0n, value))
+  const log = {
+    seq: 4n,
+    term: 0n,
+    *iter(begin) {
+      for (let seq = begin; seq <= this.seq; seq++) { yield data[Number(seq)] }
+    },
+  }
+  let node = null
+  const send = (to, msg) => {
+    if (msg.type !== 'append' || !msg.data) { return }
+    setImmediate(() => node.onReceive(to, {
+      type: 'ack',
+      term: 0n,
+      cid: msg.cid,
+      seq: msg.seqP + 1n,
+    }))
+  }
+  node = new RaftNode('1', ids, send, log, { appendTimeout: 1_000 })
+  node._open = true
+  node.state = 'leader'
+  node.leader = '1'
+  node.term = 0n
+  node.followers = ['2']
+  node._replicationState('2', node.term, 1n)
+
+  const announced = []
+  node._pingFollowers = () => announced.push(node._commitSeq)
+
+  await Promise.all([1n, 2n, 3n, 4n].map((seq) => node._appendToFollowers(seq, seq)))
+  t.deepEqual(announced, [1n, 4n],
+    'four appends committed in two advances are announced once per advance')
+
+  log.seq = 5n
+  await node._appendToFollowers(5n, 5n)
+  t.deepEqual(announced, [1n, 4n, 5n], 'a later commit advance is announced')
+  node._toFollower()
+  node._stopTimers()
+})
+
 test('an older overlapping target does not rewind acknowledged replication', async (t) => {
   const data = ['zero', 'one', 'two', 'three'].map((value) => entry(0n, value))
   const log = {
