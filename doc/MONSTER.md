@@ -401,8 +401,8 @@ announces the local digest for agreement.
   already durable. On reopening, the replayed command applies them again;
   for example, a counter reached 2 instead of 1. SYNC fences the replica if
   only one is affected. If all are affected, they agree on the wrong state.
-  Suggested rule: after catching a database error, if `db.isTransaction` is
-  false, rethrow and issue no further SQL. No change has been made.
+  Suggested doc change: after catching a database error, if `db.isTransaction`
+  is false, rethrow and issue no further SQL. No change has been made.
 - **Accepted: a follower's application error is not reported in detail.**
   Only the leader returns outcomes to the caller. A dissenting follower
   reports only `REPAIR_OUTSIDE_AGREEMENT`, without the original message or
