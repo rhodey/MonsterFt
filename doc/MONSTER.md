@@ -407,15 +407,6 @@ announces the local digest for agreement.
   Only the leader returns outcomes to the caller. A dissenting follower
   reports only `REPAIR_OUTSIDE_AGREEMENT`, without the original message or
   stack. Decision: keep the current behavior.
-- **Accepted limitation: an exotic thrown value stops every replica.** If the
-  application throws a null-prototype object or a frozen `ErrorWithCode`,
-  `wrapError` throws in the item handler. Every replica then fails the CMD
-  and fails it again on each restart, until the application changes. This is
-  another node.js only thing that we dont care to have cluttering the
-  node.js reference.
-- **Note:** a function result encodes as nil. A local caller receives the
-  function, while a forwarded caller receives `undefined`. Digests still
-  agree.
 
 ## `_monsterApplySync`
 
