@@ -297,13 +297,15 @@ allowing startup retention or Raft activity.
 
 ### findings
 
-- **Skipped by decision: pending metadata is not checked against the log.**
-  A pending sequence need not name a CMD, and pending state need not agree
-  with the applied history. Altered metadata can pass startup and give wrong
-  outcome replies. Cleared pending fields can let startup pruning delete an
-  unresolved CMD. Ordinary writes update these fields atomically. If this is
-  revisited: election no-ops may follow a pending CMD, and the pending digest
-  cannot be recomputed from the log.
+- **Skipped by decision: startup does not cross-check pending metadata with
+  the log.** Monster writes the pending fields and the checkpoint together in
+  one statement, so they stay consistent on their own. They can disagree only
+  if someone hand-edits the DB2 row. For example, the pending sequence could
+  point at an entry that is not a CMD, or it could be cleared while a CMD is
+  unresolved. Startup would accept such an edit, and later outcome replies or
+  startup pruning would act on it. If this is revisited, note that election
+  no-ops may follow a pending CMD, and the pending digest cannot be
+  recomputed from the log.
 
 ## `_monsterVerifyAppliedEntry`
 
