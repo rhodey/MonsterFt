@@ -564,8 +564,12 @@ class RaftNode extends EventEmitter {
       delay = Date.now() - delay
       return delay >= this.opts.pingTimeout
     })
-    this.followers = this.followers.filter((id) => !rm.includes(id))
-    return this._isQuorum()
+    const followers = this.followers.filter((id) => !rm.includes(id))
+    const removed = followers.length < this.followers.length
+    this.followers = followers
+    if (!this._isQuorum()) { return false }
+    removed && this._change()
+    return true
   }
 
   _startElectionTimer() {

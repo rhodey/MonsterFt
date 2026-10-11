@@ -268,3 +268,41 @@ test('change payloads copy membership and followers', async (t) => {
   t.notOk(leaders(nodes)[0].followers.includes('mutated'),
     'listener mutation leaves leader followers unchanged')
 })
+
+const waitFor = async (fn, ms) => {
+  const end = Date.now() + ms
+  while (!fn() && Date.now() < end) { await sleep(5) }
+  return fn()
+}
+
+test('leader publishes follower removal and a single step-down change', async (t) => {
+  t.teardown(() => close(nodes))
+
+  const down = new Set()
+  const allowSend = (to, from) => !down.has(to) && !down.has(from)
+  const coms = comms(allowSend)
+  const nodes = connect(coms, 3, null, { pingTimeout: 300 })
+  await reset(nodes)
+  open(nodes)
+  t.equal(await readyWithin(nodes, 10_000), 'ready', 'cluster elects a leader')
+  const leader = leaders(nodes)[0]
+  t.ok(await waitFor(() => leader.followers.length === 2, 2_000),
+    'leader has both followers')
+  const changes = []
+  leader.on('change', (change) => changes.push(change))
+  const [lost, kept] = leader.followers
+
+  down.add(lost)
+  t.ok(await waitFor(() => changes.length > 0, 2_000),
+    'removing one follower publishes a change')
+  t.equal(changes[0]?.state, 'leader', 'the node is still leader')
+  t.deepEqual(changes[0]?.followers, [kept], 'the change omits the lost follower')
+  t.deepEqual(leader.followers, [kept], 'leader keeps the remaining follower')
+
+  changes.length = 0
+  down.add(kept)
+  t.ok(await waitFor(() => changes.length > 0, 2_000),
+    'losing quorum publishes a change')
+  t.equal(changes[0]?.state, 'follower',
+    'the first change after losing quorum is the step-down')
+})
