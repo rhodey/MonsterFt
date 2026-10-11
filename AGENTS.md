@@ -25,10 +25,10 @@ but MonsterFt wanting things a little different.
 
 ## Docs
 
-The [docs/](docs/) folder has a section for each function of moderate
+The [doc/](doc/) folder has a section for each function of moderate
 complexity in the core sources. Each section describes the function and
 references any open, deferred, or accepted known issues:
-[RAFT.md](docs/RAFT.md) covers RaftNode, [LOG.md](docs/LOG.md) covers
-SQLiteLog, and [MONSTER.md](docs/MONSTER.md) covers MonsterNode and
+[RAFT.md](doc/RAFT.md) covers RaftNode, [LOG.md](doc/LOG.md) covers
+SQLiteLog, and [MONSTER.md](doc/MONSTER.md) covers MonsterNode and
 MonsterFt. Check these before reporting an issue, and record new
 findings there.
