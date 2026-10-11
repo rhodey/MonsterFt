@@ -25,10 +25,6 @@ means no unresolved item is recorded. Review rules are in [RAFT.md](RAFT.md).
   `_monsterApplyCmd`.
 - **Repair:** certification is an offline step. Retention and repair are not
   being redesigned; see `_monsterPrune`.
-- **Progress:** progress assumes an available quorum with matching outcomes,
-  eventual message delivery, and completed application callbacks. A timeout
-  does not cancel a command, an early result does not mean its SYNC
-  completed, and client retries are new submissions.
 
 ## `asBuffer`
 
