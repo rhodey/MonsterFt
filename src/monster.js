@@ -59,6 +59,16 @@ const digestCmd = (term, cmdSeq, patchset, outcomes) => {
     .digest()
 }
 
+const assertEncodable = (value) => {
+  try {
+    pack(value)
+  } catch {
+    throw new Err.ErrorWithCode(
+      'apply result is not MessagePack-encodable', Err.APPLY_ERROR,
+    )
+  }
+}
+
 class MonsterNode extends RaftNode {
   constructor(id, nodes, send, databasePath, opts={}) {
     opts = typeof opts === 'function' ? opts() : opts
@@ -615,6 +625,7 @@ class MonsterNode extends RaftNode {
                 db, asBuffer(entry.items[index]), term, seq, index,
                 entry.matchIndex,
               )
+              assertEncodable(value)
             } catch (err) {
               this._throwIfClosing()
               if (!db.isTransaction) { throw err }

@@ -1220,6 +1220,67 @@ test('MonsterFt compares throws, rolls back failed items, and continues', async 
   await laterSynced
 })
 
+test('MonsterFt rejects application results that MessagePack cannot encode',
+  async (t) => {
+    const fixture = makeFixture(t, 'unencodable')
+    fixture.clear()
+    const unencodable = (kind) => {
+      if (kind === 'large-bigint') { return 2n ** 64n }
+      if (kind === 'symbol') { return Symbol('result') }
+      const circular = {}
+      circular.self = circular
+      return circular
+    }
+    const cluster = fixture.build({
+      apply: async (conn, node, buf) => {
+        const cmd = toObj(buf)
+        if (cmd.op !== 'unencodable') { return applyApp(conn, node, buf) }
+        conn.prepare(`
+          INSERT INTO monster_test_items (key, value) VALUES (?, 1)
+        `).run(cmd.key)
+        return unencodable(cmd.key)
+      },
+    })
+    const leader = await openAndElect(cluster)
+    const follower = followers(cluster.nodes)[0]
+    const kinds = ['large-bigint', 'symbol', 'circular']
+
+    const batchSynced = nextEvent(leader, 'sync')
+    const [, outcomes] = await leader.appendBatch([
+      { op: 'set', key: 'before', value: 1 },
+      ...kinds.map((key) => ({ op: 'unencodable', key })),
+      { op: 'set', key: 'after', value: 2 },
+    ].map(toBuf))
+    t.deepEqual(outcomes.map((outcome) => outcome.status),
+      ['fulfilled', 'rejected', 'rejected', 'rejected', 'fulfilled'],
+      'only the unencodable items are rejected')
+    for (const [index, kind] of kinds.entries()) {
+      const reason = outcomes[index + 1].reason
+      t.equal(reason.message, 'apply result is not MessagePack-encodable',
+        `${kind} uses the fixed encoding message`)
+      t.equal(reason.code, APPLY_ERROR, `${kind} uses APPLY_ERROR`)
+    }
+    const { syncSeq } = await batchSynced
+    await waitApplied(cluster.nodes, syncSeq)
+    for (const kind of kinds) {
+      t.deepEqual(cluster.nodes.map((node) => valueAt(node, kind)), [null, null, null],
+        `${kind} item writes are rolled back on every replica`)
+    }
+    t.deepEqual(cluster.nodes.map((node) => valueAt(node, 'after')), [2, 2, 2],
+      'later items in the batch commit on every replica')
+    t.ok(cluster.nodes.every((node) => node.isOpen), 'every replica remains open')
+
+    const forwarded = await rejects(t, follower.append(toBuf({
+      op: 'unencodable', key: 'large-bigint',
+    })), /not MessagePack-encodable/,
+    'a forwarded unencodable result rejects the caller')
+    t.equal(forwarded.code, APPLY_ERROR, 'the forwarded rejection uses APPLY_ERROR')
+
+    const [, later] = await leader.append(toBuf({ op: 'get', key: 'before' }))
+    t.deepEqual(later, { key: 'before', value: 1 },
+      'the cluster accepts later commands')
+  })
+
 test('MonsterFt accepts a slow matching outcome after a clean quorum SYNC', async (t) => {
   const fixture = makeFixture(t, 'slow-match')
   fixture.clear()
