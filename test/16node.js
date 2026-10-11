@@ -1403,6 +1403,36 @@ test('large and concurrent commands route results across rpc and apply batches',
   t.equal(leader._applyWaiters.size, 0, 'completed result subscriptions are removed')
 })
 
+test('log reads fetch no more rows than applyMax and rpcMax use', async (t) => {
+  t.teardown(() => close(nodes))
+  const coms = comms()
+  const nodes = connect(coms, 3, null, { rpcMax: 1, applyMax: 1 })
+  await reset(nodes)
+  open(nodes)
+  await ready(nodes, null, true)
+
+  let largestPage = 0
+  for (const node of nodes) {
+    const range = node.log._statements.range
+    const all = range.all.bind(range)
+    range.all = (...args) => {
+      const rows = all(...args)
+      largestPage = Math.max(largestPage, rows.length)
+      return rows
+    }
+  }
+  const leader = leaders(nodes)[0]
+  const values = Array.from({ length: 20 }, (_, idx) => Buffer.from(`v${idx}`))
+  const [seq] = await leader.appendBatch(values)
+  const end = seq + BigInt(values.length - 1)
+  await waitFor(() => nodes.every((node) => node._applySeq >= end), 5_000)
+
+  t.ok(largestPage <= 2,
+    `each read fetches at most one entry and its predecessor (largest ${largestPage})`)
+  t.ok(nodes.every((node) => node.log.seq === leader.log.seq),
+    'every node stores the whole batch')
+})
+
 test('timed out commands discard results while replication and application continue', async (t) => {
   t.teardown(() => close(nodes))
   let allowed = true

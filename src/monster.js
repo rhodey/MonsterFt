@@ -497,7 +497,7 @@ class MonsterNode extends RaftNode {
         'applied entry hash is corrupt', Err.MONSTER_CORRUPT,
       )
     }
-    const found = this.log.iter(this._applySeq).next()
+    const found = this.log.iter(this._applySeq, { iterStepSize: 1 }).next()
     if (found.done) {
       throw new Err.ErrorWithCode(
         'applied log entry not found',

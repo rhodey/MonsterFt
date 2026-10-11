@@ -224,12 +224,12 @@ None.
 ## `_apply`
 
 Serializes application work through `_applyPrev` and reads committed entries
-in batches up to the requested boundary. Calls the configured application
-function with payloads, sequences, and terms, representing no-ops as null
-payloads. Validates the result array against the batch's own length,
-advances `_applySeq`, delivers results, and emits `apply`. Log failures,
-application failures, or an incomplete read reject application waiters and
-trigger fatal shutdown.
+in batches up to the requested boundary, fetching no more log rows than the
+batch applies. Calls the configured application function with payloads,
+sequences, and terms, representing no-ops as null payloads. Validates the
+result array against the batch's own length, advances `_applySeq`, delivers
+results, and emits `apply`. Log failures, application failures, or an
+incomplete read reject application waiters and trigger fatal shutdown.
 
 ### findings
 
@@ -429,11 +429,12 @@ None.
 ## `_replicationPage`
 
 Reads and sends one bounded page of entries with its predecessor term and
-sequence, stopping if the required history has been forgotten. Retries a
-predecessor mismatch immediately from one sequence earlier. Delays other
-retryable RPC failures, and handles cancellation or fatal log errors. On
-success, advances the peer's match and next indexes, checks commitment, and
-schedules resolution of satisfied waiters.
+sequence, fetching only those log rows, and stops if the required history
+has been forgotten. Retries a predecessor mismatch immediately from one
+sequence earlier. Delays other retryable RPC failures, and handles
+cancellation or fatal log errors. On success, advances the peer's match and
+next indexes, checks commitment, and schedules resolution of satisfied
+waiters.
 
 ### findings
 

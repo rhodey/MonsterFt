@@ -402,8 +402,9 @@ class RaftNode extends EventEmitter {
         const begin = this._applySeq + 1n
         let next = begin
         const arr = []
+        const rows = Number(min(BigInt(this.opts.applyMax), 1n + end - begin))
         try {
-          for (const record of this.log.iter(begin)) {
+          for (const record of this.log.iter(begin, { iterStepSize: rows })) {
             if (this._closing) { return }
             arr.push(record)
             next++
@@ -736,7 +737,7 @@ class RaftNode extends EventEmitter {
 
       const term = this.term
       let entryTerm = null
-      for (const entry of this.log.iter(match)) {
+      for (const entry of this.log.iter(match, { iterStepSize: 1 })) {
         entryTerm = entry.term
         break
       }
@@ -770,6 +771,7 @@ class RaftNode extends EventEmitter {
     const data = []
     let count = 1n + end - begin
     count = min(this.opts.rpcMax, count)
+    const rows = Number(max(1n, count + (seqP < 0n ? 0n : 1n)))
 
     try {
       if (!this._replicationActive(state)) { return false }
@@ -783,7 +785,7 @@ class RaftNode extends EventEmitter {
         this._emitSafe('warn', err)
         return false
       }
-      for (const entry of this.log.iter(b)) {
+      for (const entry of this.log.iter(b, { iterStepSize: rows })) {
         if (!this._replicationActive(state)) { return false }
         if (termP !== null) { data.push(entry) }
         termP = termP ?? entry.term
@@ -1131,7 +1133,7 @@ class RaftNode extends EventEmitter {
         const next = min(commitSeq, matchedEnd)
         if (next <= this._commitSeq) { return ack() }
         let commitTerm = null
-        for (const entry of this.log.iter(next)) {
+        for (const entry of this.log.iter(next, { iterStepSize: 1 })) {
           commitTerm = entry.term
           break
         }
@@ -1174,7 +1176,7 @@ class RaftNode extends EventEmitter {
         return
       }
       const haveMax = data.length + (seqP >= 0n ? 1 : 0)
-      for (const next of this.log.iter(begin)) {
+      for (const next of this.log.iter(begin, { iterStepSize: haveMax })) {
         have.push(next)
         if (have.length >= haveMax) { break }
       }
