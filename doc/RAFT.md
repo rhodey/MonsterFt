@@ -30,14 +30,7 @@ is recorded.
   Node then fires those timers after 1 ms with a warning.
 - **Clock:** a backwards `Date.now()` jump can disrupt elections, as noted in
   AGENTS.md.
-- **Transport reentry:** a transport `send` callback that closes the node is
-  not guarded against.
-- **Quorum failure:** quorum aggregation rejects early only when the
-  cluster's membership makes quorum impossible, not when the selected
-  followers are exhausted. See `_appendToFollowers`.
-- **Versions:** mixed-version clusters are unsupported. Replication pages
-  carry `{ term, entry }` records; the older prefixed-Buffer format is
-  rejected before any state or log change.
+- **Versions:** mixed-version clusters are unsupported.
 
 ## `constructor`
 
