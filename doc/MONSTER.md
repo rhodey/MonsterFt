@@ -21,7 +21,7 @@ means no unresolved item is recorded. Review rules are in [RAFT.md](RAFT.md).
 - **Sparse arrays:** out of scope under AGENTS.md. See `appendBatch`.
 - **Exotic thrown values:** see `_monsterApplyCmd` and `wrapError` in
   RAFT.md.
-- **Application transactions:** see the open contract gap under
+- **Application transactions:** see the open doc gap under
   `_monsterApplyCmd`.
 - **Repair:** certification is an offline step. Retention and repair are not
   being redesigned; see `_monsterPrune`.
