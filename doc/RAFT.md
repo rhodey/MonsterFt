@@ -50,7 +50,7 @@ shutdown state and the fatal-error handler.
   Leadership then churns. For example, `electionTimeout: 300` with
   `pingTimeout: 3000` changed leaders 9-13 times in six seconds, although
   appends still succeeded. Nodes may also use different settings. Decision:
-  timeout selection is left to the user for now and may be revisited later.
+  timeout selection is left to the user for now.
 - **Deferred: an explicit `undefined` does not select a default.**
   `{ ...defaults, ...opts }` keeps it, so `electionTimeout`, `pingTimeout`,
   `appendTimeout`, `rpcMax`, `applyMax`, and SQLiteLog's `iterStepSize` throw
