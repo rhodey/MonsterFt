@@ -72,14 +72,8 @@ class RaftNode extends EventEmitter {
       throw new Err.ErrorWithCode(
         'id must be non-empty string', Err.ARGUMENT_ILLEGAL)
     }
-    let nodeIds = null
-    try {
-      nodeIds = Array.from(nodes)
-    } catch {
-      throw new Err.ErrorWithCode(
-        'nodes must be non-empty string array', Err.ARGUMENT_ILLEGAL)
-    }
-    if (!nodeIds.every((nodeId) => typeof nodeId === 'string' && nodeId.length > 0)) {
+    const nodeIds = Array.isArray(nodes) ? [...nodes] : null
+    if (!nodeIds?.every((nodeId) => typeof nodeId === 'string' && nodeId.length > 0)) {
       throw new Err.ErrorWithCode(
         'nodes must be non-empty string array', Err.ARGUMENT_ILLEGAL)
     }
@@ -196,15 +190,21 @@ class RaftNode extends EventEmitter {
   }
 
   _emitSafe(type, data) {
-    try {
-      this.emit(type, data)
-    } catch (err) {
-      try { this.emit('error', err) } catch {}
+    // Call listeners one at a time so one failure cannot hide the event from
+    // later listeners, including internal waiters.
+    for (const listener of this.rawListeners(type)) {
+      try {
+        listener.call(this, data)
+      } catch (err) {
+        try { this.emit('error', err) } catch {}
+      }
     }
   }
 
   _change() {
-    const { id, nodes, state, leader, followers, term } = this
+    const { id, state, leader, term } = this
+    const nodes = [...this.nodes]
+    const followers = [...this.followers]
     const change = { id, nodes, state, leader, followers, term }
     change.open = this.isOpen
     this._emitSafe('change', change)

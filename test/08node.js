@@ -132,11 +132,18 @@ test('node configuration requires a viable fixed cluster', (t) => {
       /nodes must be non-empty string array/,
       `rejects member id ${String(invalid)}`)
   }
-  for (const invalid of [null, undefined]) {
+  for (const [label, invalid] of [
+    ['null', null],
+    ['undefined', undefined],
+    ['digit string', '123'],
+    ['comma-separated string', '1,2,3'],
+    ['Set', new Set(ids)],
+    ['array-like object', { 0: '1', 1: '2', 2: '3', length: 3 }],
+  ]) {
     throwsInvalidArgument(
       () => new RaftNode('1', invalid, send, log),
       /nodes must be non-empty string array/,
-      `rejects nodes ${String(invalid)}`)
+      `rejects nodes as ${label}`)
   }
   throwsInvalidArgument(() => new RaftNode('1', ['1', '2'], send, log),
     /nodes must contain at least 3 ids/,
@@ -686,6 +693,48 @@ test('node lifecycle calls are idempotent', (t) => {
   t.equal(node._commitSeq, -1n, 'resets the volatile commit index')
   t.equal(node._commitTerm, -1n, 'resets the volatile commit term')
   t.deepEqual(node.eventNames(), [], 'close removes all node listeners')
+  t.end()
+})
+
+test('later change listeners run after an earlier listener throws', (t) => {
+  const node = new RaftNode('1', ids, () => {}, lifecycleLog(), {
+    electionTimeout: 60_000,
+    pingTimeout: 60_000,
+  })
+  const failure = new Error('change listener failure')
+  const errors = []
+  const seen = []
+  node.on('error', (err) => errors.push(err))
+  node.on('change', () => { throw failure })
+  node.on('change', function(change) {
+    seen.push(['later', change.open, this === node])
+  })
+  node.once('change', (change) => seen.push(['once', change.open]))
+
+  node.open()
+  node.close()
+  t.deepEqual(seen, [['later', true, true], ['once', true], ['later', false, true]],
+    'later listeners receive each change with the node as this; once runs once')
+  t.deepEqual(errors, [failure, failure], 'each listener failure emits one error')
+  t.end()
+})
+
+test('later error listeners run after an earlier error listener throws', (t) => {
+  const node = new RaftNode('1', ids, () => {}, lifecycleLog())
+  const original = new Error('original error')
+  const failure = new Error('error listener failure')
+  const later = []
+  node.on('error', (err) => {
+    if (err === original) { throw failure }
+  })
+  node.on('error', (err) => later.push(err))
+
+  node._emitSafe('error', original)
+  t.deepEqual(later, [failure, original],
+    'the later listener receives the listener failure and the original error')
+  t.doesNotThrow(
+    () => new RaftNode('1', ids, () => {}, lifecycleLog())._emitSafe('error', original),
+    'an error without listeners is discarded')
   t.end()
 })
 

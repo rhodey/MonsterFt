@@ -206,3 +206,65 @@ test('test elect n=5 and 2 delayed', async (t) => {
   total >= timeout && t.fail('timeout')
   t.end()
 })
+
+const readyWithin = async (nodes, ms) => {
+  let timer = null
+  const timedOut = new Promise((res) => { timer = setTimeout(res, ms, 'timeout') })
+  try {
+    return await Promise.race([ready(nodes).then(() => 'ready'), timedOut])
+  } finally {
+    clearTimeout(timer)
+  }
+}
+
+test('a throwing change listener does not hide leadership from awaitLeader', async (t) => {
+  t.teardown(() => close(nodes))
+
+  const coms = comms()
+  const nodes = connect(coms, 3)
+  await reset(nodes)
+  const failure = new Error('change listener failure')
+  const errors = []
+  nodes.forEach((node) => {
+    node.on('change', (change) => {
+      if (change.leader !== null) { throw failure }
+    })
+    node.on('error', (err) => errors.push(err))
+  })
+  open(nodes)
+
+  t.equal(await readyWithin(nodes, 10_000), 'ready',
+    'awaitLeader resolves on every node')
+  t.equal(leaders(nodes).length, 1, '1 leader')
+  t.ok(nodes.every((node) => node.leader !== null), 'every node knows the leader')
+  t.ok(errors.length > 0 && errors.every((err) => err === failure),
+    'listener failures are reported as errors')
+})
+
+test('change payloads copy membership and followers', async (t) => {
+  t.teardown(() => close(nodes))
+
+  const coms = comms()
+  const nodes = connect(coms, 3)
+  await reset(nodes)
+  let shared = 0
+  nodes.forEach((node) => {
+    node.on('change', (change) => {
+      if (change.nodes === node.nodes || change.followers === node.followers) {
+        shared++
+      }
+      change.nodes.push('mutated')
+      change.followers.push('mutated')
+    })
+  })
+  open(nodes)
+
+  t.equal(await readyWithin(nodes, 10_000), 'ready', 'cluster elects a leader')
+  t.equal(shared, 0, 'payload arrays are never the node arrays')
+  for (const node of nodes) {
+    t.deepEqual(node.nodes, ['1', '2', '3'],
+      `listener mutation leaves node ${node.id} membership unchanged`)
+  }
+  t.notOk(leaders(nodes)[0].followers.includes('mutated'),
+    'listener mutation leaves leader followers unchanged')
+})
