@@ -95,10 +95,6 @@ rows and sequence continuity are validated as they are iterated.
 
 - **Accepted: a fully erased schema looks like a new database.** It is
   initialized as a fresh log, with term zero and no vote.
-- **Accepted: no migration from older schemas.** A schema without the
-  `term` column, which stored the term as a prefix of the entry, fails during
-  statement preparation. A database without an election row fails at
-  startup. Neither has a migration or fallback.
 
 ## `close`
 
