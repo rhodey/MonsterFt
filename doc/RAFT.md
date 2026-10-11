@@ -550,11 +550,11 @@ result count for batches and returns the leader's sequence and results.
 
 ## `_rxAppendToLeader`
 
-Validates a forwarded append's correlation ID, term, and payload, rejecting
-invalid or mismatched requests through the RPC error envelope. Replies
-`NOT_LEADER` when the node is not leading. Appends valid requests locally and
-to followers, then replies with their sequence and application results or
-the resulting error.
+Validates a forwarded append's correlation ID, term, and payload, including
+`MAX_SQLITE_BYTES`, rejecting invalid or mismatched requests through the RPC
+error envelope. Replies `NOT_LEADER` when the node is not leading. Appends
+valid requests locally and to followers, then replies with their sequence
+and application results or the resulting error.
 
 ### findings
 
@@ -610,9 +610,12 @@ None.
 
 ## `append`
 
-Requires an open node and a nonempty Buffer, then appends locally if leader
-or forwards to the known leader. Races the operation against shutdown and
-returns its sequence and application result.
+Requires an open node and a nonempty Buffer of at most `MAX_SQLITE_BYTES`
+(999,999,000), then appends locally if leader or forwards to the known
+leader. The limit keeps each log row under SQLite's default
+1,000,000,000-byte limit, because a failed local append is fatal on the
+leader. Races the operation against shutdown and returns its sequence and
+application result.
 
 ### findings
 
@@ -620,9 +623,10 @@ None.
 
 ## `appendBatch`
 
-Requires an open node and a nonempty array of nonempty Buffers, then appends
-locally if leader or forwards the batch. Races the operation against
-shutdown and returns its starting sequence and application results.
+Requires an open node and a nonempty array of nonempty Buffers, each at most
+`MAX_SQLITE_BYTES`, then appends locally if leader or forwards the batch.
+Races the operation against shutdown and returns its starting sequence and
+application results.
 
 ### findings
 

@@ -3,7 +3,7 @@ import fs from 'node:fs'
 import { DatabaseSync } from 'node:sqlite'
 import { pack, unpack } from 'msgpackr'
 import * as Err from './error.js'
-import { RaftNode } from './node.js'
+import { RaftNode, MAX_SQLITE_BYTES } from './node.js'
 import * as util from './util.js'
 import * as utilm from './utilm.js'
 
@@ -67,6 +67,17 @@ const assertEncodable = (value) => {
       'apply result is not MessagePack-encodable', Err.APPLY_ERROR,
     )
   }
+}
+
+// Upper bound on a packed CMD entry
+const cmdBytes = (items, nodeCount) =>
+  items.reduce((total, item) => total + item.byteLength + 5, 64 + 9 * nodeCount)
+
+const assertCmdSize = (items, nodeCount) => {
+  if (cmdBytes(items, nodeCount) <= MAX_SQLITE_BYTES) { return }
+  throw new Err.ErrorWithCode(
+    `command must encode to <= ${MAX_SQLITE_BYTES} bytes`, Err.ARGUMENT_ILLEGAL,
+  )
 }
 
 class MonsterNode extends RaftNode {
@@ -957,7 +968,8 @@ class MonsterNode extends RaftNode {
     const error = (err) => {
       this.send(from, util.errorRpc(this.term, msg.cid, err))
     }
-    if (!utilm.isFwdCmdMsg(msg)) {
+    if (!utilm.isFwdCmdMsg(msg) ||
+        cmdBytes(msg.items, this.nodes.length) > MAX_SQLITE_BYTES) {
       error(new Err.ErrorWithCode('forward CMD illegal', Err.RPC_ILLEGAL))
       return
     }
@@ -1069,6 +1081,7 @@ class MonsterNode extends RaftNode {
     if (!Buffer.isBuffer(data)) {
       throw new Err.ErrorWithCode('data must be buffer', Err.ARGUMENT_ILLEGAL)
     }
+    assertCmdSize([data], this.nodes.length)
     const [cmdSeq, outcomes] = await this._raceShutdown(
       this._monsterAppendOrFwdCmd([data]),
     )
@@ -1089,6 +1102,7 @@ class MonsterNode extends RaftNode {
       throw new Err.ErrorWithCode(
         'data must be array of buffers', Err.ARGUMENT_ILLEGAL)
     }
+    assertCmdSize(data, this.nodes.length)
     return this._raceShutdown(this._monsterAppendOrFwdCmd(data))
   }
 

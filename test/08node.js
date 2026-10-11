@@ -17,7 +17,7 @@ import {
   SQLITE_ERROR,
 } from '../src/error.js'
 import { RaftNode as ProductionRaftNode } from '../src/index.js'
-import { ACK_OPERATION } from '../src/node.js'
+import { ACK_OPERATION, MAX_SQLITE_BYTES } from '../src/node.js'
 import { databasePath } from './util.js'
 
 let injectedLogId = 0
@@ -2243,6 +2243,40 @@ test('append and appendBatch validate their input', async (t) => {
     /^data must be array of non-empty buffers$/,
     'batch requires non-empty buffers')
 
+  node.close()
+})
+
+test('payloads above MAX_SQLITE_BYTES are rejected before any log write', async (t) => {
+  const log = lifecycleLog()
+  const sent = []
+  const node = new RaftNode('1', ids, (to, msg) => sent.push([to, msg]), log, {
+    electionTimeout: 60_000,
+    pingTimeout: 60_000,
+  })
+  node.open()
+  const oversized = Buffer.allocUnsafe(MAX_SQLITE_BYTES + 1)
+  const largest = oversized.subarray(0, MAX_SQLITE_BYTES)
+
+  const appendErr = await rejection(node.append(oversized))
+  t.equal(appendErr?.code, ARGUMENT_ILLEGAL, 'append rejects an oversized payload')
+  t.equal(appendErr?.message, `data must be <= ${MAX_SQLITE_BYTES} bytes`,
+    'append names the limit')
+  const batchErr = await rejection(node.appendBatch([Buffer.from('ok'), oversized]))
+  t.equal(batchErr?.code, ARGUMENT_ILLEGAL, 'appendBatch rejects an oversized buffer')
+  t.equal(batchErr?.message, `each buffer must be <= ${MAX_SQLITE_BYTES} bytes`,
+    'appendBatch names the limit')
+  const boundaryErr = await rejection(node.append(largest))
+  t.equal(boundaryErr?.code, NO_LEADER,
+    'a payload at the limit passes validation and is forwarded')
+
+  node.state = 'leader'
+  node.leader = node.id
+  await node.onReceive('2', {
+    type: 'append', cid: 'oversized-forward', term: node.term, data: oversized,
+  })
+  t.equal(sent.at(-1)?.[1].code, RPC_ILLEGAL,
+    'a leader rejects an oversized forwarded append as malformed')
+  t.ok(node.isOpen, 'the leader stays open')
   node.close()
 })
 

@@ -27,10 +27,13 @@ const isEntries = (data) => Array.isArray(data) && data.length > 0 &&
   data.every((record) => record !== null && typeof record === 'object' &&
     !Array.isArray(record) && util.isTerm(record.term) &&
     Buffer.isBuffer(record.entry))
+
+const MAX_SQLITE_BYTES = 999_999_000
 const isForwardData = (data) =>
-  (Buffer.isBuffer(data) && data.length > 0) ||
+  (Buffer.isBuffer(data) && data.length > 0 && data.length <= MAX_SQLITE_BYTES) ||
   (Array.isArray(data) && data.length > 0 &&
-    data.every((buf) => Buffer.isBuffer(buf) && buf.length > 0))
+    data.every((buf) => Buffer.isBuffer(buf) && buf.length > 0 &&
+      buf.length <= MAX_SQLITE_BYTES))
 
 const defaults = {
   // how long before nodes try to elect themselves
@@ -1320,6 +1323,10 @@ class RaftNode extends EventEmitter {
       throw new Err.ErrorWithCode(
         'data must be non-empty buffer', Err.ARGUMENT_ILLEGAL)
     }
+    if (data.length > MAX_SQLITE_BYTES) {
+      throw new Err.ErrorWithCode(
+        `data must be <= ${MAX_SQLITE_BYTES} bytes`, Err.ARGUMENT_ILLEGAL)
+    }
     const isLeader = this.state === LEADER
     const work = isLeader ? this._appendToSelfAndFollowers(data) : this._fwdToLeader(data)
     return this._raceShutdown(work)
@@ -1336,6 +1343,10 @@ class RaftNode extends EventEmitter {
     if (!data.every((buf) => Buffer.isBuffer(buf) && buf.length > 0)) {
       throw new Err.ErrorWithCode(
         'data must be array of non-empty buffers', Err.ARGUMENT_ILLEGAL)
+    }
+    if (data.some((buf) => buf.length > MAX_SQLITE_BYTES)) {
+      throw new Err.ErrorWithCode(
+        `each buffer must be <= ${MAX_SQLITE_BYTES} bytes`, Err.ARGUMENT_ILLEGAL)
     }
     const isLeader = this.state === LEADER
     const work = isLeader ? this._appendToSelfAndFollowers(data) : this._fwdToLeader(data)
@@ -1447,4 +1458,4 @@ class RaftNode extends EventEmitter {
   }
 }
 
-export { RaftNode, ACK_OPERATION }
+export { RaftNode, ACK_OPERATION, MAX_SQLITE_BYTES }

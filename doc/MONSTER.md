@@ -508,10 +508,11 @@ None.
 
 ## `_monsterRxFwdCmd`
 
-Validates a forwarded command request and checks command availability,
-including drain, before submitting it to the leader's protocol queue. Replies
-with agreed outcomes or an RPC error. After sending an error reply, it warns
-locally while open.
+Validates a forwarded command request, including its size bound, and checks
+command availability, including drain, before submitting it to the leader's
+protocol queue. An oversized command is rejected as `forward CMD illegal`.
+Replies with agreed outcomes or an RPC error. After sending an error reply,
+it warns locally while open.
 
 ### findings
 
@@ -560,9 +561,9 @@ None.
 
 ## `append`
 
-Validates one command Buffer and submits it through the local-or-forwarded
-path with shutdown cancellation. Returns its sequence and value on success,
-or throws the command's rejected outcome.
+Validates one command Buffer and its size bound, then submits it through the
+local-or-forwarded path with shutdown cancellation. Returns its sequence and
+value on success, or throws the command's rejected outcome.
 
 ### findings
 
@@ -570,9 +571,10 @@ None.
 
 ## `appendBatch`
 
-Validates a nonempty array of command Buffers and submits them as one CMD
-through the local-or-forwarded path. Returns the command sequence and settled
-outcomes for all items, racing against shutdown.
+Validates a nonempty array of command Buffers and the size bound of the CMD
+they form, then submits them as one CMD through the local-or-forwarded path.
+Returns the command sequence and settled outcomes for all items, racing
+against shutdown.
 
 ### findings
 

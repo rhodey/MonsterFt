@@ -17,6 +17,7 @@ import {
 } from '../src/error.js'
 import { MonsterFt, SQLiteLog } from '../src/index.js'
 import { MonsterNode } from '../src/monster.js'
+import { MAX_SQLITE_BYTES } from '../src/node.js'
 import { MonsterFt as DirectMonsterFt } from '../src/monsterft.js'
 import { databasePath, sleep, ready, leaders, followers } from './util.js'
 
@@ -1279,6 +1280,51 @@ test('MonsterFt rejects application results that MessagePack cannot encode',
     const [, later] = await leader.append(toBuf({ op: 'get', key: 'before' }))
     t.deepEqual(later, { key: 'before', value: 1 },
       'the cluster accepts later commands')
+  })
+
+test('MonsterFt rejects commands too large to store without stepping down',
+  async (t) => {
+    const fixture = makeFixture(t, 'oversized')
+    fixture.clear()
+    const cluster = fixture.build()
+    const leader = await openAndElect(cluster)
+    const follower = followers(cluster.nodes)[0]
+    const term = leader.term
+    // Untouched, so it reserves address space rather than resident memory.
+    const big = Buffer.allocUnsafe(MAX_SQLITE_BYTES)
+    const half = MAX_SQLITE_BYTES / 2
+    const message = `command must encode to <= ${MAX_SQLITE_BYTES} bytes`
+
+    for (const [label, call] of [
+      ['a local append', () => leader.append(big)],
+      ['a forwarded append', () => follower.append(big)],
+      ['a batch whose items fit individually',
+        () => leader.appendBatch([big.subarray(0, half), big.subarray(half)])],
+    ]) {
+      const err = await rejectsCode(t, call(), ARGUMENT_ILLEGAL,
+        `${label} is rejected with ARGUMENT_ILLEGAL`)
+      t.equal(err?.message, message, `${label} names the encoded limit`)
+    }
+
+    await leader.onReceive(follower.id, {
+      type: 'fwd_cmd', cid: 'oversized-forward', term: leader.term, items: [big],
+    })
+    const reply = cluster.messages.find(({ from, to, msg }) => {
+      return from === leader.id && to === follower.id &&
+        msg.cid === 'oversized-forward'
+    })
+    t.equal(reply?.msg.code, RPC_ILLEGAL,
+      'the leader rejects an oversized forwarded command as malformed')
+
+    await sleep(100)
+    t.equal(leader.state, 'leader', 'the leader keeps its leadership')
+    t.equal(leader.term, term, 'no new term begins')
+    t.ok(cluster.nodes.every((node) => node.isOpen), 'every node stays open')
+    const [, value] = await leader.append(toBuf({
+      op: 'set', key: 'after-oversized', value: 1,
+    }))
+    t.deepEqual(value, { key: 'after-oversized', value: 1 },
+      'a normal command still succeeds')
   })
 
 test('MonsterFt accepts a slow matching outcome after a clean quorum SYNC', async (t) => {
