@@ -636,8 +636,7 @@ a follower, starts the election timer, and emits a state change.
 ### findings
 
 - **Skipped by decision: the election term is not compared with the log
-  head.** `log.elec.term >= log.term` is not enforced; SQLiteLog validates
-  each term independently.
+  head.** `log.elec.term >= log.term` is not enforced.
 - **Skipped by decision: a saved vote is not checked against membership.**
   Any vote that SQLiteLog accepts is restored: null or a nonempty string.
 
