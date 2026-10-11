@@ -210,8 +210,7 @@ results have arrived.
   payloads leak one never-settled no-op waiter per leadership. A fully sparse
   `new Array(n)` leaves leader-local appends pending, and forwarded appends
   time out, although the commands were applied. Decision: the application
-  must return one result per entry; Node-specific array handling is not
-  worth adding to this reference implementation.
+  must return one result per entry; Arrays with holes remain out of scope.
 
 ## `_rejectApplyWaiters`
 
