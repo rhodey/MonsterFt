@@ -593,7 +593,8 @@ rejects without entering the draining state.
 ### findings
 
 - **Accepted: normal closure may suppress a concurrent retention error.** See
-  `_monsterPrune`.
+  `_monsterPrune`. The retention error would not happen again or it would be
+  thrown again on next open.
 
 ## `open`
 
