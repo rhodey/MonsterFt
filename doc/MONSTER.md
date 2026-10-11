@@ -628,8 +628,7 @@ cleanup failure.
 ### findings
 
 - **Accepted policy: only the first close failure is thrown.** If both the
-  DB2 and DB1 close fail, the DB1 error is discarded. Both handles remain
-  retryable, and an existing test expects the DB2 error.
+  DB2 and DB1 close fail, the DB1 error is discarded.
 
 ## `del`
 
