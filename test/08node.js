@@ -1289,7 +1289,7 @@ test('malformed message values and append payloads are ignored or rejected', asy
   node.state = 'leader'
   node.leader = node.id
   await node.onReceive('2', {
-    type: 'append', cid: 'invalid-forward', term: 0n, data: { nope: true },
+    type: 'fwd_append', cid: 'invalid-forward', term: 0n, data: { nope: true },
   })
   t.equal(sent.length, 3, 'invalid forwarded append receives one reply')
   t.equal(sent[2][1].type, 'err', 'invalid forwarded append receives ERR')
@@ -1311,6 +1311,82 @@ test('malformed message values and append payloads are ignored or rejected', asy
   node.close()
 })
 
+test('append message types reject crossed payloads before changing state', async (t) => {
+  const log = lifecycleLog()
+  const sent = []
+  let writes = 0
+  log.appendBatch = () => { writes++ }
+  const node = new RaftNode('1', ids, (to, msg) => sent.push(msg), log, {
+    electionTimeout: 60_000,
+    pingTimeout: 60_000,
+  })
+  t.teardown(() => node.close())
+  node.open()
+  node.state = 'leader'
+  node.leader = node.id
+  node._appendToSelfAndFollowers = () => {
+    writes++
+    return Promise.resolve([0n, null])
+  }
+  const before = () => [node.term, node.state, node.leader, log.seq, log.term,
+    log.head, log.elec.term, log.elec.votedFor]
+  const original = before()
+
+  for (const [label, fields] of [
+    ['legacy single', { type: 'append', data: Buffer.from('value') }],
+    ['legacy batch', { type: 'append', term: 4n, data: [Buffer.from('value')] }],
+    ['forward payload as replication', {
+      type: 'append', term: 4n, termP: -1n, seqP: -1n, commitSeq: -1n,
+      data: Buffer.from('value'),
+    }],
+    ['replication records as forward', {
+      type: 'fwd_append', termP: -1n, seqP: -1n, commitSeq: -1n,
+      data: [{ term: 0n, entry: Buffer.from('value') }],
+    }],
+  ]) {
+    await node.onReceive('2', { term: 0n, cid: label, ...fields })
+    t.equal(sent.at(-1)?.type, 'err', `${label} receives an error`)
+    t.equal(sent.at(-1)?.code, RPC_ILLEGAL, `${label} is malformed`)
+    t.deepEqual(before(), original, `${label} leaves term, role, and log unchanged`)
+  }
+  t.equal(sent.length, 4, 'each malformed message receives exactly one response')
+  t.equal(writes, 0, 'no malformed message reaches an append path')
+})
+
+test('forwarded appends ignore extra replication fields', async (t) => {
+  const sent = []
+  const appended = []
+  const log = lifecycleLog()
+  const node = new RaftNode('1', ids, (to, msg) => sent.push(msg), log, {
+    electionTimeout: 60_000,
+    pingTimeout: 60_000,
+  })
+  t.teardown(() => node.close())
+  node.open()
+  node.state = 'leader'
+  node.leader = node.id
+  node._appendToSelfAndFollowers = (data) => {
+    appended.push(data)
+    return Promise.resolve([3n, Array.isArray(data) ? ['one', 'two'] : 'one'])
+  }
+
+  for (const data of [Buffer.from('one'), [Buffer.from('one'), Buffer.from('two')]]) {
+    await node.onReceive('2', {
+      type: 'fwd_append', term: node.term, cid: `forward-extra-${sent.length}`, data,
+      termP: 7n, seqP: 99n, commitSeq: 99n,
+    })
+    await Promise.resolve()
+    t.equal(appended.at(-1), data, 'passes the original application payload onward')
+    t.equal(sent.at(-1)?.type, 'ack', 'responds through the forwarding handler')
+    t.equal(sent.at(-1)?.seq, 3n, 'preserves the resulting sequence')
+    t.deepEqual(sent.at(-1)?.results, Array.isArray(data) ? ['one', 'two'] : 'one',
+      'preserves the single or batch results')
+    t.equal(node.state, 'leader', 'extra termP does not make the leader step down')
+    t.equal(node.leader, node.id, 'does not adopt the forwarding node as leader')
+    t.equal(node.term, 0n, 'ignores the replication-only predecessor term')
+  }
+})
+
 test('Raft RPC handlers report different terms consistently', async (t) => {
   const log = lifecycleLog()
   const sent = []
@@ -1325,7 +1401,7 @@ test('Raft RPC handlers report different terms consistently', async (t) => {
   node.term = 2n
 
   await node.onReceive('2', {
-    type: 'append', cid: 'append-term-diff', term: 1n,
+    type: 'fwd_append', cid: 'append-term-diff', term: 1n,
     data: Buffer.from('value'),
   })
   node.state = 'follower'
@@ -1336,15 +1412,15 @@ test('Raft RPC handlers report different terms consistently', async (t) => {
   })
   node.state = 'leader'
   node.leader = node.id
-  node._rxAppendToLeader({
-    type: 'append', cid: 'append-term-greater', term: 3n,
+  await node.onReceive('2', {
+    type: 'fwd_append', cid: 'append-term-greater', term: 3n,
     data: Buffer.from('value'),
-  }, '2')
+  })
   t.equal(sent.length, 3, 'each different-term RPC receives one response')
   for (const [index, label, message] of [
     [0, 'forwarded append', 'term is lesser'],
     [1, 'AppendEntries', 'term is lesser'],
-    [2, 'misrouted higher-term append', 'higher term append routed to leader'],
+    [2, 'higher-term forwarded append', 'higher term append routed to leader'],
   ]) {
     t.equal(sent[index][1].type, 'err', `${label} receives ERR`)
     t.equal(sent[index][1].msg, message,
@@ -1377,7 +1453,7 @@ test('non-leaders reject forwarded appends with NOT_LEADER', async (t) => {
     node.leader = leader
     sent.length = 0
     await node.onReceive('2', {
-      type: 'append', cid: `forward-${label}`, term, data: Buffer.from('value'),
+      type: 'fwd_append', cid: `forward-${label}`, term, data: Buffer.from('value'),
     })
     t.equal(sent.length, 1, `${label} replies once`)
     t.equal(sent[0]?.[1].type, 'err', `${label} replies with ERR`)
@@ -1408,7 +1484,7 @@ test('forwarded Raft handlers transmit normalized SQLite metadata', async (t) =>
   node._appendToSelfAndFollowers = () => Promise.reject(sqlite)
 
   await node.onReceive('2', {
-    type: 'append', term: node.term, cid: 'sqlite-forward',
+    type: 'fwd_append', term: node.term, cid: 'sqlite-forward',
     data: Buffer.from('value'),
   })
   await new Promise((resolve) => setImmediate(resolve))
@@ -1851,6 +1927,7 @@ test('ACK operation descriptors select timeout policy and error', async (t) => {
   const cases = [
     [ACK_OPERATION.PING, 'append', 31, PING_TIMEOUT, 'ping timeout'],
     [ACK_OPERATION.APPEND, 'append', 37, APPEND_TIMEOUT, 'append timeout'],
+    [ACK_OPERATION.APPEND, 'fwd_append', 37, APPEND_TIMEOUT, 'append timeout'],
   ]
   global.setTimeout = (fn, ms, ...args) => {
     delays.push(ms)
@@ -1873,7 +1950,7 @@ test('ACK operation descriptors select timeout policy and error', async (t) => {
     global.setTimeout = originalSetTimeout
   }
 
-  t.deepEqual(delays, [31, 37],
+  t.deepEqual(delays, [31, 37, 37],
     'descriptors select ping and append timeout options')
   t.equal(new Set(errors).size, cases.length,
     'each timeout receives a fresh error instance')
@@ -1981,6 +2058,69 @@ test('malformed and lower-term correlated ACKs are ignored', async (t) => {
   t.deepEqual(node.followers, ['2', '3'], 'valid ACK restores the follower')
 
   node.close()
+})
+
+test('forwarded ACKs require valid sequence and their own results field', async (t) => {
+  const log = lifecycleLog()
+  const node = new RaftNode('1', ids, () => {}, log, {
+    electionTimeout: 60_000,
+    appendTimeout: 60_000,
+  })
+  t.teardown(() => node.close())
+  node.open()
+  node.term = 1n
+  const cid = 'forward-ack-validation'
+  const pending = node._sendAndAwaitAck('2', {
+    type: 'fwd_append', term: node.term, cid, termP: -1n,
+    data: Buffer.from('value'),
+  }, ACK_OPERATION.APPEND)
+  for (const [label, fields] of [
+    ['missing results', {}],
+    ['inherited results', Object.create({ results: 'inherited' })],
+    ['negative sequence', { seq: -1n, results: null }],
+    ['non-bigint sequence', { seq: 0, results: null }],
+    ['invalid term', { term: null, results: null }],
+    ['lower term', { term: 0n, results: null }],
+  ]) {
+    const response = Object.assign(fields, { type: 'ack', cid })
+    if (!Object.hasOwn(response, 'term')) { response.term = node.term }
+    if (!Object.hasOwn(response, 'seq')) { response.seq = 0n }
+    await node.onReceive('2', response)
+    t.ok(node._acks.has(cid), `${label} leaves the response waiter active`)
+    t.notOk(node._pongs.has('2'), `${label} does not refresh liveness`)
+  }
+
+  const response = { type: 'ack', cid, term: node.term, seq: 0n, results: undefined }
+  await node.onReceive('2', response)
+  t.equal(await pending, response, 'an own undefined result is a valid command result')
+  t.equal(node._acks.size, 0, 'the valid response removes its waiter')
+  t.ok(node._pongs.has('2'), 'the valid response refreshes liveness')
+
+  const replication = node._sendAndAwaitAck('2', {
+    type: 'append', term: node.term, cid: 'replication-ack-validation',
+  }, ACK_OPERATION.APPEND)
+  const replicated = {
+    type: 'ack', cid: 'replication-ack-validation', term: node.term, seq: 0n,
+  }
+  await node.onReceive('2', replicated)
+  t.equal(await replication, replicated,
+    'APPEND accepts an ACK without results regardless of request termP')
+})
+
+test('shutdown cancels a forwarded append response wait', async (t) => {
+  const sent = []
+  const node = new RaftNode('1', ids, (to, msg) => sent.push(msg), lifecycleLog(), {
+    electionTimeout: 60_000,
+    appendTimeout: 60_000,
+  })
+  node.open()
+  node.leader = '2'
+  const pending = rejection(node.append(Buffer.from('value')))
+  t.equal(sent[0]?.type, 'fwd_append', 'uses the forwarding message type')
+  t.equal(node._acks.size, 1, 'registers the forwarded response waiter')
+  node.close()
+  t.equal((await pending)?.code, NODE_NOT_OPEN, 'shutdown rejects the forwarded call')
+  t.equal(node._acks.size, 0, 'shutdown removes the response waiter')
 })
 
 test('forwarded result survives a term change before ACK post-processing', async (t) => {
@@ -2279,7 +2419,7 @@ test('payloads above MAX_SQLITE_BYTES are rejected before any log write', async 
   node.state = 'leader'
   node.leader = node.id
   await node.onReceive('2', {
-    type: 'append', cid: 'oversized-forward', term: node.term, data: oversized,
+    type: 'fwd_append', cid: 'oversized-forward', term: node.term, data: oversized,
   })
   t.equal(sent.at(-1)?.[1].code, RPC_ILLEGAL,
     'a leader rejects an oversized forwarded append as malformed')

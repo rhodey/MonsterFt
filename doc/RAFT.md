@@ -177,9 +177,11 @@ None.
 ## `_sendAndAwaitAck`
 
 Adds operation-specific timeouts and validation for ping, replication, and
-forwarded-append responses. Converts ERR replies into coded errors. When the
-reply matches both the request term and current local term, it records peer
-activity and, while leading, adds the peer to the follower list.
+forwarded-append responses. Uses the request type to require an own `results`
+field for FWD_APPEND ACKs, while APPEND ACKs need no results; both require a
+valid term and nonnegative sequence. Converts ERR replies into coded errors
+and records peer activity only when the reply matches both the request term
+and current local term, adding the peer to the follower list while leading.
 
 ### findings
 
@@ -535,9 +537,10 @@ None.
 
 ## `_fwdToLeader`
 
-Sends a single payload or batch to the known leader and waits for its append
-response, rejecting immediately if no leader is known. Checks the returned
-result count for batches and returns the leader's sequence and results.
+Sends a single payload or batch to the known leader as FWD_APPEND
+(`fwd_append`) and waits for its append response, rejecting immediately if
+no leader is known. Checks the returned result count for batches and returns
+the leader's sequence and results.
 
 ### findings
 
@@ -549,7 +552,7 @@ result count for batches and returns the leader's sequence and results.
   with `RAFT_ILLEGAL` after the commands were applied. Decision: no
   defensive copy; this is the input-ownership policy.
 
-## `_rxAppendToLeader`
+## `_rxFwdAppend`
 
 Validates a forwarded append's correlation ID, term, and payload, including
 `MAX_SQLITE_BYTES`, rejecting invalid or mismatched requests through the RPC
@@ -564,7 +567,9 @@ None.
 ## `_rxAppendToFollower`
 
 Validates incoming heartbeats and replication pages, handles term and leader
-changes, and checks the predecessor against retained local history.
+changes, and checks the predecessor against retained local history. A valid
+same-term APPEND also makes a current leader become the sender's follower,
+retaining its term and vote; lower-term requests are rejected.
 Appends new entries or reconciles an overlapping range by trimming only an
 uncommitted conflicting suffix. Returns backtrack or forgotten-history
 errors when matching cannot proceed. Matching requires equal terms and equal
@@ -579,10 +584,9 @@ None.
 ## `onReceive`
 
 Ignores messages from outside the cluster, messages received while closed,
-and invalid RPC envelopes. Adopts higher terms from responses. Routes any
-APPEND without its own `termP` as a forwarded append. Other APPENDs go to the
-leader path for a current or older term while leading, and otherwise to the
-follower path. Vote messages go to the vote handlers.
+and invalid RPC envelopes. Adopts higher terms from responses and dispatches
+by message type: APPEND handles replication and heartbeats, FWD_APPEND
+handles forwarded commands, and vote messages go to the vote handlers.
 
 ### findings
 

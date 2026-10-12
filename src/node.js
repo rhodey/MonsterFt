@@ -14,6 +14,7 @@ const LEADER = 'leader'
 const VOTE_REQUEST = 'vote_request'
 const VOTE = 'vote'
 const APPEND = 'append'
+const FWD_APPEND = 'fwd_append'
 const ACK = 'ack'
 const ERR = 'err'
 
@@ -341,11 +342,9 @@ class RaftNode extends EventEmitter {
       if (!util.isTerm(response.term)) { return false }
       if (response.type === ERR) { return true }
       if (response.term < msg.term) { return false }
-      if (!util.isSeq(response.seq)) { return false }
-      // todo: cleaner
-      if (msg.type !== APPEND || response.seq < 0n) { return false }
-      if (Object.hasOwn(msg, 'termP')) { return true }
-      return Object.hasOwn(response, 'results')
+      if (!util.isSeq(response.seq) || response.seq < 0n) { return false }
+      if (msg.type === APPEND) { return true }
+      return msg.type === FWD_APPEND && Object.hasOwn(response, 'results')
     }
     return this._sendAndAwaitResponse(
       to, msg, this.opts[timeoutKey], timeoutErr, validate
@@ -1057,7 +1056,7 @@ class RaftNode extends EventEmitter {
       ))
     }
     const cid = crypto.randomUUID()
-    const msg = { type: APPEND, term: this.term, cid, data }
+    const msg = { type: FWD_APPEND, term: this.term, cid, data }
     return this._sendAndAwaitAck(
       leader, msg, ACK_OPERATION.APPEND
     ).then((response) => {
@@ -1073,7 +1072,7 @@ class RaftNode extends EventEmitter {
     })
   }
 
-  _rxAppendToLeader(msg, from) {
+  _rxFwdAppend(msg, from) {
     const { term, cid, data } = msg
     const error = (err, code=null) => {
       this.send(from, util.errorRpc(this.term, cid, err, code))
@@ -1263,12 +1262,11 @@ class RaftNode extends EventEmitter {
         break
 
       case APPEND:
-        if (!Object.hasOwn(msg, 'termP') ||
-            (this.state === LEADER && (!util.isTerm(term) || term <= this.term))) {
-          this._rxAppendToLeader(msg, from)
-        } else {
-          this._rxAppendToFollower(msg, from)
-        }
+        this._rxAppendToFollower(msg, from)
+        break
+
+      case FWD_APPEND:
+        this._rxFwdAppend(msg, from)
         break
     }
   }
