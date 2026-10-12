@@ -386,11 +386,20 @@ applies to this sequence-zero callback.
 
 Applies each command under a savepoint and checks that each result can be
 MessagePack-encoded, collecting successful results and rejected errors. A
-rejected item's writes are rolled back to its savepoint. If SQLite has
-already ended the transaction, the original error is rethrown. If savepoint
-cleanup fails, the original error is emitted before the cleanup failure
-propagates. Persists the pending command digest and applied checkpoint, then
-announces the local digest for agreement.
+failed item emits a local `APPLY_ERROR` warning before cleanup, using a
+separate error with the original message, SQL code, and stack. The command
+outcome retains its original code; shutdown is checked again after
+listeners run. Rejected writes are rolled back to the item's savepoint.
+If SQLite has already ended the transaction, the original error is rethrown.
+If savepoint cleanup fails, the original error is emitted before the cleanup
+failure propagates. Persists the pending command digest and applied
+checkpoint, then announces the local digest for agreement.
+
+Both leaders and followers warn once per failed item execution, including
+unencodable results. Agreed rejections need no repair; disagreement retains
+the later repair diagnostic. Restoring a stored outcome does not emit another
+warning, and late failures after shutdown remain quiet. Sequence-zero setup
+reporting is unchanged.
 
 ### findings
 
@@ -403,10 +412,6 @@ announces the local digest for agreement.
   only one is affected. If all are affected, they agree on the wrong state.
   Suggested doc change: after catching a database error, if `db.isTransaction`
   is false, rethrow and issue no further SQL. No change has been made.
-- **Accepted: a follower's application error is not reported in detail.**
-  Only the leader returns outcomes to the caller. A dissenting follower
-  reports only `REPAIR_OUTSIDE_AGREEMENT`, without the original message or
-  stack. Decision: keep the current behavior.
 
 ## `_monsterApplySync`
 

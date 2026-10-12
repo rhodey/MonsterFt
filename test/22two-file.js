@@ -671,6 +671,7 @@ test('sequence-zero bootstrap failure rolls back and closes the node',
     const nodes = []
     let rejectBootstrap = true
     const calls = []
+    const warnings = []
     const build = (onFatal=noop, onError=noop) => {
       const current = new MonsterFt('1', ids, noop, databasePath, {
         electionTimeout: 60_000,
@@ -694,7 +695,7 @@ test('sequence-zero bootstrap failure rolls back and closes the node',
           return applyApp(db, buf, term, seq)
         },
       })
-      current.on('warn', noop)
+      current.on('warn', (err) => warnings.push(err))
       current.on('fatal', onFatal)
       current.on('error', onError)
       nodes.push(current)
@@ -729,6 +730,8 @@ test('sequence-zero bootstrap failure rolls back and closes the node',
       'the normalized bootstrap error is emitted as fatal')
     t.equal(await errored, rejected,
       'fatal closure reports the normalized error publicly')
+    t.equal(warnings.length, 0,
+      'sequence-zero failures retain fatal reporting without command warnings')
     const { db: bootstrapDb, ...bootstrapCall } = calls[0]
     t.deepEqual(bootstrapCall, {
       buf: null,
@@ -1895,6 +1898,173 @@ test('repair state 1 reopens live while state 2 requires certification',
     t.end()
   })
 
+test('throwing command warning listeners do not interrupt application or agreement',
+  async (t) => {
+    const fixture = clusterFixture(t, 'throwing-command-warn')
+    const cluster = fixture.build({
+      apply: (db, buf, term, seq) => {
+        const result = applyApp(db, buf, term, seq)
+        if (buf !== null && toObj(buf).key === 'rejected') {
+          throw new Error('command rejected')
+        }
+        return result
+      },
+    })
+    const leader = await openAndElect(cluster.nodes)
+    const listenerErrors = new Map()
+    const warnings = []
+    for (const node of cluster.nodes) {
+      const failure = new Error(`warning listener ${node.id} failed`)
+      listenerErrors.set(node.id, failure)
+      node.on('warn', () => { throw failure })
+      node.on('warn', (err) => warnings.push({ id: node.id, err }))
+    }
+
+    const rejected = await withTimeout(errorOf(leader.append(
+      toBuf({ key: 'rejected', value: 30 }),
+    )), 'rejection with throwing warning listeners')
+    await waitApplied(cluster.nodes, leader._applySeq)
+    t.equal(rejected?.message, 'command rejected',
+      'the caller receives the original application failure')
+    t.deepEqual(warnings.map(({ id }) => id).sort(), ids,
+      'later warning listeners see each failed item despite earlier throws')
+    t.deepEqual(fixture.errors.map(({ id, err }) => [id, err]).sort(),
+      [...listenerErrors.entries()],
+      'listener exceptions are surfaced without changing the command outcome')
+    t.ok(cluster.nodes.every((node) => node.isOpen && node._monsterRepairState === 0),
+      'all nodes remain open and in agreement')
+    t.deepEqual(cluster.nodes.map((node) => valueAt(node, 'rejected')),
+      [null, null, null], 'the failed writes still roll back on every node')
+    await leader.append(toBuf({ key: 'next', value: 31 }))
+    await waitApplied(cluster.nodes, leader._applySeq)
+    t.deepEqual(cluster.nodes.map((node) => valueAt(node, 'next')),
+      [31, 31, 31], 'later application continues normally')
+  })
+
+test('a command warning listener can close before rollback or later batch items',
+  async (t) => {
+    const fixture = clusterFixture(t, 'closing-command-warn')
+    const cluster = fixture.build({
+      apply: (db, buf, term, seq) => {
+        const result = applyApp(db, buf, term, seq)
+        if (buf !== null && toObj(buf).key === 'rejected') {
+          throw new Error('close on command rejection')
+        }
+        return result
+      },
+    })
+    const leader = await openAndElect(cluster.nodes)
+    await waitApplied(cluster.nodes, leader._applySeq)
+    const follower = cluster.nodes[2]
+    const databasePath = fixture.paths.get(follower.id)
+    const before = monsterMetaAtPath(databasePath)
+    const db = follower.db
+    const afterCloseSql = []
+    let closed = false
+    for (const method of ['exec', 'prepare']) {
+      const original = db[method].bind(db)
+      db[method] = (...args) => {
+        if (closed) { afterCloseSql.push(args[0]) }
+        return original(...args)
+      }
+    }
+    const warnings = []
+    follower.on('warn', (err) => {
+      warnings.push(err)
+      closed = true
+      follower.close()
+    })
+
+    const [, outcomes] = await withTimeout(leader.appendBatch([
+      toBuf({ key: 'before-warning', value: 40 }),
+      toBuf({ key: 'rejected', value: 41 }),
+      toBuf({ key: 'after-warning', value: 42 }),
+    ]), 'batch with a closing warning listener')
+    await new Promise((resolve) => setImmediate(resolve))
+    t.deepEqual(outcomes.map(({ status }) => status),
+      ['fulfilled', 'rejected', 'fulfilled'],
+      'the healthy quorum completes the original batch')
+    t.equal(warnings.length, 1, 'the closing follower receives its failed item warning')
+    t.deepEqual(cluster.applies.filter(({ id, buf }) => {
+      return id === follower.id && buf !== null
+    }).map(({ index }) => index), [0, 1],
+    'closing from warn prevents the next item from entering application')
+    t.deepEqual(afterCloseSql, [],
+      'closing from warn prevents further rollback, release, or checkpoint SQL')
+    t.notOk(follower.isOpen, 'the follower closes during the warning')
+    t.equal(follower.db, null, 'the listener closes DB2')
+    t.notOk(follower.log.isOpen, 'the listener closes DB1')
+    t.deepEqual(monsterMetaAtPath(databasePath), before,
+      'the interrupted command does not advance its durable checkpoint')
+    t.deepEqual(['before-warning', 'rejected', 'after-warning'].map((key) => {
+      return valueAtPath(databasePath, key)
+    }), [null, null, null], 'closing rolls back the entire active command')
+    t.deepEqual(fixture.errors, [], 'abandoned application emits no later error')
+  })
+
+test('drain from a command warning waits for the active batch and its SYNC',
+  async (t) => {
+    const fixture = clusterFixture(t, 'draining-command-warn')
+    const cluster = fixture.build({
+      apply: (db, buf, term, seq) => {
+        const result = applyApp(db, buf, term, seq)
+        if (buf !== null && toObj(buf).key === 'rejected') {
+          throw new Error('drain on command rejection')
+        }
+        return result
+      },
+    })
+    const leader = await openAndElect(cluster.nodes)
+    const follower = cluster.nodes[2]
+    const databasePath = fixture.paths.get(follower.id)
+    const warnings = []
+    let draining = null
+    let drained = false
+    follower.on('warn', (err) => {
+      warnings.push(err)
+      draining = follower.drainCmd()
+      draining.then(() => { drained = true }).catch(noop)
+    })
+    fixture.bus.holdOutcomes()
+    const synced = nextSync(follower)
+    const appending = leader.appendBatch([
+      toBuf({ key: 'before-warning', value: 50 }),
+      toBuf({ key: 'rejected', value: 51 }),
+      toBuf({ key: 'after-warning', value: 52 }),
+    ])
+    appending.catch(noop)
+    await waitFor(() => follower._monsterPendingCommand !== null,
+      'warning-triggered drain captures the completed CMD')
+    t.ok(draining, 'the warning listener starts drain')
+    t.equal(warnings.length, 1, 'the failed item warns once before drain')
+    t.notOk(drained, 'drain waits for agreement after the active batch commits')
+    const rejected = await errorOf(follower.append(
+      toBuf({ key: 'too-late', value: 53 }),
+    ))
+    t.equal(rejected?.code, DRAINING, 'the listener immediately closes command admission')
+    t.deepEqual(['before-warning', 'rejected', 'after-warning'].map((key) => {
+      return valueAt(follower, key)
+    }), [50, null, 52], 'the active batch finishes with only its failed item rolled back')
+
+    await fixture.bus.releaseOutcomes()
+    const [cmdSeq, outcomes] = await withTimeout(appending, 'batch completion after warn drain')
+    const sync = await withTimeout(synced, 'warn drain SYNC')
+    await withTimeout(draining, 'warn drain completion')
+    t.deepEqual(outcomes.map(({ status }) => status),
+      ['fulfilled', 'rejected', 'fulfilled'], 'the caller receives the original batch results')
+    t.equal(outcomes[1].reason.message, 'drain on command rejection',
+      'draining preserves the application failure returned to the caller')
+    t.equal(sync.cmdSeq, cmdSeq, 'drain observes the matching SYNC')
+    t.ok(drained && !follower.isOpen, 'drain closes after SYNC and resolves')
+    const meta = monsterMetaAtPath(databasePath)
+    t.equal(meta.pending_cmd_seq, null, 'the closed pair has no pending CMD')
+    t.ok(meta.applied_seq >= sync.syncSeq, 'the closed pair includes the SYNC checkpoint')
+    t.deepEqual(['before-warning', 'rejected', 'after-warning'].map((key) => {
+      return valueAtPath(databasePath, key)
+    }), [50, null, 52], 'drain preserves completed work and the item rollback')
+    t.deepEqual(fixture.errors, [], 'warning-triggered drain emits no errors')
+  })
+
 test('shutdown before DB2 commit rolls back and replays the durable DB1 entry',
   async (t) => {
     const databasePath = uniquePath('pre-commit-replay')
@@ -1904,6 +2074,8 @@ test('shutdown before DB2 commit rolls back and replays the durable DB1 entry',
     const nodes = []
     const errors = []
     const fatals = []
+    const warnings = []
+    const failure = new Error('application rejected after close')
     let applyCalls = 0
 
     const build = (blocked) => {
@@ -1918,11 +2090,12 @@ test('shutdown before DB2 commit rolls back and replays the durable DB1 entry',
           if (blocked) {
             entered.resolve()
             await release.promise
+            throw failure
           }
           return applyApp(db, buf, term, seq, index, matchIndex)
         },
       })
-      node.on('warn', noop)
+      node.on('warn', (err) => warnings.push(err))
       node.on('error', (err) => errors.push(err))
       node.on('fatal', (err) => fatals.push(err))
       nodes.push(node)
@@ -2000,6 +2173,7 @@ test('shutdown before DB2 commit rolls back and replays the durable DB1 entry',
     await new Promise((resolve) => setImmediate(resolve))
     t.equal(errors.length, 0, 'late apply emits no public error')
     t.equal(fatals.length, 0, 'late apply emits no fatal error')
+    t.equal(warnings.length, 0, 'late rejection emits no command warning')
 
     const second = build(false)
     second.open()
@@ -2033,6 +2207,8 @@ test('shutdown immediately after DB2 commit prevents replay on restart',
     const nodes = []
     const errors = []
     const fatals = []
+    const warnings = []
+    const failure = new Error('persisted command rejection')
     let applyCalls = 0
 
     const build = () => {
@@ -2044,10 +2220,11 @@ test('shutdown immediately after DB2 commit prevents replay on restart',
             return applyApp(db, buf, term, seq, index, matchIndex)
           }
           applyCalls++
+          if (toObj(buf).key === 'rejected') { throw failure }
           return applyApp(db, buf, term, seq, index, matchIndex)
         },
       })
-      node.on('warn', noop)
+      node.on('warn', (err) => warnings.push(err))
       node.on('error', (err) => errors.push(err))
       node.on('fatal', (err) => fatals.push(err))
       nodes.push(node)
@@ -2061,7 +2238,10 @@ test('shutdown immediately after DB2 commit prevents replay on restart',
 
     const command = {
       type: 'cmd',
-      items: [toBuf({ key: 'post-commit', value: 13 })],
+      items: [
+        toBuf({ key: 'post-commit', value: 13 }),
+        toBuf({ key: 'rejected', value: 14 }),
+      ],
       matchIndex: ids.map(() => -1n),
     }
     const first = build()
@@ -2097,6 +2277,9 @@ test('shutdown immediately after DB2 commit prevents replay on restart',
     await new Promise((resolve) => setImmediate(resolve))
     t.equal(errors.length, 0, 'post-COMMIT shutdown emits no apply error')
     t.equal(fatals.length, 0, 'post-COMMIT shutdown emits no fatal error')
+    t.equal(warnings.length, 1, 'the rejected item emits one warning before COMMIT')
+    t.equal(warnings[0]?.stack, failure.stack,
+      'the item warning retains its original trace')
 
     const committed = new DatabaseSync(`${databasePath}2`, {
       readOnly: true,
@@ -2132,8 +2315,10 @@ test('shutdown immediately after DB2 commit prevents replay on restart',
     second._commitSeq = cmdSeq
     second._commitTerm = 0n
     await second._apply(cmdSeq)
-    t.equal(applyCalls, 1,
+    t.equal(applyCalls, 2,
       'restart does not replay an entry included in the DB2 checkpoint')
+    t.equal(warnings.length, 1,
+      'restoring the persisted pending outcome does not repeat its warning')
     t.equal(valueAt(second, 'post-commit'), 13,
       'restart retains the application transition without replay')
     second.close()
@@ -2727,7 +2912,8 @@ for (const scenario of ['normal listener', 'throwing listener', 'closing listene
         const releaseDb = follower._monsterReleaseDb
         follower._monsterReleaseDb = function(work, value, failed) {
           releaseDb.call(this, work, value, failed)
-          if (failed && value === originals.get(follower.id)) {
+          if (failed && value.stack === originals.get(follower.id)?.stack &&
+              value.sqlCode === 13) {
             afterRelease.resolve(follower.drainCmd())
           }
         }

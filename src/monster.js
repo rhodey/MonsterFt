@@ -640,17 +640,24 @@ class MonsterNode extends RaftNode {
               assertEncodable(value)
             } catch (err) {
               this._throwIfClosing()
+              err = Err.wrapError(err)
+              this._emitSafe('warn', Err.wrapError({
+                message: err.message,
+                sqlCode: err.sqlCode,
+                stack: err.stack,
+              }, Err.APPLY_ERROR))
+              this._throwIfClosing()
               if (!db.isTransaction) { throw err }
               try {
                 db.exec('ROLLBACK TO monsterft_item')
                 db.exec('RELEASE monsterft_item')
               } catch (rollbackErr) {
-                this._emitSafe('error', Err.wrapError(err))
+                this._emitSafe('error', err)
                 throw rollbackErr
               }
               outcomes.push({
                 status: REJECTED,
-                error: Err.wrapError(err),
+                error: err,
               })
               continue
             }
