@@ -2303,6 +2303,67 @@ test('forwarded Raft errors normalize missing metadata by operation', async (t) 
   node.close()
 })
 
+test('backtrack errors accept only valid log-head hints from the requested term', async (t) => {
+  const node = new RaftNode('1', ids, () => {}, lifecycleLog(), {
+    electionTimeout: 60_000,
+    appendTimeout: 60_000,
+  })
+  t.teardown(() => node.close())
+  node.open()
+  const maxSeq = 9_223_372_036_854_775_807n
+  const stack = 'Error: predecessor missing\n    at remoteAppend (/remote/node.js:10:3)'
+  const cases = [
+    ['empty log', { logSeq: -1n }, -1n],
+    ['genesis only', { logSeq: 0n }, 0n],
+    ['maximum sequence', { logSeq: maxSeq }, maxSeq],
+    ['absent hint', {}, undefined],
+    ['null hint', { logSeq: null }, undefined],
+    ['number hint', { logSeq: 0 }, undefined],
+    ['string hint', { logSeq: '0' }, undefined],
+    ['below empty sentinel', { logSeq: -2n }, undefined],
+    ['above maximum sequence', { logSeq: maxSeq + 1n }, undefined],
+  ]
+  for (const [label, fields, expected] of cases) {
+    const pending = rejection(node._sendAndAwaitAck('2', {
+      type: 'append', term: node.term, cid: label,
+    }, ACK_OPERATION.APPEND))
+    await node.onReceive('2', {
+      type: 'err', term: node.term, cid: label, msg: 'predecessor missing',
+      code: REPL_BACKTRACK, sqlCode: null, stack, ...fields,
+    })
+    const err = await pending
+    t.equal(Object.hasOwn(err, 'logSeq'), expected !== undefined,
+      `${label}: keeps only valid sequence hints`)
+    t.equal(err.logSeq, expected, `${label}: preserves the exact hint value`)
+    t.deepEqual([err.message, err.code, err.sqlCode, err.stack],
+      ['append ERR predecessor missing', REPL_BACKTRACK, null, stack],
+      `${label}: leaves the normalized error and remote stack intact`)
+  }
+
+  for (const [label, type, code, requestTerm, responseTerm, currentTerm] of [
+    ['forwarded error', 'fwd_append', REPL_BACKTRACK, 3n, 3n, 3n],
+    ['other error code', 'append', TERM_DIFF, 3n, 3n, 3n],
+    ['response older than request', 'append', REPL_BACKTRACK, 3n, 2n, 3n],
+    ['response newer than request', 'append', REPL_BACKTRACK, 3n, 4n, 3n],
+    ['request older than current term', 'append', REPL_BACKTRACK, 3n, 4n, 4n],
+    ['response older than current term', 'append', REPL_BACKTRACK, 3n, 3n, 4n],
+  ]) {
+    node.term = currentTerm
+    const pending = rejection(node._sendAndAwaitAck('2', {
+      type, term: requestTerm, cid: label,
+    }, ACK_OPERATION.APPEND))
+    await node.onReceive('2', {
+      type: 'err', term: responseTerm, cid: label, msg: 'rejected',
+      code, sqlCode: null, logSeq: 7n,
+    })
+    const err = await pending
+    t.equal(err.code, code, `${label}: retains the remote error code`)
+    t.notOk(Object.hasOwn(err, 'logSeq'), `${label}: ignores the hint`)
+  }
+  t.equal(node._acks.size, 0, 'all error responses settle their waiters')
+  t.equal(node._pongs.size, 0, 'error responses do not refresh liveness')
+})
+
 test('forwarding requires a known leader', async (t) => {
   const node = new RaftNode('1', ids, () => {}, lifecycleLog())
   const appendErr = await rejection(node._fwdToLeader(Buffer.from('data')))

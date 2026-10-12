@@ -372,21 +372,12 @@ None.
 ## `_replicationPage`
 
 Sends a bounded page of log entries to a follower and updates its replication
-progress. Handles retries, unavailable history, and fatal log failures.
+progress, skipping missing history using the follower's head hint. Handles
+retries, unavailable history, and fatal log failures.
 
 ### findings
 
-- **Open: catching up a lagging follower after a leadership change costs one
-  rejected page per missing entry.** A new leader starts each peer at its own
-  head plus one. A follower that is behind replies `REPL_BACKTRACK` without
-  saying where its log ends. The leader then backs up by one entry, sends
-  another full page of up to `rpcMax` entries, and emits a `warn`. After
-  5,000 missed entries, catch-up took 5,001 rejected pages, about 4.6
-  million entries shipped, and 4.2 s even in-process. The time grows by one
-  round trip per entry on a real network. When the lagging node was needed
-  for quorum, appends failed with `APPEND_TIMEOUT` until catch-up finished.
-  Likely direction: the follower's reply includes a sequence for the leader
-  to try next. This is not being implemented now.
+None.
 
 ## `_runReplication`
 

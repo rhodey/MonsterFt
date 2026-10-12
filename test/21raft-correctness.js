@@ -6,6 +6,7 @@ import {
   LOG_CORRUPT,
   NO_LEADER,
   RAFT_ILLEGAL,
+  REPL_BACKTRACK,
   RPC_ILLEGAL,
   TERM_DIFF,
 } from '../src/error.js'
@@ -188,60 +189,167 @@ for (const termDelta of [0n, 1n]) {
   })
 }
 
-test('replication delays failed RPCs but backtracks immediately through divergent history', async (t) => {
-  const requests = []
-  const delays = []
-  const byId = new Map()
-  const nodes = ['1', '2'].map((id) => {
-    const send = (to, msg) => {
-      if (id === '1' && msg.data) {
-        requests.push(msg.seqP)
-        if (requests.length === 1) { return }
-        if (requests.length === 2) {
-          return byId.get(id).onReceive(to, {
-            type: 'err', term: msg.term, cid: msg.cid,
-            msg: 'rejected RPC', code: RPC_ILLEGAL,
+for (const delayMs of [0, 2]) {
+  for (const prefixLength of [0, 8]) {
+    test(`a newly elected leader skips a large missing ${prefixLength ? 'partial' : 'empty'} follower tail with ${delayMs ? 'delayed' : 'synchronous'} transport`, async (t) => {
+      const byId = new Map()
+      const timers = new Set()
+      const errors = []
+      const pages = []
+      const backtracks = []
+      const matches = []
+      const applied = new Map(ids.map((id) => [id, []]))
+      let isolated = prefixLength === 0
+      const nodes = ids.map((id) => {
+        const send = (to, msg) => {
+          if (isolated && (id === '3' || to === '3')) { return }
+          if (id === '2' && to === '3' && msg.type === 'append' && Array.isArray(msg.data)) {
+            pages.push(msg)
+          }
+          if (id === '3' && to === '2' && msg.code === REPL_BACKTRACK) {
+            backtracks.push(msg)
+          }
+          const deliver = () => {
+            if (isolated && (id === '3' || to === '3')) { return }
+            return byId.get(to).onReceive(id, msg)
+          }
+          if (!delayMs) { return deliver() }
+          const timer = setTimeout(() => {
+            timers.delete(timer)
+            deliver()
+          }, delayMs)
+          timers.add(timer)
+        }
+        const node = new ProductionRaftNode(id, ids, send, ':memory:', {
+          electionTimeout: { 1: 40, 2: 160, 3: 60_000 }[id],
+          pingTimeout: 250, appendTimeout: 2_000, rpcMax: 16,
+          apply: (node, bufs) => bufs.map((buf) => {
+            if (buf === null) { return null }
+            const value = buf.toString()
+            applied.get(id).push(value)
+            return value
+          }),
+        })
+        node.on('error', (err) => errors.push(err))
+        if (id === '2') {
+          node.on('warn', (err) => {
+            if (err.code === REPL_BACKTRACK) {
+              matches.push(node._replication.get('3').matchIndex)
+            }
           })
         }
+        byId.set(id, node)
+        return node
+      })
+      t.teardown(() => {
+        nodes.forEach((node) => node.close())
+        timers.forEach((timer) => clearTimeout(timer))
+      })
+      nodes.forEach((node) => node.open())
+      const [original, successor, lagging] = nodes
+      await waitFor(() => original.state === 'leader' && successor._applySeq === 0n)
+      const firstTerm = original.term
+      const prefix = Array.from({ length: prefixLength }, (_, i) => `prefix-${i}`)
+      if (prefix.length) {
+        await original.appendBatch(prefix.map((value) => Buffer.from(value)))
+        await waitFor(() => lagging._applySeq === original.seq)
+        isolated = true
       }
-      return byId.get(to).onReceive(id, msg)
-    }
-    const node = new ProductionRaftNode(id, ids, send, ':memory:', {
-      ...opts, pingTimeout: 1500, rpcMax: 2,
+      const missing = Array.from({ length: 256 }, (_, i) => `missing-${i}`)
+      await original.appendBatch(missing.map((value) => Buffer.from(value)))
+      await waitFor(() => successor._applySeq === original.seq)
+      const retainedSeq = lagging.seq
+      const oldHead = original.seq
+      t.equal(retainedSeq, prefix.length ? BigInt(prefix.length) : -1n,
+        'the follower retains only the intended prefix while the majority advances')
+      original.close()
+      isolated = false
+
+      await waitFor(() => successor.state === 'leader' && lagging._applySeq === oldHead + 1n, 2_000)
+      t.ok(successor.term > firstTerm, 'a real election changes leadership and term')
+      t.equal(backtracks.length, 1, 'one rejected page locates the missing history')
+      t.equal(backtracks[0]?.logSeq, retainedSeq, 'the rejection advertises the cached follower head')
+      t.equal(pages[0]?.seqP, oldHead, 'the new leader first probes its own previous head')
+      t.equal(pages[1]?.seqP, retainedSeq, 'the next page immediately starts after the follower head')
+      t.deepEqual(matches, [-1n], 'a hint alone does not establish any matched history')
+      const expected = [entry(firstTerm), ...[...prefix, ...missing].map((value) => entry(firstTerm, value)),
+        entry(successor.term)]
+      for (const node of [successor, lagging]) {
+        t.deepEqual([...node.log.iter()], expected, `${node.id}: retains exact terms and payloads after catch-up`)
+        t.deepEqual(applied.get(node.id), [...prefix, ...missing],
+          `${node.id}: applies every command once in order`)
+      }
+      t.deepEqual(await lagging.append(Buffer.from('continued')), [oldHead + 2n, 'continued'],
+        'a subsequent forwarded append returns its ordinary sequence and result')
+      await waitFor(() => lagging._applySeq === successor.seq)
+      t.deepEqual([...lagging.log.iter()], [...expected, entry(successor.term, 'continued')],
+        'the caught-up follower continues replicating and applying new commands')
+      t.equal(backtracks.length, 1, 'normal replication continues without another backtrack')
+      t.deepEqual(errors, [], 'leadership change and catch-up produce no fatal errors')
     })
-    byId.set(id, node)
-    return node
-  })
-  t.teardown(() => nodes.forEach((node) => node.close()))
-  for (const node of nodes) {
-    node.open()
-    node._stopTimers()
   }
-  const [leader, follower] = nodes
-  leader.log.appendBatch(['a', 'b', 'c', 'd'].map((value) => entry(1n, value)))
-  follower.log.appendBatch(['old-a', 'old-b'].map((value) => entry(0n, value)))
-  leader.state = 'leader'
-  leader.leader = leader.id
-  leader.term = 1n
-  leader._delay = async (ms) => { delays.push({ afterRequest: requests.length, ms }) }
+}
 
-  leader._catchUpFollower('2')
-  const state = leader._replication.get('2')
-  leader.log.append(entry(1n, 'e'))
-  leader._catchUpFollower('2')
-  t.equal(requests.length, 1, 'new work shares the pending replication worker')
-  await state.work
+for (const followerLength of [2, 4, 6]) {
+  test(`replication delays failed RPCs but backtracks one entry through ${followerLength}-entry divergent history`, async (t) => {
+    const requests = []
+    const delays = []
+    const backtracks = []
+    const byId = new Map()
+    const nodes = ['1', '2'].map((id) => {
+      const send = (to, msg) => {
+        if (id === '2' && msg.code === REPL_BACKTRACK) { backtracks.push(msg.logSeq) }
+        if (id === '1' && msg.data) {
+          requests.push(msg.seqP)
+          if (requests.length === 1) { return }
+          if (requests.length === 2) {
+            return byId.get(id).onReceive(to, {
+              type: 'err', term: msg.term, cid: msg.cid,
+              msg: 'rejected RPC', code: RPC_ILLEGAL,
+            })
+          }
+        }
+        return byId.get(to).onReceive(id, msg)
+      }
+      const node = new ProductionRaftNode(id, ids, send, ':memory:', {
+        ...opts, pingTimeout: 1500, rpcMax: 2,
+      })
+      byId.set(id, node)
+      return node
+    })
+    t.teardown(() => nodes.forEach((node) => node.close()))
+    for (const node of nodes) {
+      node.open()
+      node._stopTimers()
+    }
+    const [leader, follower] = nodes
+    leader.log.appendBatch(['a', 'b', 'c', 'd'].map((value) => entry(1n, value)))
+    follower.log.appendBatch(Array.from({ length: followerLength }, (_, i) => entry(0n, `old-${i}`)))
+    leader.state = 'leader'
+    leader.leader = leader.id
+    leader.term = 1n
+    leader._delay = async (ms) => { delays.push({ afterRequest: requests.length, ms }) }
 
-  t.deepEqual(delays, [
-    { afterRequest: 1, ms: 150 },
-    { afterRequest: 2, ms: 150 },
-  ], 'only the timeout and ordinary RPC error schedule a retry delay')
-  t.deepEqual(requests, [2n, 2n, 2n, 1n, 0n, -1n, 1n, 3n],
-    'retries failed pages, backtracks to the beginning, then advances by page')
-  t.equal(state.matchIndex, leader.seq, 'catches up through the newly appended entry')
-  t.deepEqual([...follower.log.iter(0n)], [...leader.log.iter(0n)],
-    'replaces the divergent suffix and copies the complete leader history')
-})
+    leader._catchUpFollower('2')
+    const state = leader._replication.get('2')
+    leader.log.append(entry(1n, 'e'))
+    leader._catchUpFollower('2')
+    t.equal(requests.length, 1, 'new work shares the pending replication worker')
+    await state.work
+
+    t.deepEqual(delays, [
+      { afterRequest: 1, ms: 150 },
+      { afterRequest: 2, ms: 150 },
+    ], 'only the timeout and ordinary RPC error schedule a retry delay')
+    t.deepEqual(requests, [2n, 2n, 2n, 1n, 0n, -1n, 1n, 3n],
+      'retries failed pages, backtracks to the beginning, then advances by page')
+    t.deepEqual(backtracks, Array(3).fill(BigInt(followerLength - 1)),
+      'shorter, equal, or longer heads cannot skip a predecessor term mismatch')
+    t.equal(state.matchIndex, leader.seq, 'catches up through the newly appended entry')
+    t.deepEqual([...follower.log.iter(0n)], [...leader.log.iter(0n)],
+      'replaces the divergent suffix and copies the complete leader history')
+  })
+}
 
 test('an earlier-term heartbeat ACK does not restore followers after reelection', async (t) => {
   const byId = new Map()

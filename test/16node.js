@@ -210,6 +210,7 @@ test('higher-term log rejection retains the AppendEntries leader', async (t) => 
   t.equal(sent[0][1].msg, 'seqP 0 not found', 'reports the log mismatch position')
   t.equal(sent[0][1].code, REPL_BACKTRACK,
     'marks the response for leader backtracking')
+  t.equal(sent[0][1].logSeq, -1n, 'reports the empty follower head')
   t.equal(sent[0][1].sqlCode, null,
     'backtracking has no SQLite code')
   t.notOk(Object.hasOwn(sent[0][1], 'backtrack'),
@@ -738,6 +739,58 @@ test('heartbeat ACK catches a discovered follower up to the current head', async
   node._stopTimers()
 })
 
+test('backtrack head hints only lower the next probe, without confirming history', async (t) => {
+  const cases = [
+    ['missing hint', undefined, 5n],
+    ['short follower', 1n, 2n],
+    ['empty follower', -1n, 0n],
+    ['unhelpful head', 5n, 5n],
+    ['maximum head', 9_223_372_036_854_775_807n, 5n],
+    ['invalid head', -2n, 5n],
+    ['concurrently lowered probe', 1n, 0n, 0n],
+  ]
+  for (const [label, logSeq, expected, lowered] of cases) {
+    const records = Array.from({ length: 8 }, (_, index) => entry(0n, String(index)))
+    const log = {
+      isOpen: true,
+      begin: 0n,
+      seq: 7n,
+      term: 0n,
+      sizes: zeroSizes,
+      *iter(begin) { yield* records.slice(Number(begin)) },
+      close() { this.isOpen = false },
+    }
+    const sent = []
+    const node = new RaftNode('1', ids, (to, msg) => sent.push(msg), log, {
+      appendTimeout: 1_000,
+    })
+    t.teardown(() => node.close())
+    node._open = true
+    node.state = 'leader'
+    node.leader = '1'
+    node.term = 0n
+    const warnings = []
+    node.on('warn', (err) => warnings.push(err))
+    const state = node._replicationState('2', node.term, 6n)
+    state.target = 7n
+    const work = node._replicationPage(state)
+    t.equal(sent.length, 1, `${label}: sends one replication probe`)
+    if (lowered !== undefined) { state.nextIndex = lowered }
+    const response = {
+      type: 'err', term: node.term, cid: sent[0].cid,
+      msg: 'predecessor not found', code: REPL_BACKTRACK, sqlCode: null,
+    }
+    if (logSeq !== undefined) { response.logSeq = logSeq }
+    await node.onReceive('2', response)
+    t.equal(await work, true, `${label}: retries the rejected page`)
+    t.equal(state.nextIndex, expected, `${label}: selects the earlier retry position`)
+    t.equal(state.matchIndex, -1n, `${label}: does not confirm replicated history`)
+    t.equal(node._commitSeq, -1n, `${label}: does not advance commitment`)
+    t.equal(node._applySeq, -1n, `${label}: does not advance application`)
+    t.equal(warnings.length, 1, `${label}: preserves backtracking warnings`)
+  }
+})
+
 test('backtrack to nextIndex zero still attempts the genesis page', async (t) => {
   const data = [entry(0n, 'zero'), entry(0n, 'one')]
   const log = {
@@ -932,6 +985,7 @@ test('backtrack rejecting the genesis page cancels replication', async (t) => {
       msg: 'termP mismatch at seqP -1',
       code: REPL_BACKTRACK,
       sqlCode: null,
+      logSeq: -1n,
     }))
   }
   node = new RaftNode('1', ids, send, log, {
@@ -1208,6 +1262,8 @@ test('retained follower warns on a page below its log begin',
       'the ERR uses the warning message')
     t.equal(sent[0][1].code, REPL_FORGOT,
       'the ERR reports the forgotten predecessor')
+    t.notOk(Object.hasOwn(sent[0][1], 'logSeq'),
+      'forgotten history does not suggest a backtracking hint')
     t.equal(sent[0][1].sqlCode, null,
       'the backtracking ERR has no SQLite code')
     t.notOk(Object.hasOwn(sent[0][1], 'backtrack'),

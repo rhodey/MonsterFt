@@ -351,7 +351,13 @@ class RaftNode extends EventEmitter {
     ).then((response) => {
       this._throwIfClosing()
       if (response.type === ERR) {
-        throw Err.wrapError(response, null, `${name} ERR `)
+        const err = Err.wrapError(response, null, `${name} ERR `)
+        if (msg.type === APPEND && err.code === Err.REPL_BACKTRACK &&
+            response.term === msg.term && response.term === this.term &&
+            util.isSeq(response.logSeq)) {
+          err.logSeq = response.logSeq
+        }
+        throw err
       }
       if (response.term !== msg.term || response.term !== this.term) {
         return response
@@ -854,7 +860,9 @@ class RaftNode extends EventEmitter {
           return false
         }
         // The next attempt starts earlier than this rejected page.
-        state.nextIndex = min(state.nextIndex, begin - 1n)
+        let next = begin - 1n
+        if (util.isSeq(err.logSeq)) { next = min(next, err.logSeq + 1n) }
+        state.nextIndex = min(state.nextIndex, next)
         this._emitSafe('warn', err)
         return true
       }
@@ -1102,7 +1110,9 @@ class RaftNode extends EventEmitter {
     const { cid, term, termP, seqP, commitSeq, data } = msg
 
     const error = (err, code=null) => {
-      this.send(from, util.errorRpc(this.term, cid, err, code))
+      const response = util.errorRpc(this.term, cid, err, code)
+      if (response.code === Err.REPL_BACKTRACK) { response.logSeq = this.log.seq }
+      this.send(from, response)
     }
 
     if (!util.isCid(cid)) {
