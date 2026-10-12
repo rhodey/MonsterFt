@@ -5,7 +5,8 @@ import { unpack } from 'msgpackr'
 import test from 'tape'
 import { MonsterFt, SQLiteLog } from '../src/index.js'
 import {
-  APPEND_TIMEOUT, APPLY_ERROR, ErrorWithCode, MONSTER_ILLEGAL, SQLITE_ERROR,
+  APPEND_TIMEOUT, APPLY_ERROR, ErrorWithCode, MONSTER_ILLEGAL,
+  REPAIR_OUTSIDE_AGREEMENT, SQLITE_ERROR,
 } from '../src/error.js'
 import { databasePath, sleep } from './util.js'
 
@@ -57,12 +58,13 @@ const makeFixture = (t, name, allowMessage=() => true) => {
       return target.onReceive(id, msg)
     }
     const node = new MonsterFt(id, ids, send, paths.get(id), {
-      electionTimeout: 60_000,
-      pingTimeout: 500,
+      electionTimeout: 500,
       appendTimeout: 3_000,
       quorum: 2,
       apply: () => null,
     })
+    // Tests elect leaders explicitly.
+    node._timers.election = 60_000
     node.on('warn', (err) => warnings.push({ id, err }))
     current.set(id, node)
     return node
@@ -190,6 +192,7 @@ for (const asynchronous of [false, true]) {
     t.match(err.stack, /schemaApply/, 'the trace identifies the application callback')
     t.equal(err, fatal, 'fatal and error events report the same error')
     t.notOk(node.isOpen, 'the initialization failure still closes the node')
+    t.deepEqual(fixture.warnings, [], 'sequence-zero failures add no item warnings')
   })
 }
 
@@ -275,7 +278,7 @@ test('MonsterFt replies to a failed forwarded CMD before warning locally', async
     return !appendsEntry(msg, 'cmd')
   })
   const leader = await elect(fixture.nodes)
-  leader.opts.appendTimeout = 100
+  leader._timers.append = 100
   leader.on('warn', () => {
     events.push('warn')
     leader.close()
@@ -297,26 +300,145 @@ test('MonsterFt replies to a failed forwarded CMD before warning locally', async
   t.notOk(leader.isOpen, 'the warning listener can close the leader')
 })
 
-test('MonsterFt ordinary application rejections do not emit diagnostics', async (t) => {
-  const fixture = makeFixture(t, 'application-rejection')
-  const diagnostics = []
-  for (const node of fixture.nodes) {
-    node.on('error', (err) => diagnostics.push(err))
-    node.on('fatal', (err) => diagnostics.push(err))
-    node._monsterUserApply = (db, data, term, seq) => {
-      if (seq > 0n) { throw new Error('application rejected command') }
+for (const asynchronous of [false, true]) {
+  const mode = asynchronous ? 'async' : 'sync'
+  test(`MonsterFt warns once per ${mode} rejected item with a separate APPLY_ERROR`, async (t) => {
+    const fixture = makeFixture(t, `application-rejection-${mode}`)
+    const diagnostics = []
+    const originals = new Map(ids.map((id) => [id, []]))
+    const warned = new Map(ids.map((id) => [id, []]))
+    const code = asynchronous ? 123 : null
+    const sqlCode = asynchronous ? 456 : null
+    for (const node of fixture.nodes) {
+      node.on('error', (err) => diagnostics.push(err))
+      node.on('fatal', (err) => diagnostics.push(err))
+      const applicationApply = (db, data, term, seq) => {
+        if (seq === 0n || data.toString() === 'ok') { return 'ok' }
+        const err = asynchronous
+          ? new ErrorWithCode('application rejected command', code, sqlCode)
+          : new TypeError('application rejected command')
+        if (!asynchronous) { err.code = 'APP_ERROR' }
+        originals.get(node.id).push(err)
+        throw err
+      }
+      node._monsterUserApply = asynchronous
+        ? async (...args) => {
+            await Promise.resolve()
+            return applicationApply(...args)
+          }
+        : applicationApply
+      node.on('warn', (err) => {
+        const original = originals.get(node.id).at(-1)
+        warned.get(node.id).push({
+          error: err,
+          message: err.message,
+          code: err.code,
+          sqlCode: err.sqlCode,
+          stack: err.stack,
+          original,
+        })
+        err.message = `warning changed by ${node.id}`
+        err.code = 900 + Number(node.id)
+        err.sqlCode = 800 + Number(node.id)
+        err.stack = `warning trace changed by ${node.id}`
+      })
     }
-  }
-  const leader = await elect(fixture.nodes)
-  for (const caller of fixture.nodes.slice(0, 2)) {
-    const rejected = await caller.append(Buffer.from('reject')).catch((err) => err)
-    t.equal(rejected.message, 'application rejected command',
-      `${caller === leader ? 'local' : 'forwarded'} caller receives the application rejection`)
-    await leader._monsterProtocol
-  }
-  t.deepEqual(fixture.warnings, [], 'agreed application rejections remain quiet')
-  t.deepEqual(diagnostics, [], 'agreed application rejections do not emit errors or fatals')
-})
+    const leader = await elect(fixture.nodes)
+    for (const caller of fixture.nodes.slice(0, 2)) {
+      for (const batch of [false, true]) {
+        const label = `${caller === leader ? 'local' : 'forwarded'} ${batch ? 'batch' : 'single'}`
+        const previous = originals.get(leader.id).length
+        let rejected
+        if (batch) {
+          const [, outcomes] = await caller.appendBatch(
+            ['reject', 'ok', 'reject'].map((value) => Buffer.from(value)),
+          )
+          t.deepEqual(outcomes.map(({ status }) => status),
+            ['rejected', 'fulfilled', 'rejected'], `${label} retains per-item outcomes`)
+          t.equal(outcomes[1].value, 'ok', `${label} retains the successful item`)
+          rejected = [outcomes[0].reason, outcomes[2].reason]
+        } else {
+          rejected = [await caller.append(Buffer.from('reject')).catch((err) => err)]
+        }
+        for (const [index, err] of rejected.entries()) {
+          t.ok(err instanceof ErrorWithCode, `${label} returns a normalized error`)
+          t.deepEqual([err.message, err.code, err.sqlCode],
+            ['application rejected command', code, sqlCode],
+            `${label} retains the application's message and codes despite warning mutation`)
+          t.equal(err.stack, originals.get(leader.id)[previous + index].stack,
+            `${label} retains the leader's application trace`)
+        }
+        await leader._monsterProtocol
+        const syncSeq = leader._applySeq
+        await waitFor(() => fixture.nodes.every((node) => node._applySeq >= syncSeq),
+          `${label} applied everywhere`)
+      }
+    }
+    for (const node of fixture.nodes) {
+      const warnings = warned.get(node.id)
+      t.equal(warnings.length, 6, `${node.id} warns once for each of its six failed executions`)
+      t.equal(originals.get(node.id).length, 6, `${node.id} executes each failed item once`)
+      for (const warning of warnings) {
+        t.ok(warning.error instanceof ErrorWithCode, `${node.id} emits an ErrorWithCode`)
+        t.notEqual(warning.error, warning.original, `${node.id} emits a separate warning error`)
+        t.deepEqual([warning.message, warning.code, warning.sqlCode],
+          ['application rejected command', APPLY_ERROR, sqlCode],
+          `${node.id} classifies the warning while preserving the message and SQL code`)
+        t.equal(warning.stack, warning.original.stack, `${node.id} emits its original local trace`)
+        t.match(warning.stack, /applicationApply/, `${node.id} identifies the application callback`)
+      }
+    }
+    t.deepEqual(diagnostics, [], 'warning mutation does not change agreement or emit errors or fatals')
+    t.ok(fixture.nodes.every((node) => node.isOpen), 'all replicas remain in service')
+  })
+}
+
+for (const targetId of ['1', '2']) {
+  const role = targetId === '1' ? 'leader' : 'follower'
+  test(`MonsterFt warns on a dissenting ${role} before reporting repair`, async (t) => {
+    const fixture = makeFixture(t, `dissenting-${role}`)
+    const target = fixture.nodes.find((node) => node.id === targetId)
+    const diagnostics = []
+    let original
+    for (const node of fixture.nodes) {
+      node._monsterUserApply = function applicationApply(db, data, term, seq) {
+        if (seq === 0n) { return }
+        if (node === target) {
+          original = new TypeError(`dissenting ${role} failure`)
+          throw original
+        }
+        return 'ok'
+      }
+    }
+    for (const type of ['warn', 'fatal', 'error']) {
+      target.on(type, (err) => diagnostics.push({ type, err }))
+    }
+    const leader = await elect(fixture.nodes)
+    const result = await withTimeout(
+      leader.append(Buffer.from('dissent')).catch((err) => err), `${role} command result`,
+    )
+    await waitFor(() => diagnostics.some(({ type }) => type === 'error'), `${role} repair error`)
+    t.deepEqual(diagnostics.map(({ type }) => type), ['warn', 'fatal', 'error'],
+      'the original warning precedes the existing repair diagnostics')
+    t.equal(fixture.warnings.length, 1, 'only the failed local execution warns')
+    const warning = diagnostics[0].err
+    t.ok(warning instanceof ErrorWithCode, 'the original warning is normalized')
+    t.equal(warning.code, APPLY_ERROR, 'the warning is classified as an application failure')
+    t.notEqual(warning, original, 'the warning has a separate error object')
+    t.equal(warning.message, original.message, 'the warning preserves the application message')
+    t.equal(warning.stack, original.stack, 'the warning preserves the application trace')
+    t.match(warning.stack, /applicationApply/, 'the trace identifies the application callback')
+    t.equal(diagnostics[1].err.code, REPAIR_OUTSIDE_AGREEMENT,
+      'the existing repair code is retained')
+    t.equal(diagnostics[2].err, diagnostics[1].err, 'the repair fatal still emits its error')
+    t.notOk(target.isOpen, 'the dissenting node closes')
+    if (target === leader) {
+      t.equal(result.code, REPAIR_OUTSIDE_AGREEMENT, 'the dissenting leader rejects with repair')
+    } else {
+      t.equal(result[1], 'ok', 'the healthy majority still returns its agreed result')
+    }
+  })
+}
 
 test('MonsterFt warns when recovery SYNC times out after stepping down', async (t) => {
   let recovery = false
@@ -334,7 +456,7 @@ test('MonsterFt warns when recovery SYNC times out after stepping down', async (
   fixture.warnings.length = 0
 
   recovery = true
-  leader.opts.appendTimeout = 100
+  leader._timers.append = 100
   leader._voteForSelf()
   await waitFor(() => leader.state === 'leader', 'recovery election')
   const rejected = await withTimeout(
@@ -381,6 +503,7 @@ test('MonsterFt reports the original failure before a fatal rollback failure', a
   t.equal(reported.stack, rollback.stack, 'the rollback failure retains its own trace')
   t.equal(diagnostics[1].err, reported, 'fatal and error share the rollback diagnostic')
   t.notOk(node.isOpen, 'rollback failure closes the node')
+  t.deepEqual(fixture.warnings, [], 'sequence-zero rollback handling adds no item warning')
 })
 
 for (const mode of ['conflict rollback', 'disk full', 'rollback cleanup', 'release cleanup']) {
@@ -440,10 +563,15 @@ for (const mode of ['conflict rollback', 'disk full', 'rollback cleanup', 'relea
       return exec(sql)
     }
     const diagnostics = []
+    const warnings = []
+    leader.on('warn', (err) => {
+      warnings.push(err)
+      diagnostics.push({ type: 'warn', err })
+    })
     leader.on('fatal', (err) => diagnostics.push({ type: 'fatal', err }))
     const errored = new Promise((resolve) => leader.on('error', (err) => {
       diagnostics.push({ type: 'error', err })
-      if (mode === 'release cleanup' && diagnostics.length === 1) {
+      if (mode === 'release cleanup' && diagnostics.length === 2) {
         throw new Error('error listener failure')
       }
       if (diagnostics.some(({ type }) => type === 'fatal')) { resolve(err) }
@@ -455,7 +583,15 @@ for (const mode of ['conflict rollback', 'disk full', 'rollback cleanup', 'relea
 
     const original = originals.get(leader.id)
     t.ok(original, 'the application receives the original thrown error')
-    const first = diagnostics[0]
+    t.equal(warnings.length, 1, 'the failed item emits one local warning')
+    t.equal(diagnostics[0].type, 'warn', 'the warning precedes all cleanup diagnostics')
+    t.deepEqual([warnings[0].message, warnings[0].code, warnings[0].sqlCode],
+      [original.message, APPLY_ERROR,
+        mode === 'disk full' ? 13 : mode === 'conflict rollback' ? 1555 : null],
+      'the warning retains its application classification, original message and SQLite code')
+    t.equal(warnings[0].stack, original.stack, 'the warning retains the original stack')
+    const first = diagnostics[1]
+    t.notEqual(warnings[0], first.err, 'later error handling uses a separate error object')
     t.equal(first.type, transactionLost ? 'fatal' : 'error',
       transactionLost
         ? 'the original error directly enters fatal shutdown'
@@ -471,9 +607,10 @@ for (const mode of ['conflict rollback', 'disk full', 'rollback cleanup', 'relea
       t.equal(first.err.sqlCode, mode === 'disk full' ? 13 : 1555,
         'the original SQLite error code is preserved')
       t.deepEqual(diagnostics, [
+        { type: 'warn', err: warnings[0] },
         { type: 'fatal', err: fatal },
         { type: 'error', err: fatal },
-      ], 'only the original error is reported through fatal and error events')
+      ], 'the warning is followed by the original error through fatal and error events')
       t.deepEqual(cleanupSql, [], 'no SQL cleanup is attempted after the transaction ended')
     } else {
       t.notEqual(fatal, first.err, 'cleanup failure retains its separate fatal diagnostic')

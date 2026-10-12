@@ -194,18 +194,34 @@ test('node configuration requires a viable fixed cluster', (t) => {
 })
 
 test('node timeouts require positive integers', (t) => {
-  for (const name of ['electionTimeout', 'pingTimeout', 'appendTimeout']) {
+  for (const [name, minimum] of [['electionTimeout', 10], ['appendTimeout', 1]]) {
     for (const value of [undefined, null, false, 0, -1, 1.5, NaN, Infinity,
-      '100', 100n]) {
+      '100', 100n, minimum - 1]) {
       const err = thrown(() => new RaftNode('1', ids, () => {}, {}, { [name]: value }))
       t.equal(err?.code, ARGUMENT_ILLEGAL, `${name} rejects ${String(value)}`)
       t.match(err?.message ?? '', new RegExp(name), 'error identifies the option')
     }
-    for (const value of [1, 2_147_483_648, Number.MAX_SAFE_INTEGER]) {
+    for (const value of [minimum, 2_147_483_648, Number.MAX_SAFE_INTEGER]) {
       const node = new RaftNode('1', ids, () => {}, {}, { [name]: value })
-      t.equal(node.opts[name], value, `${name} accepts positive integer ${value}`)
+      t.equal(node.opts[name], value, `${name} accepts integer ${value}`)
     }
   }
+  t.end()
+})
+
+test('every node timer derives from electionTimeout', (t) => {
+  const node = new RaftNode('1', ids, () => {}, {}, {
+    electionTimeout: 1_000,
+    pingTimeout: 'ignored',
+  })
+  t.deepEqual(node._timers, {
+    election: 1_000,
+    heartbeat: 300,
+    retry: 100,
+    append: 1_500,
+  }, 'timers scale with electionTimeout except the default appendTimeout')
+  t.equal(new RaftNode('1', ids, () => {}, {}, { electionTimeout: 10 })._timers.retry, 2,
+    'the retry delay has a 2 ms floor')
   t.end()
 })
 
@@ -288,7 +304,6 @@ test('vote persistence completes before change and transport callbacks', async (
   }
   node = new RaftNode('1', ids, send, log, {
     electionTimeout: 60_000,
-    pingTimeout: 60_000,
   })
   node.open()
   node._stopTimers()
@@ -325,7 +340,6 @@ test('a vote response precedes a change listener that closes the node', async (t
   const sent = []
   const node = new RaftNode('1', ids, (to, msg) => sent.push([to, msg]), log, {
     electionTimeout: 60_000,
-    pingTimeout: 60_000,
   })
   node.open()
   node._stopTimers()
@@ -353,7 +367,6 @@ test('plain Raft open starts the protocol automatically', (t) => {
   const log = lifecycleLog()
   const node = new RaftNode('1', ids, () => {}, log, {
     electionTimeout: 60_000,
-    pingTimeout: 60_000,
   })
   const changes = []
   node.on('change', (change) => changes.push(change.open))
@@ -383,7 +396,6 @@ test('deferred Raft open keeps DB1 inactive until explicit start', (t) => {
   const node = new DeferredRaftNode('1', ids,
     (to, msg) => sent.push([to, msg]), log, {
       electionTimeout: 60_000,
-      pingTimeout: 60_000,
     })
   const changes = []
   node.on('change', (change) => changes.push(change.open))
@@ -417,7 +429,6 @@ test('deferred Raft open keeps DB1 inactive until explicit start', (t) => {
 test('Raft cannot start with a closed log', (t) => {
   const node = new DeferredRaftNode('1', ids, () => {}, lifecycleLog(), {
     electionTimeout: 60_000,
-    pingTimeout: 60_000,
   })
 
   const err = thrown(() => node._startRaft())
@@ -432,7 +443,6 @@ test('close before deferred start closes DB1 and rejects later start or open', (
   const log = lifecycleLog()
   const node = new DeferredRaftNode('1', ids, () => {}, log, {
     electionTimeout: 60_000,
-    pingTimeout: 60_000,
   })
   const changes = []
   node.on('change', (change) => changes.push(change.open))
@@ -461,7 +471,6 @@ test('failed open requires a fresh node instance', (t) => {
   const log = lifecycleLog()
   const node = new FailingRaftNode('1', ids, () => {}, log, {
     electionTimeout: 60_000,
-    pingTimeout: 60_000,
   })
 
   const failed = thrown(() => node.open())
@@ -477,7 +486,6 @@ test('failed open requires a fresh node instance', (t) => {
   const replacementLog = lifecycleLog()
   const replacement = new RaftNode('1', ids, () => {}, replacementLog, {
     electionTimeout: 60_000,
-    pingTimeout: 60_000,
   })
   replacement.open()
   t.ok(replacement.isOpen, 'the fresh instance starts Raft')
@@ -506,7 +514,6 @@ test('failed open cleanup is attempted once until caller invokes close again', a
   }
   const node = new FailingRaftNode('1', ids, () => {}, log, {
     electionTimeout: 60_000,
-    pingTimeout: 60_000,
   })
   const fatals = []
   const errors = []
@@ -552,7 +559,6 @@ test('open change listener can close without duplicate cleanup', async (t) => {
   }
   const node = new RaftNode('1', ids, () => {}, log, {
     electionTimeout: 60_000,
-    pingTimeout: 60_000,
   })
   const changes = []
   const storageAtClosedChange = []
@@ -582,7 +588,6 @@ test('_stopRaft resets protocol state before one closed publication', (t) => {
   const log = lifecycleLog()
   const node = new RaftNode('1', ids, () => {}, log, {
     electionTimeout: 60_000,
-    pingTimeout: 60_000,
   })
   const changes = []
   const storageAtClosedChange = []
@@ -678,7 +683,6 @@ test('node lifecycle calls are idempotent', (t) => {
   const log = lifecycleLog()
   const node = new RaftNode('1', ids, () => {}, log, {
     electionTimeout: 60_000,
-    pingTimeout: 60_000,
   })
   const changes = []
   node.on('change', (change) => changes.push(change))
@@ -707,7 +711,6 @@ test('node lifecycle calls are idempotent', (t) => {
 test('later change listeners run after an earlier listener throws', (t) => {
   const node = new RaftNode('1', ids, () => {}, lifecycleLog(), {
     electionTimeout: 60_000,
-    pingTimeout: 60_000,
   })
   const failure = new Error('change listener failure')
   const errors = []
@@ -820,7 +823,6 @@ test('close rejects and detaches pending public waiters without waiting for them
   const log = lifecycleLog()
   const node = new RaftNode('1', ids, () => {}, log, {
     electionTimeout: 60_000,
-    pingTimeout: 60_000,
   })
   node.open()
 
@@ -864,14 +866,14 @@ test('shutdown clears quorum deadlines with only one available follower', async 
         if (blocked && msg.type === 'append' && msg.data) { return }
         return nodes.get(to)?.onReceive(id, msg)
       }, ':memory:', {
-        electionTimeout: id === '1' ? 20 : 60_000,
-        pingTimeout: 60_000,
+        electionTimeout: 60_000,
         appendTimeout,
       })
       node.on('error', (err) => errors.push(err))
       nodes.set(id, node)
     }
     for (const node of nodes.values()) { node.open() }
+    nodes.get('1')._voteForSelf()
     await Promise.all([...nodes.values()].map((node) => node.awaitLeader(true)))
     await new Promise(setImmediate)
     const leader = nodes.get('1')
@@ -965,7 +967,6 @@ test('close before first open makes later open calls fail', (t) => {
   const log = lifecycleLog()
   const node = new RaftNode('1', ids, () => {}, log, {
     electionTimeout: 60_000,
-    pingTimeout: 60_000,
   })
 
   node.close()
@@ -988,7 +989,6 @@ test('open remains permanently rejected after a successful close', (t) => {
   const log = lifecycleLog()
   const node = new RaftNode('1', ids, () => {}, log, {
     electionTimeout: 60_000,
-    pingTimeout: 60_000,
   })
 
   node.open()
@@ -1020,7 +1020,6 @@ test('fatal errors close synchronously and report after the closed change', asyn
   }
   const node = new RaftNode('1', ids, () => {}, log, {
     electionTimeout: 60_000,
-    pingTimeout: 60_000,
   })
   const errors = []
   const fatals = []
@@ -1132,7 +1131,6 @@ test('close failure remains terminal while allowing storage cleanup retry', (t) 
   }
   const node = new RaftNode('1', ids, () => {}, log, {
     electionTimeout: 60_000,
-    pingTimeout: 60_000,
   })
 
   node.open()
@@ -1165,7 +1163,6 @@ test('received responses advance only valid newer terms', async (t) => {
   const log = lifecycleLog()
   const node = new RaftNode('1', ids, () => {}, log, {
     electionTimeout: 60_000,
-    pingTimeout: 60_000,
   })
   node.open()
   node.state = 'leader'
@@ -1191,7 +1188,6 @@ test('closed nodes discard messages before term handling', async (t) => {
   const log = lifecycleLog()
   const node = new RaftNode('1', ids, () => {}, log, {
     electionTimeout: 60_000,
-    pingTimeout: 60_000,
   })
   node.open()
   node.close()
@@ -1209,7 +1205,6 @@ test('received response callback failure is fatal and consumed', async (t) => {
   const log = lifecycleLog()
   const node = new RaftNode('1', ids, () => {}, log, {
     electionTimeout: 60_000,
-    pingTimeout: 60_000,
   })
   const fatals = []
   node.on('fatal', (err) => fatals.push(err))
@@ -1235,7 +1230,6 @@ test('messages from unknown node ids are ignored', async (t) => {
   const log = lifecycleLog()
   const node = new RaftNode('1', ids, () => {}, log, {
     electionTimeout: 60_000,
-    pingTimeout: 60_000,
   })
   node.open()
   node.state = 'candidate'
@@ -1256,7 +1250,6 @@ test('malformed message values and append payloads are ignored or rejected', asy
   const sent = []
   const node = new RaftNode('1', ids, (to, msg) => sent.push([to, msg]), log, {
     electionTimeout: 60_000,
-    pingTimeout: 60_000,
   })
   node.open()
 
@@ -1289,7 +1282,7 @@ test('malformed message values and append payloads are ignored or rejected', asy
   node.state = 'leader'
   node.leader = node.id
   await node.onReceive('2', {
-    type: 'append', cid: 'invalid-forward', term: 0n, data: { nope: true },
+    type: 'fwd_append', cid: 'invalid-forward', term: 0n, data: { nope: true },
   })
   t.equal(sent.length, 3, 'invalid forwarded append receives one reply')
   t.equal(sent[2][1].type, 'err', 'invalid forwarded append receives ERR')
@@ -1311,13 +1304,86 @@ test('malformed message values and append payloads are ignored or rejected', asy
   node.close()
 })
 
+test('append message types reject crossed payloads before changing state', async (t) => {
+  const log = lifecycleLog()
+  const sent = []
+  let writes = 0
+  log.appendBatch = () => { writes++ }
+  const node = new RaftNode('1', ids, (to, msg) => sent.push(msg), log, {
+    electionTimeout: 60_000,
+  })
+  t.teardown(() => node.close())
+  node.open()
+  node.state = 'leader'
+  node.leader = node.id
+  node._appendToSelfAndFollowers = () => {
+    writes++
+    return Promise.resolve([0n, null])
+  }
+  const before = () => [node.term, node.state, node.leader, log.seq, log.term,
+    log.head, log.elec.term, log.elec.votedFor]
+  const original = before()
+
+  for (const [label, fields] of [
+    ['legacy single', { type: 'append', data: Buffer.from('value') }],
+    ['legacy batch', { type: 'append', term: 4n, data: [Buffer.from('value')] }],
+    ['forward payload as replication', {
+      type: 'append', term: 4n, termP: -1n, seqP: -1n, commitSeq: -1n,
+      data: Buffer.from('value'),
+    }],
+    ['replication records as forward', {
+      type: 'fwd_append', termP: -1n, seqP: -1n, commitSeq: -1n,
+      data: [{ term: 0n, entry: Buffer.from('value') }],
+    }],
+  ]) {
+    await node.onReceive('2', { term: 0n, cid: label, ...fields })
+    t.equal(sent.at(-1)?.type, 'err', `${label} receives an error`)
+    t.equal(sent.at(-1)?.code, RPC_ILLEGAL, `${label} is malformed`)
+    t.deepEqual(before(), original, `${label} leaves term, role, and log unchanged`)
+  }
+  t.equal(sent.length, 4, 'each malformed message receives exactly one response')
+  t.equal(writes, 0, 'no malformed message reaches an append path')
+})
+
+test('forwarded appends ignore extra replication fields', async (t) => {
+  const sent = []
+  const appended = []
+  const log = lifecycleLog()
+  const node = new RaftNode('1', ids, (to, msg) => sent.push(msg), log, {
+    electionTimeout: 60_000,
+  })
+  t.teardown(() => node.close())
+  node.open()
+  node.state = 'leader'
+  node.leader = node.id
+  node._appendToSelfAndFollowers = (data) => {
+    appended.push(data)
+    return Promise.resolve([3n, Array.isArray(data) ? ['one', 'two'] : 'one'])
+  }
+
+  for (const data of [Buffer.from('one'), [Buffer.from('one'), Buffer.from('two')]]) {
+    await node.onReceive('2', {
+      type: 'fwd_append', term: node.term, cid: `forward-extra-${sent.length}`, data,
+      termP: 7n, seqP: 99n, commitSeq: 99n,
+    })
+    await Promise.resolve()
+    t.equal(appended.at(-1), data, 'passes the original application payload onward')
+    t.equal(sent.at(-1)?.type, 'ack', 'responds through the forwarding handler')
+    t.equal(sent.at(-1)?.seq, 3n, 'preserves the resulting sequence')
+    t.deepEqual(sent.at(-1)?.results, Array.isArray(data) ? ['one', 'two'] : 'one',
+      'preserves the single or batch results')
+    t.equal(node.state, 'leader', 'extra termP does not make the leader step down')
+    t.equal(node.leader, node.id, 'does not adopt the forwarding node as leader')
+    t.equal(node.term, 0n, 'ignores the replication-only predecessor term')
+  }
+})
+
 test('Raft RPC handlers report different terms consistently', async (t) => {
   const log = lifecycleLog()
   const sent = []
   const node = new RaftNode('1', ids,
     (to, msg) => sent.push([to, msg]), log, {
       electionTimeout: 60_000,
-      pingTimeout: 60_000,
     })
   node.open()
   node.state = 'leader'
@@ -1325,7 +1391,7 @@ test('Raft RPC handlers report different terms consistently', async (t) => {
   node.term = 2n
 
   await node.onReceive('2', {
-    type: 'append', cid: 'append-term-diff', term: 1n,
+    type: 'fwd_append', cid: 'append-term-diff', term: 1n,
     data: Buffer.from('value'),
   })
   node.state = 'follower'
@@ -1336,15 +1402,15 @@ test('Raft RPC handlers report different terms consistently', async (t) => {
   })
   node.state = 'leader'
   node.leader = node.id
-  node._rxAppendToLeader({
-    type: 'append', cid: 'append-term-greater', term: 3n,
+  await node.onReceive('2', {
+    type: 'fwd_append', cid: 'append-term-greater', term: 3n,
     data: Buffer.from('value'),
-  }, '2')
+  })
   t.equal(sent.length, 3, 'each different-term RPC receives one response')
   for (const [index, label, message] of [
     [0, 'forwarded append', 'term is lesser'],
     [1, 'AppendEntries', 'term is lesser'],
-    [2, 'misrouted higher-term append', 'higher term append routed to leader'],
+    [2, 'higher-term forwarded append', 'higher term append routed to leader'],
   ]) {
     t.equal(sent[index][1].type, 'err', `${label} receives ERR`)
     t.equal(sent[index][1].msg, message,
@@ -1362,7 +1428,6 @@ test('non-leaders reject forwarded appends with NOT_LEADER', async (t) => {
   const sent = []
   const node = new RaftNode('1', ids, (to, msg) => sent.push([to, msg]), log, {
     electionTimeout: 60_000,
-    pingTimeout: 60_000,
   })
   node.open()
 
@@ -1377,7 +1442,7 @@ test('non-leaders reject forwarded appends with NOT_LEADER', async (t) => {
     node.leader = leader
     sent.length = 0
     await node.onReceive('2', {
-      type: 'append', cid: `forward-${label}`, term, data: Buffer.from('value'),
+      type: 'fwd_append', cid: `forward-${label}`, term, data: Buffer.from('value'),
     })
     t.equal(sent.length, 1, `${label} replies once`)
     t.equal(sent[0]?.[1].type, 'err', `${label} replies with ERR`)
@@ -1396,7 +1461,6 @@ test('forwarded Raft handlers transmit normalized SQLite metadata', async (t) =>
   const node = new RaftNode('1', ids,
     (to, msg) => sent.push([to, msg]), log, {
       electionTimeout: 60_000,
-      pingTimeout: 60_000,
     })
   node.open()
   node.state = 'leader'
@@ -1408,7 +1472,7 @@ test('forwarded Raft handlers transmit normalized SQLite metadata', async (t) =>
   node._appendToSelfAndFollowers = () => Promise.reject(sqlite)
 
   await node.onReceive('2', {
-    type: 'append', term: node.term, cid: 'sqlite-forward',
+    type: 'fwd_append', term: node.term, cid: 'sqlite-forward',
     data: Buffer.from('value'),
   })
   await new Promise((resolve) => setImmediate(resolve))
@@ -1432,7 +1496,6 @@ test('candidate waits for a majority before becoming leader', async (t) => {
   const log = lifecycleLog()
   const node = new RaftNode('1', ids, () => {}, log, {
     electionTimeout: 60_000,
-    pingTimeout: 60_000,
   })
   node.open()
   node._leaderAppendNoOp = () => {}
@@ -1458,7 +1521,7 @@ test('candidate waits for a majority before becoming leader', async (t) => {
 
 test('current-term commit stops a scheduled leader no-op retry', async (t) => {
   const node = new RaftNode('1', ids, () => {}, lifecycleLog(), {
-    pingTimeout: 100,
+    electionTimeout: 100,
   })
   node._open = true
   node.state = 'leader'
@@ -1534,7 +1597,6 @@ test('awaitLeader with commit waits past a granted vote', async (t) => {
   const log = lifecycleLog()
   const node = new RaftNode('1', ids, () => {}, log, {
     electionTimeout: 60_000,
-    pingTimeout: 60_000,
   })
   node.open()
 
@@ -1586,7 +1648,6 @@ test('same-term AppendEntries discovers its leader directly', async (t) => {
   const sent = []
   const node = new RaftNode('1', ids, (to, msg) => sent.push([to, { ...msg }]), log, {
     electionTimeout: 60_000,
-    pingTimeout: 60_000,
   })
   node.open()
   node.state = 'candidate'
@@ -1616,7 +1677,6 @@ test('higher-term AppendEntries persists its term and continues', async (t) => {
   const sent = []
   const node = new RaftNode('1', ids, (to, msg) => sent.push([to, { ...msg }]), log, {
     electionTimeout: 60_000,
-    pingTimeout: 60_000,
   })
   node.open()
   node.state = 'candidate'
@@ -1657,7 +1717,6 @@ test('higher-term AppendEntries stops when election persistence fails', async (t
   const fatals = []
   const node = new RaftNode('1', ids, (to, msg) => sent.push([to, msg]), log, {
     electionTimeout: 60_000,
-    pingTimeout: 60_000,
   })
   node.on('fatal', (err) => fatals.push(err))
   const errored = new Promise((resolve) => node.once('error', resolve))
@@ -1686,7 +1745,6 @@ test('leader processes higher-term AppendEntries through the follower path', asy
   const sent = []
   const node = new RaftNode('1', ids, (to, msg) => sent.push([to, { ...msg }]), log, {
     electionTimeout: 60_000,
-    pingTimeout: 60_000,
   })
   node.open()
   node.state = 'leader'
@@ -1839,8 +1897,7 @@ test('synchronous transport shutdown prevents later correlated waits', async (t)
 test('ACK operation descriptors select timeout policy and error', async (t) => {
   const log = lifecycleLog()
   const node = new RaftNode('1', ids, () => {}, log, {
-    electionTimeout: 60_000,
-    pingTimeout: 31,
+    electionTimeout: 31_000,
     appendTimeout: 37,
   })
   node.open()
@@ -1849,8 +1906,9 @@ test('ACK operation descriptors select timeout policy and error', async (t) => {
   const delays = []
   const errors = []
   const cases = [
-    [ACK_OPERATION.PING, 'append', 31, PING_TIMEOUT, 'ping timeout'],
+    [ACK_OPERATION.PING, 'append', 31_000, PING_TIMEOUT, 'ping timeout'],
     [ACK_OPERATION.APPEND, 'append', 37, APPEND_TIMEOUT, 'append timeout'],
+    [ACK_OPERATION.APPEND, 'fwd_append', 37, APPEND_TIMEOUT, 'append timeout'],
   ]
   global.setTimeout = (fn, ms, ...args) => {
     delays.push(ms)
@@ -1873,8 +1931,8 @@ test('ACK operation descriptors select timeout policy and error', async (t) => {
     global.setTimeout = originalSetTimeout
   }
 
-  t.deepEqual(delays, [31, 37],
-    'descriptors select ping and append timeout options')
+  t.deepEqual(delays, [31_000, 37, 37],
+    'descriptors select the quorum timer and the append timeout')
   t.equal(new Set(errors).size, cases.length,
     'each timeout receives a fresh error instance')
   t.ok(Object.isFrozen(ACK_OPERATION), 'descriptor enum is frozen')
@@ -1890,7 +1948,6 @@ test('leader discovers a returning follower from its ACK', async (t) => {
   const sent = []
   const node = new RaftNode('1', ids, (to, msg) => sent.push([to, msg]), log, {
     electionTimeout: 60_000,
-    pingTimeout: 60_000,
   })
   node.open()
   node.state = 'leader'
@@ -1919,7 +1976,6 @@ test('ACK post-processing reports the not-open precondition', async (t) => {
   const log = lifecycleLog()
   const node = new RaftNode('1', ids, () => {}, log, {
     electionTimeout: 60_000,
-    pingTimeout: 60_000,
   })
   node.open()
 
@@ -1946,7 +2002,6 @@ test('malformed and lower-term correlated ACKs are ignored', async (t) => {
   const log = lifecycleLog()
   const node = new RaftNode('1', ids, () => {}, log, {
     electionTimeout: 60_000,
-    pingTimeout: 60_000,
   })
   node.open()
   node.state = 'leader'
@@ -1983,6 +2038,69 @@ test('malformed and lower-term correlated ACKs are ignored', async (t) => {
   node.close()
 })
 
+test('forwarded ACKs require valid sequence and their own results field', async (t) => {
+  const log = lifecycleLog()
+  const node = new RaftNode('1', ids, () => {}, log, {
+    electionTimeout: 60_000,
+    appendTimeout: 60_000,
+  })
+  t.teardown(() => node.close())
+  node.open()
+  node.term = 1n
+  const cid = 'forward-ack-validation'
+  const pending = node._sendAndAwaitAck('2', {
+    type: 'fwd_append', term: node.term, cid, termP: -1n,
+    data: Buffer.from('value'),
+  }, ACK_OPERATION.APPEND)
+  for (const [label, fields] of [
+    ['missing results', {}],
+    ['inherited results', Object.create({ results: 'inherited' })],
+    ['negative sequence', { seq: -1n, results: null }],
+    ['non-bigint sequence', { seq: 0, results: null }],
+    ['invalid term', { term: null, results: null }],
+    ['lower term', { term: 0n, results: null }],
+  ]) {
+    const response = Object.assign(fields, { type: 'ack', cid })
+    if (!Object.hasOwn(response, 'term')) { response.term = node.term }
+    if (!Object.hasOwn(response, 'seq')) { response.seq = 0n }
+    await node.onReceive('2', response)
+    t.ok(node._acks.has(cid), `${label} leaves the response waiter active`)
+    t.notOk(node._pongs.has('2'), `${label} does not refresh liveness`)
+  }
+
+  const response = { type: 'ack', cid, term: node.term, seq: 0n, results: undefined }
+  await node.onReceive('2', response)
+  t.equal(await pending, response, 'an own undefined result is a valid command result')
+  t.equal(node._acks.size, 0, 'the valid response removes its waiter')
+  t.ok(node._pongs.has('2'), 'the valid response refreshes liveness')
+
+  const replication = node._sendAndAwaitAck('2', {
+    type: 'append', term: node.term, cid: 'replication-ack-validation',
+  }, ACK_OPERATION.APPEND)
+  const replicated = {
+    type: 'ack', cid: 'replication-ack-validation', term: node.term, seq: 0n,
+  }
+  await node.onReceive('2', replicated)
+  t.equal(await replication, replicated,
+    'APPEND accepts an ACK without results regardless of request termP')
+})
+
+test('shutdown cancels a forwarded append response wait', async (t) => {
+  const sent = []
+  const node = new RaftNode('1', ids, (to, msg) => sent.push(msg), lifecycleLog(), {
+    electionTimeout: 60_000,
+    appendTimeout: 60_000,
+  })
+  node.open()
+  node.leader = '2'
+  const pending = rejection(node.append(Buffer.from('value')))
+  t.equal(sent[0]?.type, 'fwd_append', 'uses the forwarding message type')
+  t.equal(node._acks.size, 1, 'registers the forwarded response waiter')
+  node.close()
+  t.equal((await pending)?.code, NODE_NOT_OPEN, 'shutdown rejects the forwarded call')
+  t.equal(node._acks.size, 0, 'shutdown removes the response waiter')
+})
+
 test('forwarded result survives a term change before ACK post-processing', async (t) => {
   const sent = []
   const node = new RaftNode('1', ids, (to, msg) => sent.push(msg), lifecycleLog(), {
@@ -2008,7 +2126,6 @@ test('higher-term correlated ACK reaches its caller after stepdown', async (t) =
   const log = lifecycleLog()
   const node = new RaftNode('1', ids, () => {}, log, {
     electionTimeout: 60_000,
-    pingTimeout: 60_000,
   })
   node.open()
   node.state = 'leader'
@@ -2163,6 +2280,67 @@ test('forwarded Raft errors normalize missing metadata by operation', async (t) 
   node.close()
 })
 
+test('backtrack errors accept only valid log-head hints from the requested term', async (t) => {
+  const node = new RaftNode('1', ids, () => {}, lifecycleLog(), {
+    electionTimeout: 60_000,
+    appendTimeout: 60_000,
+  })
+  t.teardown(() => node.close())
+  node.open()
+  const maxSeq = 9_223_372_036_854_775_807n
+  const stack = 'Error: predecessor missing\n    at remoteAppend (/remote/node.js:10:3)'
+  const cases = [
+    ['empty log', { logSeq: -1n }, -1n],
+    ['genesis only', { logSeq: 0n }, 0n],
+    ['maximum sequence', { logSeq: maxSeq }, maxSeq],
+    ['absent hint', {}, undefined],
+    ['null hint', { logSeq: null }, undefined],
+    ['number hint', { logSeq: 0 }, undefined],
+    ['string hint', { logSeq: '0' }, undefined],
+    ['below empty sentinel', { logSeq: -2n }, undefined],
+    ['above maximum sequence', { logSeq: maxSeq + 1n }, undefined],
+  ]
+  for (const [label, fields, expected] of cases) {
+    const pending = rejection(node._sendAndAwaitAck('2', {
+      type: 'append', term: node.term, cid: label,
+    }, ACK_OPERATION.APPEND))
+    await node.onReceive('2', {
+      type: 'err', term: node.term, cid: label, msg: 'predecessor missing',
+      code: REPL_BACKTRACK, sqlCode: null, stack, ...fields,
+    })
+    const err = await pending
+    t.equal(Object.hasOwn(err, 'logSeq'), expected !== undefined,
+      `${label}: keeps only valid sequence hints`)
+    t.equal(err.logSeq, expected, `${label}: preserves the exact hint value`)
+    t.deepEqual([err.message, err.code, err.sqlCode, err.stack],
+      ['append ERR predecessor missing', REPL_BACKTRACK, null, stack],
+      `${label}: leaves the normalized error and remote stack intact`)
+  }
+
+  for (const [label, type, code, requestTerm, responseTerm, currentTerm] of [
+    ['forwarded error', 'fwd_append', REPL_BACKTRACK, 3n, 3n, 3n],
+    ['other error code', 'append', TERM_DIFF, 3n, 3n, 3n],
+    ['response older than request', 'append', REPL_BACKTRACK, 3n, 2n, 3n],
+    ['response newer than request', 'append', REPL_BACKTRACK, 3n, 4n, 3n],
+    ['request older than current term', 'append', REPL_BACKTRACK, 3n, 4n, 4n],
+    ['response older than current term', 'append', REPL_BACKTRACK, 3n, 3n, 4n],
+  ]) {
+    node.term = currentTerm
+    const pending = rejection(node._sendAndAwaitAck('2', {
+      type, term: requestTerm, cid: label,
+    }, ACK_OPERATION.APPEND))
+    await node.onReceive('2', {
+      type: 'err', term: responseTerm, cid: label, msg: 'rejected',
+      code, sqlCode: null, logSeq: 7n,
+    })
+    const err = await pending
+    t.equal(err.code, code, `${label}: retains the remote error code`)
+    t.notOk(Object.hasOwn(err, 'logSeq'), `${label}: ignores the hint`)
+  }
+  t.equal(node._acks.size, 0, 'all error responses settle their waiters')
+  t.equal(node._pongs.size, 0, 'error responses do not refresh liveness')
+})
+
 test('forwarding requires a known leader', async (t) => {
   const node = new RaftNode('1', ids, () => {}, lifecycleLog())
   const appendErr = await rejection(node._fwdToLeader(Buffer.from('data')))
@@ -2203,7 +2381,6 @@ test('duplicate votes do not restore other pruned followers', async (t) => {
   const log = lifecycleLog()
   const node = new RaftNode('1', ids, () => {}, log, {
     electionTimeout: 60_000,
-    pingTimeout: 60_000,
   })
   node.open()
   node.state = 'leader'
@@ -2223,7 +2400,6 @@ test('append and appendBatch validate their input', async (t) => {
   const log = lifecycleLog()
   const node = new RaftNode('1', ids, () => {}, log, {
     electionTimeout: 60_000,
-    pingTimeout: 60_000,
   })
   node.open()
 
@@ -2258,7 +2434,6 @@ test('payloads above MAX_SQLITE_BYTES are rejected before any log write', async 
   const sent = []
   const node = new RaftNode('1', ids, (to, msg) => sent.push([to, msg]), log, {
     electionTimeout: 60_000,
-    pingTimeout: 60_000,
   })
   node.open()
   const oversized = Buffer.allocUnsafe(MAX_SQLITE_BYTES + 1)
@@ -2279,7 +2454,7 @@ test('payloads above MAX_SQLITE_BYTES are rejected before any log write', async 
   node.state = 'leader'
   node.leader = node.id
   await node.onReceive('2', {
-    type: 'append', cid: 'oversized-forward', term: node.term, data: oversized,
+    type: 'fwd_append', cid: 'oversized-forward', term: node.term, data: oversized,
   })
   t.equal(sent.at(-1)?.[1].code, RPC_ILLEGAL,
     'a leader rejects an oversized forwarded append as malformed')
@@ -2316,7 +2491,6 @@ test('close rejects pending ACK waiters', async (t) => {
   const log = lifecycleLog()
   const node = new RaftNode('1', ids, () => {}, log, {
     electionTimeout: 60_000,
-    pingTimeout: 60_000,
     appendTimeout: 60_000,
   })
   node.open()

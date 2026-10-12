@@ -282,7 +282,7 @@ test('leader publishes follower removal and a single step-down change', async (t
   const down = new Set()
   const allowSend = (to, from) => !down.has(to) && !down.has(from)
   const coms = comms(allowSend)
-  const nodes = connect(coms, 3, null, { pingTimeout: 300 })
+  const nodes = connect(coms, 3, null, { electionTimeout: 300 })
   await reset(nodes)
   open(nodes)
   t.equal(await readyWithin(nodes, 10_000), 'ready', 'cluster elects a leader')
@@ -314,7 +314,7 @@ test('a leader that stepped down rejects a forwarded append with NOT_LEADER', as
   let dropAcksTo = null
   const allowSend = (to, from, msg) => !(to === dropAcksTo && msg.type === 'ack')
   const coms = comms(allowSend)
-  const nodes = connect(coms, 3, null, { pingTimeout: 300 })
+  const nodes = connect(coms, 3, null, { electionTimeout: 300 })
   await reset(nodes)
   open(nodes)
   t.equal(await readyWithin(nodes, 10_000), 'ready', 'cluster elects a leader')

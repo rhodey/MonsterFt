@@ -246,8 +246,7 @@ const makeFixture = (t, name) => {
       const send = (to, msg) => bus.send(to, id, msg)
       let node = null
       node = new MonsterFt(id, members, send, paths.get(id), {
-        electionTimeout: 60_000,
-        pingTimeout: 250,
+        electionTimeout: 250,
         appendTimeout: 5_000,
         quorum: 2,
         ...opts,
@@ -275,6 +274,8 @@ const makeFixture = (t, name) => {
           return apply(conn, current, buf, term, seq, index, matchIndex)
         },
       })
+      // Tests elect leaders explicitly.
+      node._timers.election = 60_000
       node.on('error', noop)
       node.on('warn', noop)
       bus.register(node)
@@ -1111,9 +1112,9 @@ test('MonsterFt decides as soon as delayed follower outcomes arrive', async (t) 
     for (const timer of deliveries) { clearTimeout(timer) }
   })
   // Delayed delivery makes each outcome arrive after the leader's first
-  // check, and pingTimeout 10s sets the leader's retry interval to 1.5s.
+  // check, and electionTimeout 15s sets the leader's retry interval to 1.5s.
   cluster = fixture.build({
-    opts: { pingTimeout: 10_000 },
+    opts: { electionTimeout: 15_000 },
     intercept: (to, from, msg) => {
       const timer = setTimeout(() => {
         deliveries.delete(timer)
@@ -1277,6 +1278,12 @@ test('MonsterFt rejects application results that MessagePack cannot encode',
         return unencodable(cmd.key)
       },
     })
+    const warnings = new Map(cluster.nodes.map((node) => [node.id, []]))
+    const errors = []
+    for (const node of cluster.nodes) {
+      node.on('warn', (err) => warnings.get(node.id).push(err))
+      node.on('error', (err) => errors.push(err))
+    }
     const leader = await openAndElect(cluster)
     const follower = followers(cluster.nodes)[0]
     const kinds = ['large-bigint', 'symbol', 'circular']
@@ -1298,6 +1305,16 @@ test('MonsterFt rejects application results that MessagePack cannot encode',
     }
     const { syncSeq } = await batchSynced
     await waitApplied(cluster.nodes, syncSeq)
+    for (const node of cluster.nodes) {
+      const reported = warnings.get(node.id)
+      t.equal(reported.length, kinds.length,
+        `node ${node.id} warns once per unencodable item`)
+      t.ok(reported.every((err) => err instanceof ErrorWithCode &&
+        err.code === APPLY_ERROR && err.sqlCode === null &&
+        err.message === 'apply result is not MessagePack-encodable' &&
+        err.stack.includes('assertEncodable')),
+      `node ${node.id} preserves the encoding error details and trace`)
+    }
     for (const kind of kinds) {
       t.deepEqual(cluster.nodes.map((node) => valueAt(node, kind)), [null, null, null],
         `${kind} item writes are rolled back on every replica`)
@@ -1306,15 +1323,20 @@ test('MonsterFt rejects application results that MessagePack cannot encode',
       'later items in the batch commit on every replica')
     t.ok(cluster.nodes.every((node) => node.isOpen), 'every replica remains open')
 
+    const forwardedSynced = nextEvent(leader, 'sync')
     const forwarded = await rejects(t, follower.append(toBuf({
       op: 'unencodable', key: 'large-bigint',
     })), /not MessagePack-encodable/,
     'a forwarded unencodable result rejects the caller')
     t.equal(forwarded.code, APPLY_ERROR, 'the forwarded rejection uses APPLY_ERROR')
+    await waitApplied(cluster.nodes, (await forwardedSynced).syncSeq)
 
     const [, later] = await leader.append(toBuf({ op: 'get', key: 'before' }))
     t.deepEqual(later, { key: 'before', value: 1 },
       'the cluster accepts later commands')
+    t.deepEqual([...warnings.values()].map((reported) => reported.length), [4, 4, 4],
+      'forwarding adds one local warning per node and successful items add none')
+    t.deepEqual(errors, [], 'agreed encoding rejections require no repair errors')
   })
 
 test('MonsterFt rejects commands too large to store without stepping down',

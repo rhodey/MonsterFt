@@ -177,8 +177,7 @@ const makeFixture = (t, name) => {
         },
         paths.get(id),
         {
-          electionTimeout: 60_000,
-          pingTimeout: 150,
+          electionTimeout: 150,
           appendTimeout: 2_000,
           quorum: 2,
           ...opts,
@@ -201,6 +200,8 @@ const makeFixture = (t, name) => {
           },
         },
       )
+      // Tests elect leaders explicitly.
+      node._timers.election = 60_000
       node.on('error', noop)
       node.on('warn', noop)
 

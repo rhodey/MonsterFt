@@ -34,28 +34,16 @@ is recorded.
 
 ## `constructor`
 
-Normalizes options; validates the membership array, quorum, timeouts, batch
-limits, and callbacks; and creates the SQLite log. Wraps the transport to
-attach the sender ID and to report synchronous or asynchronous send failures
-as warnings. Then initializes election, replication, application, and
-shutdown state and the fatal-error handler.
+Validates node configuration and initializes the log, transport, and Raft
+state. Establishes transport-error reporting and fatal shutdown handling.
 
 ### findings
 
-- **Deferred: heartbeat frequency is independent of the election timeout.**
-  Leaders send heartbeats every `0.3 * pingTimeout`. Followers campaign after
-  `electionTimeout` plus up to 20 percent jitter, which disappears below a
-  5 ms election timeout. Each value is validated independently, so a
-  heartbeat interval longer than the election timeout is accepted.
-  Leadership then churns. For example, `electionTimeout: 300` with
-  `pingTimeout: 3000` changed leaders 9-13 times in six seconds, although
-  appends still succeeded. Nodes may also use different settings. Decision:
-  timeout selection is left to the user for now.
 - **Deferred: an explicit `undefined` does not select a default.**
-  `{ ...defaults, ...opts }` keeps it, so `electionTimeout`, `pingTimeout`,
-  `appendTimeout`, `rpcMax`, `rpcMaxBytes`, `applyMax`, and SQLiteLog's
-  `iterStepSize` throw `ARGUMENT_ILLEGAL`. `apply` and `quorum` do fall back
-  to their defaults. Decision: valid, but not a current focus.
+  `{ ...defaults, ...opts }` keeps it, so `electionTimeout`, `appendTimeout`,
+  `rpcMax`, `rpcMaxBytes`, `applyMax`, and SQLiteLog's `iterStepSize` throw
+  `ARGUMENT_ILLEGAL`. `apply` and `quorum` do fall back to their defaults.
+  Decision: valid, but not a current focus.
 
 ## `_throwIfClosing`
 
@@ -67,9 +55,8 @@ None.
 
 ## `_emitSafe`
 
-Calls each listener for an event separately and catches its exception, so
-later listeners still run. Attempts to emit each listener failure as an
-`error` event and suppresses exceptions from that fallback emission.
+Emits an event without letting a listener's exception prevent delivery to
+later listeners. Reports listener failures as error events.
 
 ### findings
 
@@ -77,9 +64,7 @@ None.
 
 ## `_change`
 
-Builds a description of the node's identity, membership, leadership,
-followers, term, and open state, copying the membership and follower arrays.
-Emits it as a `change` event.
+Emits a `change` event describing the node's current state.
 
 ### findings
 
@@ -95,9 +80,8 @@ None.
 
 ## `_isQuorum`
 
-Counts distinct supplied node IDs, defaulting to the current followers, and
-includes the local node when it is a candidate or leader. Returns whether
-that count reaches the configured quorum.
+Checks whether the supplied peers and eligible local node form a quorum.
+Defaults to the current followers.
 
 ### findings
 
@@ -105,9 +89,7 @@ None.
 
 ## `_isQuorumErr`
 
-Counts distinct failed remote node IDs and checks whether the remaining
-cluster members could still form a quorum. Returns true when the failures
-make quorum impossible.
+Checks whether the supplied peer failures make quorum impossible.
 
 ### findings
 
@@ -115,9 +97,8 @@ None.
 
 ## `_persistElection`
 
-Persists the current term and vote only when they differ from the log's
-cached election record. Emits a fatal error and returns false on persistence
-failure, otherwise returning true.
+Saves the current election term and vote when they have changed. Returns
+whether persistence succeeded, reporting failure as fatal.
 
 ### findings
 
@@ -125,9 +106,7 @@ None.
 
 ## `_replyVote`
 
-Sends a vote response unless shutdown has started, ensuring a granted vote
-is persisted before sending it. Returns whether the response was handed to
-the transport wrapper.
+Replies to a vote request only after ensuring any granted vote is durable.
 
 ### findings
 
@@ -135,10 +114,8 @@ None.
 
 ## `_raceShutdown`
 
-Races an operation against shutdown, delaying shutdown rejection until the
-next immediate callback so the operation can surface a more specific
-result. Removes its shutdown registration and scheduled callback when the
-race settles.
+Cancels an operation's wait on shutdown while allowing an already-completing
+operation to surface its more specific result.
 
 ### findings
 
@@ -146,8 +123,7 @@ None.
 
 ## `_delay`
 
-Creates a timer-based delay that rejects when shutdown wins the race.
-Clears the timer when the wait settles.
+Waits for a delay, rejecting if shutdown begins first.
 
 ### findings
 
@@ -155,10 +131,8 @@ None.
 
 ## `_awaitResponse`
 
-Registers a response callback by correlation ID and accepts only ACK or ERR
-messages from the expected peer that pass any supplied validator. Resolves
-with the response or rejects on cancellation or deadline failure, removing
-the registration when settled.
+Waits for a valid response from the expected peer to a particular request.
+Rejects on cancellation or deadline failure.
 
 ### findings
 
@@ -166,9 +140,8 @@ None.
 
 ## `_sendAndAwaitResponse`
 
-Rejects calls made after shutdown has begun. Otherwise creates an operation
-deadline and registers the response waiter before sending the RPC, converts a
-timeout into the supplied error, and clears the timer when the wait settles.
+Sends an RPC and waits for its response within the supplied timeout. Rejects
+new requests after shutdown begins.
 
 ### findings
 
@@ -176,10 +149,9 @@ None.
 
 ## `_sendAndAwaitAck`
 
-Adds operation-specific timeouts and validation for ping, replication, and
-forwarded-append responses. Converts ERR replies into coded errors. When the
-reply matches both the request term and current local term, it records peer
-activity and, while leading, adds the peer to the follower list.
+Sends ping, replication, or forwarded-append requests and validates their
+acknowledgements. Reports RPC errors and updates peer liveness for replies
+in the current term.
 
 ### findings
 
@@ -187,9 +159,7 @@ None.
 
 ## `_subscribeApply`
 
-Creates a waiter for the application results of an inclusive sequence range,
-with a result slot for each entry. Registers it with the node and removes it
-when its promise settles.
+Creates a waiter for application results covering an inclusive sequence range.
 
 ### findings
 
@@ -197,9 +167,7 @@ None.
 
 ## `_routeApply`
 
-Distributes a batch of application results to waiters whose sequence ranges
-overlap it. Fills each result slot once and resolves a waiter when all of its
-results have arrived.
+Delivers application results to matching waiters and resolves completed waits.
 
 ### findings
 
@@ -223,13 +191,9 @@ None.
 
 ## `_apply`
 
-Serializes application work through `_applyPrev` and reads committed entries
-in batches up to the requested boundary, fetching no more log rows than the
-batch applies. Calls the configured application function with payloads,
-sequences, and terms, representing no-ops as null payloads. Validates the
-result array against the batch's own length, advances `_applySeq`, delivers
-results, and emits `apply`. Log failures, application failures, or an
-incomplete read reject application waiters and trigger fatal shutdown.
+Applies committed entries in order through the configured callback. Delivers
+results, advances the applied boundary, and emits `apply`. Failures reject
+application waiters and trigger fatal shutdown.
 
 ### findings
 
@@ -243,8 +207,7 @@ incomplete read reject application waiters and trigger fatal shutdown.
 
 ## `_beginLeaderReady`
 
-Creates and stores a new readiness waiter associated with the supplied
-leadership term.
+Creates a readiness waiter for the supplied leadership term.
 
 ### findings
 
@@ -260,8 +223,7 @@ None.
 
 ## `_replicationActive`
 
-Checks that a replication state has not been cancelled, the node is not
-closing, and it remains leader in that state's term.
+Checks whether peer replication remains valid for the current leadership.
 
 ### findings
 
@@ -269,9 +231,7 @@ None.
 
 ## `_replicationState`
 
-Returns an existing peer replication state for the requested term or creates
-a new one. Initializes its next and matched sequences, target, worker
-status, outstanding RPC identifier, and waiters.
+Returns or creates a peer's replication state for the requested term.
 
 ### findings
 
@@ -279,8 +239,7 @@ None.
 
 ## `_resolveReplicationWaiters`
 
-Resolves replication waiters whose requested end sequence has been reached
-by the peer's confirmed match index.
+Resolves waits for log ranges that a peer has confirmed replicated.
 
 ### findings
 
@@ -288,9 +247,7 @@ None.
 
 ## `_cancelReplicationState`
 
-Marks a peer's replication state cancelled and rejects its waiters. Also
-cancels its outstanding response wait when an RPC is registered. A cancelled
-state remains mapped for the rest of its term.
+Cancels a peer's replication work and rejects its pending waits.
 
 ### findings
 
@@ -298,8 +255,8 @@ None.
 
 ## `_cancelReplication`
 
-Cancels leadership readiness and all peer replication states with the
-supplied error, then clears the replication map.
+Cancels leadership readiness and all peer replication work with the supplied
+error.
 
 ### findings
 
@@ -307,9 +264,7 @@ None.
 
 ## `_reset`
 
-Cancels replication and clears volatile election, leadership, liveness,
-acknowledgement, commit, and commit-announcement state. Stops both Raft
-timers.
+Resets volatile Raft state and cancels timers and replication work.
 
 ### findings
 
@@ -317,10 +272,9 @@ None.
 
 ## `_toFollower`
 
-Returns immediately once shutdown has begun. Otherwise cancels leader
-replication work, switches to follower state, and records the supplied
-leader. Clears prior follower and vote tracking, stops heartbeats, optionally
-restarts the election timer, and optionally emits a state change.
+Transitions to follower state under the supplied leader, ending prior
+leadership work. Optionally restarts the election timer and announces the
+state change.
 
 ### findings
 
@@ -328,9 +282,8 @@ None.
 
 ## `_advanceTerm`
 
-Accepts only a valid term greater than the current term, clears the vote,
-and transitions to follower state. Persists the new election state and emits
-a change, returning whether the transition completed without shutdown.
+Adopts a higher term durably and becomes a follower. Returns whether the
+transition completed without shutdown.
 
 ### findings
 
@@ -338,10 +291,8 @@ None.
 
 ## `_pruneFollowers`
 
-Removes followers whose last recorded response has expired according to
-`pingTimeout`. Returns whether the remaining followers and local leader can
-still form a quorum. If followers were removed and quorum remains, it emits
-a `change` before returning.
+Removes inactive followers and reports whether quorum remains. Announces
+changes to the surviving follower set while quorum is available.
 
 ### findings
 
@@ -349,10 +300,7 @@ None.
 
 ## `_startElectionTimer`
 
-Schedules elections using a randomized delay above `electionTimeout`, and
-starts a new candidacy when leader activity has been absent long enough.
-Rechecks shutdown and leadership after the election attempt before arming
-the next timeout.
+Schedules election attempts when leader activity has been absent long enough.
 
 ### findings
 
@@ -360,8 +308,7 @@ None.
 
 ## `_startPingTimer`
 
-Replaces the heartbeat interval with one running at 30 percent of
-`pingTimeout` and immediately sends a round of heartbeats.
+Starts periodic heartbeats and sends an initial round immediately.
 
 ### findings
 
@@ -369,10 +316,8 @@ None.
 
 ## `_voteForSelf`
 
-Becomes a candidate in a new term, votes for itself, clears prior leadership
-tracking, and cancels replication. Persists the election state, emits the
-change, and sends vote requests carrying the local log's last term and
-sequence to the other nodes.
+Starts an election in a new term, durably votes for itself, and requests votes
+from the other members.
 
 ### findings
 
@@ -380,12 +325,8 @@ None.
 
 ## `_rxVoteRequest`
 
-Validates a vote request, adopts a higher term when necessary, and checks
-both voting eligibility and whether the candidate's log is sufficiently
-current. Adopting a higher term restarts the election timer only when a
-leader steps down. A granted vote records the candidate and restarts the
-timer. Election state is persisted and the reply is sent before the change
-is published.
+Evaluates a candidate's vote request against the local election state and log.
+Persists any election changes and replies with the decision.
 
 ### findings
 
@@ -393,11 +334,8 @@ None.
 
 ## `_rxVote`
 
-Processes valid vote responses, stepping down for a higher term and counting
-distinct granted votes in the current term. On reaching quorum, establishes
-leadership, initializes peer replication and readiness state, starts
-heartbeats, and appends the election no-op. Later granted votes can expand
-the follower list.
+Processes vote responses, becoming leader on quorum or stepping down for a
+higher term. Establishes replication and readiness for new leadership.
 
 ### findings
 
@@ -405,11 +343,8 @@ None.
 
 ## `_pingFollowers`
 
-Sends heartbeat APPEND messages containing the leader's log head and commit
-sequence to every other node, and starts catch-up work after successful
-responses. Stops the round if leadership changes during a send. Emits
-warnings for failed requests, expires inactive followers, and steps down if
-the remaining set cannot form a quorum.
+Sends heartbeats and initiates follower catch-up. Warns about failed requests
+and steps down if active followers no longer provide quorum.
 
 ### findings
 
@@ -417,10 +352,9 @@ None.
 
 ## `_checkCommit`
 
-Finds the highest sequence replicated by a quorum using live followers'
-match indexes and the local head. Advances the commit boundary only if that
-entry belongs to the current term. It then resolves leadership readiness,
-emits `commit`, and schedules application. Lookup failures are fatal.
+Advances the commit boundary when a current-term entry reaches replication
+quorum. Resolves leadership readiness, announces commitment, and starts
+application.
 
 ### findings
 
@@ -428,34 +362,17 @@ None.
 
 ## `_replicationPage`
 
-Reads and sends one bounded page of entries with its predecessor term and
-sequence, and stops if the required history has been forgotten. A page holds
-at most `rpcMax` entries and `rpcMaxBytes` of entry data, but always at least
-one entry. Entry sizes are read first, so only the rows sent are fetched.
-Retries a predecessor mismatch immediately from one sequence earlier. Delays
-other retryable RPC failures, and handles cancellation or fatal log errors.
-On success, advances the peer's match and next indexes, checks commitment,
-and schedules resolution of satisfied waiters.
+Sends a bounded page of log entries to a follower and updates its replication
+progress, skipping missing history using the follower's head hint. Handles
+retries, unavailable history, and fatal log failures.
 
 ### findings
 
-- **Open: catching up a lagging follower after a leadership change costs one
-  rejected page per missing entry.** A new leader starts each peer at its own
-  head plus one. A follower that is behind replies `REPL_BACKTRACK` without
-  saying where its log ends. The leader then backs up by one entry, sends
-  another full page of up to `rpcMax` entries, and emits a `warn`. After
-  5,000 missed entries, catch-up took 5,001 rejected pages, about 4.6
-  million entries shipped, and 4.2 s even in-process. The time grows by one
-  round trip per entry on a real network. When the lagging node was needed
-  for quorum, appends failed with `APPEND_TIMEOUT` until catch-up finished.
-  Likely direction: the follower's reply includes a sequence for the leader
-  to try next. This is not being implemented now.
+None.
 
 ## `_runReplication`
 
-Sends successive replication pages while the peer's state remains active
-and its match index is below the target. Stops when a page reports that
-replication should not continue.
+Replicates entries to a peer until it reaches the target or replication stops.
 
 ### findings
 
@@ -463,10 +380,8 @@ None.
 
 ## `_startReplication`
 
-Ensures only one replication worker runs for a peer state at a time and
-records additional start requests while it is busy. Clears worker state
-when the run finishes and restarts if requested work remains in the same
-active state.
+Starts or resumes peer replication, keeping at most one worker active for
+each peer state.
 
 ### findings
 
@@ -474,10 +389,7 @@ None.
 
 ## `_catchUpFollower`
 
-When leading a nonempty log, extends a peer's replication target to the
-current head and starts replication if it has not already matched that
-head. Allows the next attempt to include the head entry so the peer can
-prove its log matches.
+Initiates replication to bring a follower up to the leader's current log head.
 
 ### findings
 
@@ -485,9 +397,8 @@ None.
 
 ## `_appendToFollower`
 
-Requests replication of a sequence range to one peer, updating that peer's
-next index and target. Returns immediately if the range is already matched;
-otherwise registers a waiter with an append deadline and starts the worker.
+Replicates a requested log range to one peer and waits for confirmation within
+the append timeout.
 
 ### findings
 
@@ -495,12 +406,9 @@ None.
 
 ## `_appendToFollowers`
 
-Requests replication from the current followers and waits, racing shutdown,
-for enough successful peers to form a quorum within the append timeout.
-Checks that the requested end is committed. It then announces the commit
-with a heartbeat round, which is sent only when the commit index has
-advanced since the last announcement. Otherwise it rejects with a timeout
-or commitment error.
+Replicates a log range to quorum and verifies its commitment within the
+append timeout. Announces new commitment to followers and rejects if the
+operation fails or shutdown begins.
 
 ### findings
 
@@ -512,11 +420,8 @@ or commitment error.
 
 ## `_appendToSelfAndFollowers`
 
-Pairs each payload with the captured current term in a `{ term, entry }`
-record, stores the single entry or batch locally, and registers for its
-application results. Waits for both quorum replication and application
-before returning the starting sequence and results. Local storage failures
-are fatal, and replication failures reject the application waiter.
+Appends payloads locally and replicates them to quorum. Returns the starting
+sequence and results after application; local storage failures are fatal.
 
 ### findings
 
@@ -524,10 +429,8 @@ None.
 
 ## `_leaderAppendNoOp`
 
-Appends an empty payload while the current leadership still needs a
-current-term committed entry. Warns on failure and schedules a delayed
-retry, checking the captured readiness object so retries do not carry over
-into another leadership period.
+Appends an election no-op to establish readiness for the current leadership.
+Warns and retries while that leadership still needs the entry.
 
 ### findings
 
@@ -535,9 +438,8 @@ None.
 
 ## `_fwdToLeader`
 
-Sends a single payload or batch to the known leader and waits for its append
-response, rejecting immediately if no leader is known. Checks the returned
-result count for batches and returns the leader's sequence and results.
+Forwards a single append or batch to the known leader and returns its sequence
+and validated results. Rejects when no leader is known.
 
 ### findings
 
@@ -549,13 +451,10 @@ result count for batches and returns the leader's sequence and results.
   with `RAFT_ILLEGAL` after the commands were applied. Decision: no
   defensive copy; this is the input-ownership policy.
 
-## `_rxAppendToLeader`
+## `_rxFwdAppend`
 
-Validates a forwarded append's correlation ID, term, and payload, including
-`MAX_SQLITE_BYTES`, rejecting invalid or mismatched requests through the RPC
-error envelope. Replies `NOT_LEADER` when the node is not leading. Appends
-valid requests locally and to followers, then replies with their sequence
-and application results or the resulting error.
+Validates and handles forwarded append requests as leader. Replies with the
+appended sequence and application results or an error.
 
 ### findings
 
@@ -563,14 +462,10 @@ None.
 
 ## `_rxAppendToFollower`
 
-Validates incoming heartbeats and replication pages, handles term and leader
-changes, and checks the predecessor against retained local history.
-Appends new entries or reconciles an overlapping range by trimming only an
-uncommitted conflicting suffix. Returns backtrack or forgotten-history
-errors when matching cannot proceed. Matching requires equal terms and equal
-payload bytes. For matched history, advances commit only through the
-boundary established by the request, reads that entry's term, schedules
-application, and acknowledges the request.
+Handles replication and heartbeats, including term and leader changes.
+Reconciles incoming history without replacing committed entries, then
+advances commitment and starts application. Acknowledges accepted requests
+or reports why replication cannot proceed.
 
 ### findings
 
@@ -578,11 +473,9 @@ None.
 
 ## `onReceive`
 
-Ignores messages from outside the cluster, messages received while closed,
-and invalid RPC envelopes. Adopts higher terms from responses. Routes any
-APPEND without its own `termP` as a forwarded append. Other APPENDs go to the
-leader path for a current or older term while leading, and otherwise to the
-follower path. Vote messages go to the vote handlers.
+Routes valid member messages by protocol type and adopts higher response
+terms. APPEND handles replication and heartbeats; FWD_APPEND handles
+forwarded commands.
 
 ### findings
 
@@ -590,9 +483,8 @@ None.
 
 ## `awaitEvent`
 
-Waits for a future event value accepted by the supplied callback.
-Rejects if the callback throws or shutdown begins, and removes both the
-listener and shutdown registration when settled.
+Waits for a future event value accepted by the supplied callback. Rejects if
+the callback throws or shutdown begins.
 
 ### findings
 
@@ -600,10 +492,8 @@ None.
 
 ## `awaitLeader`
 
-Waits until the node is leader or knows a leader as a follower, optionally
-requiring a committed entry from that same term. Checks the current state
-before subscribing to changes or commits, and cleans up its subscriptions
-on success or shutdown.
+Waits until the node is leader or knows a leader, optionally requiring a
+committed entry from that term. Rejects on shutdown.
 
 ### findings
 
@@ -611,12 +501,8 @@ None.
 
 ## `append`
 
-Requires an open node and a nonempty Buffer of at most `MAX_SQLITE_BYTES`
-(999,999,000), then appends locally if leader or forwards to the known
-leader. The limit keeps each log row under SQLite's default
-1,000,000,000-byte limit, because a failed local append is fatal on the
-leader. Races the operation against shutdown and returns its sequence and
-application result.
+Submits one valid payload to the local or remote leader. Returns its sequence
+and application result after commitment and application.
 
 ### findings
 
@@ -624,10 +510,8 @@ None.
 
 ## `appendBatch`
 
-Requires an open node and a nonempty array of nonempty Buffers, each at most
-`MAX_SQLITE_BYTES`, then appends locally if leader or forwards the batch.
-Races the operation against shutdown and returns its starting sequence and
-application results.
+Submits a valid payload batch to the local or remote leader. Returns its
+starting sequence and results after commitment and application.
 
 ### findings
 
@@ -635,9 +519,8 @@ None.
 
 ## `_startRaft`
 
-Requires an open log and a node that is not closing, then resets volatile
-Raft state and restores the persisted term and vote. Marks the node open as
-a follower, starts the election timer, and emits a state change.
+Starts Raft as a follower using the persisted election state. Begins election
+monitoring and announces the open state.
 
 ### findings
 
@@ -648,9 +531,7 @@ a follower, starts the election timer, and emits a state change.
 
 ## `_stopRaft`
 
-Marks shutdown in progress and cancels shutdown-sensitive operations,
-application waiters, replication, and outstanding RPC response waits.
-Resets Raft state, marks the node closed, and emits a change if it was open.
+Stops Raft, cancels pending work, and announces closure.
 
 ### findings
 
@@ -658,9 +539,8 @@ None.
 
 ## `_closeAfterOpenFailure`
 
-Attempts to close after startup fails while temporarily deferring listener
-removal. Reports cleanup errors through the fatal path, then resumes normal
-listener cleanup.
+Cleans up after startup failure while preserving error reporting through
+closure.
 
 ### findings
 
@@ -668,8 +548,7 @@ None.
 
 ## `_removeListenersAfterClose`
 
-Removes all event listeners unless cleanup is explicitly deferred or fatal
-errors are still scheduled for delivery.
+Removes event listeners once closure and pending fatal reporting permit it.
 
 ### findings
 
@@ -677,11 +556,8 @@ None.
 
 ## `_fatalClose`
 
-Queues fatal errors and attempts to close the node immediately, recording
-any close failures separately. Schedules a microtask that emits the original
-errors, then the close errors, through `_emitSafe`. Every error listener
-receives each error, and a listener's own exception is reported once. It
-then removes listeners.
+Closes the node after fatal failure and emits the original errors and any
+close failures before removing listeners.
 
 ### findings
 
@@ -689,9 +565,8 @@ None.
 
 ## `open`
 
-Opens the SQLite log and starts Raft when the `_autoRaft()` hook permits it.
-If opening or startup fails, attempts cleanup and rethrows the original
-error.
+Opens the log and starts Raft unless automatic startup is disabled. Cleans up
+and reports the original error if startup fails.
 
 ### findings
 
@@ -699,8 +574,7 @@ None.
 
 ## `close`
 
-Stops Raft, attempts to close the SQLite log, and performs listener cleanup.
-Rethrows any log-close error after the cleanup attempt.
+Stops Raft and closes the log, reporting any close failure.
 
 ### findings
 
@@ -708,9 +582,8 @@ None.
 
 ## Dependency: `wrapError` (`src/error.js`)
 
-Normalizes arbitrary thrown values and RPC error envelopes into coded
-errors, preserving usable stacks and reusing existing `ErrorWithCode`
-instances when possible.
+Normalizes thrown values and RPC error envelopes into coded errors while
+preserving available stacks.
 
 ### findings
 
@@ -724,10 +597,8 @@ instances when possible.
 
 ## Dependency: `tcpServer` (`src/tcp.js`)
 
-Accepts encrypted MessagePack connections, dispatches decoded messages, and
-returns the listening server. Passes connection and runtime server errors to
-the supplied error callback, then closes the failed connection even if that
-callback throws.
+Creates a server for encrypted MessagePack messages. Delivers messages and
+errors to the supplied callbacks and closes failed connections.
 
 ### findings
 
@@ -735,10 +606,8 @@ None.
 
 ## Dependency: `DecryptingStream._drain` (`src/stream.js`)
 
-Consumes buffered encrypted frames, decrypts each complete frame, and
-pushes plaintext downstream. Pauses for backpressure and completes the
-current transform callback when input has been consumed or fails. A falsy
-thrown value is reported as an `Error`.
+Delivers decrypted data from complete buffered frames, respecting downstream
+backpressure and reporting processing errors.
 
 ### findings
 
@@ -746,10 +615,8 @@ None.
 
 ## Dependency: encrypted-stream destruction (`src/stream.js`)
 
-`EncryptingStream._destroy` and `DecryptingStream._destroy` free any
-initialized native secretstream state with `sodium.libsodium._free`, then
-complete destruction. Decryption also clears buffered ciphertext and settles
-a pending transform callback.
+Releases encryption resources when either stream is destroyed. Decryption
+also discards buffered input and settles any pending transform.
 
 ### findings
 

@@ -458,3 +458,40 @@ test('tcp transports Raft records with separate bigint terms and Buffer payloads
     await closeServer(server)
   }
 })
+
+test('tcp transports bigint follower log-head hints in backtrack errors', async (t) => {
+  await sodium.ready
+  const key = Buffer.from(sodium.crypto_secretstream_xchacha20poly1305_keygen())
+  const received = []
+  const server = await tcpServer(key, 0, (pack, msg) => {
+    received.push(msg)
+    pack.write(msg)
+  }, noop)
+  let receive
+  const client = await tcpClient(key, server.address().port, '127.0.0.1',
+    (msg) => receive(msg))
+  client.on('error', noop)
+  try {
+    for (const logSeq of [-1n, 0n, 9_223_372_036_854_775_807n]) {
+      const message = {
+        type: 'err', term: 3n, cid: `backtrack-${logSeq}`,
+        msg: 'seqP not found', code: ErrorCodes.REPL_BACKTRACK, sqlCode: null,
+        stack: 'Error: seqP not found\n    at remoteAppend (/remote/node.js:10:3)',
+        logSeq,
+      }
+      const echoed = new Promise((res) => { receive = res })
+      client.write(message)
+      const reply = await timeout(echoed, `backtrack ${logSeq} round trip`)
+      t.deepEqual(received.at(-1), message,
+        `${logSeq}: the server receives the exact hint and error metadata`)
+      t.deepEqual(reply, message,
+        `${logSeq}: the complete backtrack response survives the round trip`)
+      t.equal(typeof reply.logSeq, 'bigint', `${logSeq}: the hint remains a bigint`)
+    }
+  } finally {
+    const clientClosed = closed(client)
+    client.destroy()
+    await timeout(clientClosed, 'backtrack client close')
+    await closeServer(server)
+  }
+})

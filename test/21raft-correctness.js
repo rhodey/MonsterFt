@@ -6,7 +6,9 @@ import {
   LOG_CORRUPT,
   NO_LEADER,
   RAFT_ILLEGAL,
+  REPL_BACKTRACK,
   RPC_ILLEGAL,
+  TERM_DIFF,
 } from '../src/error.js'
 import { RaftNode as ProductionRaftNode } from '../src/index.js'
 import { databasePath, logFixture, sleep } from './util.js'
@@ -49,63 +51,304 @@ const waitFor = async (fn, ms=1_000) => {
 const opts = {
   appendTimeout: 25,
   electionTimeout: 60_000,
-  pingTimeout: 60_000,
 }
 
-test('replication delays failed RPCs but backtracks immediately through divergent history', async (t) => {
-  const requests = []
-  const delays = []
-  const byId = new Map()
-  const nodes = ['1', '2'].map((id) => {
-    const send = (to, msg) => {
-      if (id === '1' && msg.data) {
-        requests.push(msg.seqP)
-        if (requests.length === 1) { return }
-        if (requests.length === 2) {
-          return byId.get(id).onReceive(to, {
-            type: 'err', term: msg.term, cid: msg.cid,
-            msg: 'rejected RPC', code: RPC_ILLEGAL,
+for (const delayMs of [0, 2]) {
+  test(`public forwarded singles and batches use FWD_APPEND with ${delayMs ? 'delayed' : 'synchronous'} transport`, async (t) => {
+    const byId = new Map()
+    const sent = []
+    const errors = []
+    const applied = new Map(ids.map((id) => [id, []]))
+    const timers = new Set()
+    const nodes = ids.map((id) => {
+      const send = (to, msg) => {
+        sent.push({ from: id, to, msg })
+        if (!delayMs) { return byId.get(to).onReceive(id, msg) }
+        const timer = setTimeout(() => {
+          timers.delete(timer)
+          byId.get(to).onReceive(id, msg)
+        }, delayMs)
+        timers.add(timer)
+      }
+      const node = new ProductionRaftNode(id, ids, send, ':memory:', {
+        ...opts, electionTimeout: id === '1' ? 100 : 60_000,
+        appendTimeout: 1_000,
+        apply: (node, bufs) => bufs.map((buf) => {
+          if (buf === null) { return null }
+          const result = buf.toString('hex')
+          applied.get(id).push(result)
+          return result
+        }),
+      })
+      node.on('error', (err) => errors.push(err))
+      byId.set(id, node)
+      return node
+    })
+    t.teardown(() => {
+      nodes.forEach((node) => node.close())
+      timers.forEach((timer) => clearTimeout(timer))
+    })
+    nodes.forEach((node) => node.open())
+    const [leader, follower] = nodes
+    await waitFor(() => nodes.every((node) => node._applySeq === 0n))
+    t.equal(leader.state, 'leader', 'a real election installs the forwarding target')
+    const begin = leader.seq + 1n
+    const single = Buffer.from([0, 255, 1])
+    const batch = [Buffer.from('first'), Buffer.from([255, 0, 2])]
+    const results = [single, ...batch].map((buf) => buf.toString('hex'))
+
+    t.deepEqual(await follower.append(single), [begin, results[0]],
+      'a forwarded single returns its sequence and application result')
+    t.deepEqual(await follower.appendBatch(batch), [begin + 1n, results.slice(1)],
+      'a forwarded batch returns its first sequence and ordered results')
+    await waitFor(() => nodes.every((node) => node._applySeq === leader.seq))
+
+    const forwarded = sent.filter(({ msg }) => msg.type === 'fwd_append')
+    t.equal(forwarded.length, 2, 'both public calls use the dedicated forwarding type')
+    t.deepEqual(forwarded.map(({ from, to, msg }) => [from, to, msg.term]),
+      [['2', '1', leader.term], ['2', '1', leader.term]],
+      'both requests address the known leader in the current term')
+    t.equal(forwarded[0]?.msg.data, single, 'the single payload remains a Buffer')
+    t.deepEqual(forwarded[1]?.msg.data, batch, 'the batch remains an array of payload Buffers')
+    t.ok(forwarded.every(({ msg }) => typeof msg.cid === 'string' && !Object.hasOwn(msg, 'termP')),
+      'forwarding keeps correlation IDs and does not add a replication predecessor')
+    const replication = sent.filter(({ msg }) => msg.type === 'append' && msg.data !== undefined)
+    t.ok(replication.length > 0 && replication.every(({ msg }) =>
+      Array.isArray(msg.data) && msg.data.every((record) =>
+        typeof record.term === 'bigint' && Buffer.isBuffer(record.entry))),
+    'APPEND carries replication records rather than forwarded payloads')
+    for (const node of nodes) {
+      t.deepEqual(applied.get(node.id), results, `${node.id}: applies each command once in order`)
+    }
+    t.deepEqual(errors, [], 'forwarding and replication complete without fatal errors')
+  })
+}
+
+for (const termDelta of [0n, 1n]) {
+  test(`an elected leader accepts ${termDelta ? 'higher' : 'same'}-term APPEND as replication`, async (t) => {
+    const byId = new Map()
+    const sent = []
+    const errors = []
+    let isolated = false
+    const nodes = ids.map((id) => {
+      const send = (to, msg) => {
+        if (isolated) { sent.push({ from: id, to, msg }); return }
+        return byId.get(to).onReceive(id, msg)
+      }
+      const node = new ProductionRaftNode(id, ids, send, ':memory:', {
+        ...opts, electionTimeout: id === '1' ? 100 : 60_000,
+        appendTimeout: 1_000,
+      })
+      node.on('error', (err) => errors.push(err))
+      byId.set(id, node)
+      return node
+    })
+    t.teardown(() => nodes.forEach((node) => node.close()))
+    nodes.forEach((node) => node.open())
+    const leader = nodes[0]
+    await waitFor(() => nodes.every((node) => node._applySeq === 0n))
+    t.equal(leader.state, 'leader', 'the target begins as an elected leader')
+    const originalTerm = leader.term
+    const original = [...leader.log.iter()]
+    const acceptedTerm = originalTerm + termDelta
+    const payload = entry(acceptedTerm, 'replicated command')
+    const request = {
+      type: 'append', cid: 'replication-to-leader', term: acceptedTerm,
+      termP: leader.log.term, seqP: leader.seq, commitSeq: leader.seq + 1n,
+      data: [payload],
+    }
+    isolated = true
+
+    await leader.onReceive('2', { ...request, cid: 'older-leader', term: originalTerm - 1n })
+    t.deepEqual(sent.map(({ msg }) => [msg.type, msg.code, msg.term]),
+      [['err', TERM_DIFF, originalTerm]], 'a lower-term APPEND is rejected')
+    t.deepEqual([leader.state, leader.leader, leader.term], ['leader', '1', originalTerm],
+      'rejecting the lower term preserves leadership')
+    t.deepEqual([...leader.log.iter()], original, 'the lower-term request cannot change history')
+    sent.length = 0
+
+    await leader.onReceive('2', request)
+    await leader._applyPrev
+    t.deepEqual([leader.state, leader.leader, leader.term], ['follower', '2', acceptedTerm],
+      'APPEND installs the sender as leader through the replication handler')
+    t.deepEqual(sent.map(({ msg }) => [msg.type, msg.term, msg.seq]),
+      [['ack', acceptedTerm, request.seqP + 1n]], 'the record is acknowledged as replication')
+    t.notOk(Object.hasOwn(sent[0].msg, 'results'), 'the replication ACK has no forwarded result')
+    t.deepEqual([...leader.log.iter()], [...original, payload],
+      'replication preserves committed history and appends the new record')
+    t.equal(leader._applySeq, request.commitSeq, 'the received commit advances application')
+    const election = leader.log.db.prepare(`
+      SELECT current_term AS term, voted_for AS votedFor FROM raft_election WHERE id = 1
+    `)
+    election.setReadBigInts(true)
+    t.deepEqual({ ...election.get() }, {
+      term: acceptedTerm, votedFor: termDelta ? null : '1',
+    }, 'the accepted term and appropriate vote are durable')
+    t.deepEqual(errors, [], 'stepping down and accepting replication causes no fatal errors')
+  })
+}
+
+for (const delayMs of [0, 2]) {
+  for (const prefixLength of [0, 8]) {
+    test(`a newly elected leader skips a large missing ${prefixLength ? 'partial' : 'empty'} follower tail with ${delayMs ? 'delayed' : 'synchronous'} transport`, async (t) => {
+      const byId = new Map()
+      const timers = new Set()
+      const errors = []
+      const pages = []
+      const backtracks = []
+      const matches = []
+      const applied = new Map(ids.map((id) => [id, []]))
+      let isolated = prefixLength === 0
+      const nodes = ids.map((id) => {
+        const send = (to, msg) => {
+          if (isolated && (id === '3' || to === '3')) { return }
+          if (id === '2' && to === '3' && msg.type === 'append' && Array.isArray(msg.data)) {
+            pages.push(msg)
+          }
+          if (id === '3' && to === '2' && msg.code === REPL_BACKTRACK) {
+            backtracks.push(msg)
+          }
+          const deliver = () => {
+            if (isolated && (id === '3' || to === '3')) { return }
+            return byId.get(to).onReceive(id, msg)
+          }
+          if (!delayMs) { return deliver() }
+          const timer = setTimeout(() => {
+            timers.delete(timer)
+            deliver()
+          }, delayMs)
+          timers.add(timer)
+        }
+        const node = new ProductionRaftNode(id, ids, send, ':memory:', {
+          electionTimeout: { 1: 100, 2: 400, 3: 60_000 }[id],
+          appendTimeout: 2_000, rpcMax: 16,
+          apply: (node, bufs) => bufs.map((buf) => {
+            if (buf === null) { return null }
+            const value = buf.toString()
+            applied.get(id).push(value)
+            return value
+          }),
+        })
+        node.on('error', (err) => errors.push(err))
+        if (id === '2') {
+          node.on('warn', (err) => {
+            if (err.code === REPL_BACKTRACK) {
+              matches.push(node._replication.get('3').matchIndex)
+            }
           })
         }
+        byId.set(id, node)
+        return node
+      })
+      t.teardown(() => {
+        nodes.forEach((node) => node.close())
+        timers.forEach((timer) => clearTimeout(timer))
+      })
+      nodes.forEach((node) => node.open())
+      const [original, successor, lagging] = nodes
+      await waitFor(() => original.state === 'leader' && successor._applySeq === 0n)
+      const firstTerm = original.term
+      const prefix = Array.from({ length: prefixLength }, (_, i) => `prefix-${i}`)
+      if (prefix.length) {
+        await original.appendBatch(prefix.map((value) => Buffer.from(value)))
+        await waitFor(() => lagging._applySeq === original.seq)
+        isolated = true
       }
-      return byId.get(to).onReceive(id, msg)
-    }
-    const node = new ProductionRaftNode(id, ids, send, ':memory:', {
-      ...opts, pingTimeout: 1500, rpcMax: 2,
+      const missing = Array.from({ length: 256 }, (_, i) => `missing-${i}`)
+      await original.appendBatch(missing.map((value) => Buffer.from(value)))
+      await waitFor(() => successor._applySeq === original.seq)
+      const retainedSeq = lagging.seq
+      const oldHead = original.seq
+      t.equal(retainedSeq, prefix.length ? BigInt(prefix.length) : -1n,
+        'the follower retains only the intended prefix while the majority advances')
+      original.close()
+      isolated = false
+
+      await waitFor(() => successor.state === 'leader' && lagging._applySeq === oldHead + 1n, 2_000)
+      t.ok(successor.term > firstTerm, 'a real election changes leadership and term')
+      t.equal(backtracks.length, 1, 'one rejected page locates the missing history')
+      t.equal(backtracks[0]?.logSeq, retainedSeq, 'the rejection advertises the cached follower head')
+      t.equal(pages[0]?.seqP, oldHead, 'the new leader first probes its own previous head')
+      t.equal(pages[1]?.seqP, retainedSeq, 'the next page immediately starts after the follower head')
+      t.deepEqual(matches, [-1n], 'a hint alone does not establish any matched history')
+      const expected = [entry(firstTerm), ...[...prefix, ...missing].map((value) => entry(firstTerm, value)),
+        entry(successor.term)]
+      for (const node of [successor, lagging]) {
+        t.deepEqual([...node.log.iter()], expected, `${node.id}: retains exact terms and payloads after catch-up`)
+        t.deepEqual(applied.get(node.id), [...prefix, ...missing],
+          `${node.id}: applies every command once in order`)
+      }
+      t.deepEqual(await lagging.append(Buffer.from('continued')), [oldHead + 2n, 'continued'],
+        'a subsequent forwarded append returns its ordinary sequence and result')
+      await waitFor(() => lagging._applySeq === successor.seq)
+      t.deepEqual([...lagging.log.iter()], [...expected, entry(successor.term, 'continued')],
+        'the caught-up follower continues replicating and applying new commands')
+      t.equal(backtracks.length, 1, 'normal replication continues without another backtrack')
+      t.deepEqual(errors, [], 'leadership change and catch-up produce no fatal errors')
     })
-    byId.set(id, node)
-    return node
-  })
-  t.teardown(() => nodes.forEach((node) => node.close()))
-  for (const node of nodes) {
-    node.open()
-    node._stopTimers()
   }
-  const [leader, follower] = nodes
-  leader.log.appendBatch(['a', 'b', 'c', 'd'].map((value) => entry(1n, value)))
-  follower.log.appendBatch(['old-a', 'old-b'].map((value) => entry(0n, value)))
-  leader.state = 'leader'
-  leader.leader = leader.id
-  leader.term = 1n
-  leader._delay = async (ms) => { delays.push({ afterRequest: requests.length, ms }) }
+}
 
-  leader._catchUpFollower('2')
-  const state = leader._replication.get('2')
-  leader.log.append(entry(1n, 'e'))
-  leader._catchUpFollower('2')
-  t.equal(requests.length, 1, 'new work shares the pending replication worker')
-  await state.work
+for (const followerLength of [2, 4, 6]) {
+  test(`replication delays failed RPCs but backtracks one entry through ${followerLength}-entry divergent history`, async (t) => {
+    const requests = []
+    const delays = []
+    const backtracks = []
+    const byId = new Map()
+    const nodes = ['1', '2'].map((id) => {
+      const send = (to, msg) => {
+        if (id === '2' && msg.code === REPL_BACKTRACK) { backtracks.push(msg.logSeq) }
+        if (id === '1' && msg.data) {
+          requests.push(msg.seqP)
+          if (requests.length === 1) { return }
+          if (requests.length === 2) {
+            return byId.get(id).onReceive(to, {
+              type: 'err', term: msg.term, cid: msg.cid,
+              msg: 'rejected RPC', code: RPC_ILLEGAL,
+            })
+          }
+        }
+        return byId.get(to).onReceive(id, msg)
+      }
+      const node = new ProductionRaftNode(id, ids, send, ':memory:', {
+        ...opts, electionTimeout: 1_500, rpcMax: 2,
+      })
+      byId.set(id, node)
+      return node
+    })
+    t.teardown(() => nodes.forEach((node) => node.close()))
+    for (const node of nodes) {
+      node.open()
+      node._stopTimers()
+    }
+    const [leader, follower] = nodes
+    leader.log.appendBatch(['a', 'b', 'c', 'd'].map((value) => entry(1n, value)))
+    follower.log.appendBatch(Array.from({ length: followerLength }, (_, i) => entry(0n, `old-${i}`)))
+    leader.state = 'leader'
+    leader.leader = leader.id
+    leader.term = 1n
+    leader._delay = async (ms) => { delays.push({ afterRequest: requests.length, ms }) }
 
-  t.deepEqual(delays, [
-    { afterRequest: 1, ms: 150 },
-    { afterRequest: 2, ms: 150 },
-  ], 'only the timeout and ordinary RPC error schedule a retry delay')
-  t.deepEqual(requests, [2n, 2n, 2n, 1n, 0n, -1n, 1n, 3n],
-    'retries failed pages, backtracks to the beginning, then advances by page')
-  t.equal(state.matchIndex, leader.seq, 'catches up through the newly appended entry')
-  t.deepEqual([...follower.log.iter(0n)], [...leader.log.iter(0n)],
-    'replaces the divergent suffix and copies the complete leader history')
-})
+    leader._catchUpFollower('2')
+    const state = leader._replication.get('2')
+    leader.log.append(entry(1n, 'e'))
+    leader._catchUpFollower('2')
+    t.equal(requests.length, 1, 'new work shares the pending replication worker')
+    await state.work
+
+    t.deepEqual(delays, [
+      { afterRequest: 1, ms: 150 },
+      { afterRequest: 2, ms: 150 },
+    ], 'only the timeout and ordinary RPC error schedule a retry delay')
+    t.deepEqual(requests, [2n, 2n, 2n, 1n, 0n, -1n, 1n, 3n],
+      'retries failed pages, backtracks to the beginning, then advances by page')
+    t.deepEqual(backtracks, Array(3).fill(BigInt(followerLength - 1)),
+      'shorter, equal, or longer heads cannot skip a predecessor term mismatch')
+    t.equal(state.matchIndex, leader.seq, 'catches up through the newly appended entry')
+    t.deepEqual([...follower.log.iter(0n)], [...leader.log.iter(0n)],
+      'replaces the divergent suffix and copies the complete leader history')
+  })
+}
 
 test('an earlier-term heartbeat ACK does not restore followers after reelection', async (t) => {
   const byId = new Map()
@@ -379,7 +622,7 @@ test('a returning stale candidate cannot postpone elections indefinitely', async
       return result
     }
     const node = new ProductionRaftNode(id, ids, send, files[idx], {
-      electionTimeout: [40, 160, 200][idx], pingTimeout: 120,
+      electionTimeout: [100, 400, 500][idx],
       appendTimeout: 1_000, rpcMax: 1, applyMax: 1,
       apply: (node, bufs) => bufs.map((buf) => buf?.toString() ?? null),
     })
@@ -866,8 +1109,7 @@ test('replication pages retain mixed terms and raw payloads through a public ele
       return byId.get(to).onReceive(id, msg)
     }
     const node = new ProductionRaftNode(id, ids, send, fixture.file, {
-      electionTimeout: id === '1' ? 50 : 60_000,
-      pingTimeout: 100,
+      electionTimeout: id === '1' ? 100 : 60_000,
       appendTimeout: 2_000,
       rpcMax: 2,
       applyMax: 2,

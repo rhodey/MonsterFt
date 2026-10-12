@@ -8,9 +8,7 @@ item is recorded. Review rules are in [RAFT.md](RAFT.md).
 
 ## `constructor`
 
-Validates the database path and iteration batch size, records whether the log
-uses an in-memory database, and initializes the database handle and cached log
-and election metadata. The database remains closed until `open()` is called.
+Validates the log configuration and initializes a closed log instance.
 
 ### findings
 
@@ -26,9 +24,8 @@ None.
 
 ## `_validateSeq`
 
-Checks that a sequence or term is a bigint within SQLite's supported
-nonnegative signed-integer range. Callers can allow the empty-log sentinel
-`-1n` and supply the error code and field name used in failures.
+Validates a sequence or term against the supported bigint range, optionally
+allowing the empty-log sentinel `-1n`.
 
 ### findings
 
@@ -36,10 +33,8 @@ None.
 
 ## `_validateEntry`
 
-Requires a `{ term, entry }` record with a bigint term between zero and
-`MAX_SEQ` and a Buffer payload; an empty payload represents a no-op. Invalid
-caller-supplied entries produce `ARGUMENT_ILLEGAL`, and invalid stored
-entries produce `LOG_CORRUPT`.
+Validates a `{ term, entry }` record's term and Buffer payload, allowing empty
+payloads. Distinguishes invalid arguments from corrupt stored entries.
 
 ### findings
 
@@ -47,9 +42,7 @@ None.
 
 ## `_validateElection`
 
-Validates an election term's bigint type and supported bounds, and requires
-the vote to be null or a nonempty string. Both writes and restoration use
-this helper with the appropriate argument or corruption error code.
+Validates an election term and vote for storage or restoration.
 
 ### findings
 
@@ -57,10 +50,8 @@ None.
 
 ## `_entryFromRow`
 
-Validates a stored row's sequence, optionally checks it against the expected
-sequence, and checks its term and payload types. Returns `{ term, entry }`
-with a Buffer view of the stored payload, reporting invalid data as
-`LOG_CORRUPT`.
+Converts a stored row into a validated `{ term, entry }` record, optionally
+requiring a specific sequence. Reports invalid stored data as `LOG_CORRUPT`.
 
 ### findings
 
@@ -68,10 +59,8 @@ None.
 
 ## `readHead`
 
-Reads the newest entry, oldest retained sequence, and persisted election
-record into the log's cached fields. Uses empty-log sentinels when there are
-no entries. Requires a valid persisted election record even for an empty
-log; a missing or invalid record is `LOG_CORRUPT`.
+Refreshes the cached log head, retained boundary, and election state from
+storage. Validates the restored metadata, including for an empty log.
 
 ### findings
 
@@ -81,15 +70,9 @@ log; a missing or invalid record is `LOG_CORRUPT`.
 
 ## `open`
 
-Creates the database directory when needed and opens SQLite with WAL and
-FULL synchronous mode. A database with no schema objects is initialized in
-one transaction, creating `raft_log`, `raft_election`, and the initial
-`(0, null)` election row. An existing schema must contain both tables and an
-election row; nothing is recreated or reconstructed. Then prepares
-statements and loads cached metadata before marking the log open. On
-failure, it resets the fields, attempts to close the database, and throws a
-contextual error. Startup checks the head and cached metadata only. Historical
-rows and sequence continuity are validated as they are iterated.
+Opens the database, initializing a new log or restoring an existing one.
+Validates the schema and head metadata, leaving historical row validation to
+iteration. Cleans up and reports errors if opening fails.
 
 ### findings
 
@@ -98,9 +81,8 @@ rows and sequence continuity are validated as they are iterated.
 
 ## `close`
 
-Closes an open database and clears the prepared statements and cached
-metadata. Returns immediately when already closed, and preserves the fields
-if closing the database throws.
+Closes the database and clears the log's cached state. Leaves the log intact
+if closing fails.
 
 ### findings
 
@@ -108,11 +90,8 @@ None.
 
 ## `append`
 
-Validates one `{ term, entry }` record and requires its sequence to
-immediately follow the current head. Inserts it, updates the cached head and
-retained boundary, and returns the new sequence. An empty payload is bound as
-a shared empty Buffer, because `node:sqlite` can bind a zero-byte view as
-NULL.
+Appends one validated `{ term, entry }` record immediately after the current
+head and returns its sequence.
 
 ### findings
 
@@ -125,10 +104,8 @@ NULL.
 
 ## `appendBatch`
 
-Validates a nonempty record array and its sequence range, then inserts the
-batch in an immediate SQLite transaction. After commit, updates the cached
-head and returns the first sequence. If the transaction fails, it attempts
-to roll back and refresh the cached metadata before rethrowing.
+Appends a validated, nonempty batch of records atomically and returns its
+first sequence. Attempts recovery before reporting a failed append.
 
 ### findings
 
@@ -144,9 +121,7 @@ to roll back and refresh the cached metadata before rethrowing.
 
 ## `election`
 
-Validates and persists the current term and voted-for node in the singleton
-election record. Updates the corresponding cached fields and returns the
-stored pair.
+Validates and saves the election term and vote, returning the stored pair.
 
 ### findings
 
@@ -154,9 +129,8 @@ None.
 
 ## `trim`
 
-Deletes entries after the supplied sequence and refreshes the cached log
-metadata, doing nothing if the head is already at or before that point. The
-default sequence of `-1n` removes all log entries.
+Deletes entries after the supplied sequence. The default sequence of `-1n`
+removes all log entries.
 
 ### findings
 
@@ -164,11 +138,8 @@ None.
 
 ## `iter`
 
-Validates the starting sequence and page size, then returns a generator whose
-upper bound is the head sequence at the time of the call. The generator
-fetches rows in pages, validates each returned row against the expected
-sequence, and yields `{ term, entry }` records with contextual errors on
-failure.
+Returns an iterator over validated `{ term, entry }` records from the requested
+sequence through the head at the time of the call.
 
 ### findings
 
@@ -183,10 +154,8 @@ failure.
 
 ## `sizes`
 
-Validates the starting sequence and row limit, then returns the byte lengths
-of up to that many entries from the start through the head. SQLite reads each
-length from the row header without loading the entry, so RaftNode can bound a
-replication page by bytes before fetching it.
+Returns entry payload sizes for a bounded range, allowing replication pages
+to be limited by bytes.
 
 ### findings
 
@@ -194,8 +163,7 @@ None.
 
 ## `del`
 
-Requires the log to be closed, then delegates deletion of the SQLite files
-to the filesystem helper. Wraps failures with the log operation context.
+Deletes the database files, requiring the log to be closed.
 
 ### findings
 
