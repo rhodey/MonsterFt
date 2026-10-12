@@ -58,12 +58,13 @@ const makeFixture = (t, name, allowMessage=() => true) => {
       return target.onReceive(id, msg)
     }
     const node = new MonsterFt(id, ids, send, paths.get(id), {
-      electionTimeout: 60_000,
-      pingTimeout: 500,
+      electionTimeout: 500,
       appendTimeout: 3_000,
       quorum: 2,
       apply: () => null,
     })
+    // Tests elect leaders explicitly.
+    node._timers.election = 60_000
     node.on('warn', (err) => warnings.push({ id, err }))
     current.set(id, node)
     return node
@@ -277,7 +278,7 @@ test('MonsterFt replies to a failed forwarded CMD before warning locally', async
     return !appendsEntry(msg, 'cmd')
   })
   const leader = await elect(fixture.nodes)
-  leader.opts.appendTimeout = 100
+  leader._timers.append = 100
   leader.on('warn', () => {
     events.push('warn')
     leader.close()
@@ -455,7 +456,7 @@ test('MonsterFt warns when recovery SYNC times out after stepping down', async (
   fixture.warnings.length = 0
 
   recovery = true
-  leader.opts.appendTimeout = 100
+  leader._timers.append = 100
   leader._voteForSelf()
   await waitFor(() => leader.state === 'leader', 'recovery election')
   const rejected = await withTimeout(

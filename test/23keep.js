@@ -174,13 +174,14 @@ const clusterFixture = (t, name) => {
     const nodes = ids.map((id) => {
       const send = (to, msg) => bus.send(to, id, msg)
       const node = new MonsterFt(id, ids, send, paths.get(id), {
-        electionTimeout: 60_000,
-        pingTimeout: 150,
+        electionTimeout: 150,
         appendTimeout: 3_000,
         quorum: 2,
         ...opts,
         apply,
       })
+      // Tests elect leaders explicitly.
+      node._timers.election = 60_000
       node.on('warn', (err) => warnings.push({ id, err }))
       node.on('error', (err) => errors.push({ id, err }))
       bus.register(node)
@@ -758,7 +759,7 @@ for (const pending of [false, true]) {
       }
       const { nodes } = fixture.build({
         apply,
-        opts: { ...keepOpts(6, 10), pingTimeout: 500, appendTimeout: 60 },
+        opts: { ...keepOpts(6, 10), electionTimeout: 500, appendTimeout: 60 },
       })
       let pendingSeq = null
       if (pending) {

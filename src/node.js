@@ -39,8 +39,6 @@ const isForwardData = (data) =>
 const defaults = {
   // how long before nodes try to elect themselves
   electionTimeout: 1_500,
-  // how long before leader expires a follower
-  pingTimeout: 1_500,
   // how long before throw error for a append
   appendTimeout: 1_500,
   // send <= rpcMax bufs per rpc
@@ -57,12 +55,12 @@ const defaults = {
 
 const ACK_OPERATION = Object.freeze({
   PING: Object.freeze({
-    timeoutKey: 'pingTimeout',
+    timeoutKey: 'election',
     code: Err.PING_TIMEOUT,
     operation: 'ping',
   }),
   APPEND: Object.freeze({
-    timeoutKey: 'appendTimeout',
+    timeoutKey: 'append',
     code: Err.APPEND_TIMEOUT,
     operation: 'append',
   }),
@@ -138,15 +136,28 @@ class RaftNode extends EventEmitter {
       throw new Err.ErrorWithCode(
         'applyMax must be int > 0', Err.ARGUMENT_ILLEGAL)
     }
-    for (const name of ['electionTimeout', 'pingTimeout', 'appendTimeout']) {
-      if (!Number.isSafeInteger(opts[name]) || opts[name] <= 0) {
-        throw new Err.ErrorWithCode(
-          `${name} must be int > 0`, Err.ARGUMENT_ILLEGAL)
-      }
+    if (!Number.isSafeInteger(opts.electionTimeout) || opts.electionTimeout < 10) {
+      throw new Err.ErrorWithCode(
+        'electionTimeout must be int >= 10', Err.ARGUMENT_ILLEGAL)
+    }
+    if (!Number.isSafeInteger(opts.appendTimeout) || opts.appendTimeout <= 0) {
+      throw new Err.ErrorWithCode(
+        'appendTimeout must be int > 0', Err.ARGUMENT_ILLEGAL)
     }
     opts.quorum = this.quorum
     this.opts = opts
     this.opts.rpcMax = BigInt(opts.rpcMax)
+    const e = opts.electionTimeout
+    this._timers = {
+      // how long before nodes try to elect themselves
+      election: e,
+      // leaders send heartbeats this often
+      heartbeat: e * 0.3,
+      // how long before throw error for a append
+      append: opts.appendTimeout,
+      // delay before retrying or polling again
+      retry: Math.max(2, e * 0.1),
+    }
 
     this.state = null
     this.leader = null
@@ -347,7 +358,7 @@ class RaftNode extends EventEmitter {
       return msg.type === FWD_APPEND && Object.hasOwn(response, 'results')
     }
     return this._sendAndAwaitResponse(
-      to, msg, this.opts[timeoutKey], timeoutErr, validate
+      to, msg, this._timers[timeoutKey], timeoutErr, validate
     ).then((response) => {
       this._throwIfClosing()
       if (response.type === ERR) {
@@ -579,7 +590,7 @@ class RaftNode extends EventEmitter {
     const rm = this.nodes.filter((id) => {
       let delay = this._pongs.get(id) ?? 0
       delay = Date.now() - delay
-      return delay >= this.opts.pingTimeout
+      return delay >= this._timers.election
     })
     const followers = this.followers.filter((id) => !rm.includes(id))
     const removed = followers.length < this.followers.length
@@ -592,8 +603,8 @@ class RaftNode extends EventEmitter {
   _startElectionTimer() {
     clearTimeout(this._electionTimer)
     const delay = () => {
-      const r = Math.floor(this.opts.electionTimeout * 0.20)
-      return this.opts.electionTimeout + rand(0, r)
+      const r = Math.floor(this._timers.election * 0.20)
+      return this._timers.election + rand(0, r)
     }
     let timeout = delay()
     const cb = () => {
@@ -614,7 +625,7 @@ class RaftNode extends EventEmitter {
 
   _startPingTimer() {
     clearInterval(this._pingTimer)
-    const interval = this.opts.pingTimeout * 0.3
+    const interval = this._timers.heartbeat
     this._pingTimer = setInterval(() => this._pingFollowers(), interval)
     this._pingFollowers()
   }
@@ -867,7 +878,7 @@ class RaftNode extends EventEmitter {
         return true
       }
       this._emitSafe('warn', err)
-      const retryms = Math.max(2, this.opts.pingTimeout * 0.10)
+      const retryms = this._timers.retry
       try {
         await this._delay(retryms)
       } catch {
@@ -944,7 +955,7 @@ class RaftNode extends EventEmitter {
       return ready
     }
 
-    const [timer, timedout] = util.timeout(this.opts.appendTimeout)
+    const [timer, timedout] = util.timeout(this._timers.append)
     const waiter = util.oneShot()
     waiter.end = end
     const work = waiter.promise.finally(() => {
@@ -961,7 +972,7 @@ class RaftNode extends EventEmitter {
   }
 
   _appendToFollowers(begin, end) {
-    const [timer, timedout] = util.timeout(this.opts.appendTimeout)
+    const [timer, timedout] = util.timeout(this._timers.append)
     const work = this._raceShutdown(new Promise((res, rej) => {
       if (this.state !== LEADER) {
         return rej(new Err.ErrorWithCode('node not leader', Err.NOT_LEADER))
@@ -1048,7 +1059,7 @@ class RaftNode extends EventEmitter {
           this._commitTerm === leaderReady.term) {
         return
       }
-      const retryms = Math.max(2, this.opts.pingTimeout * 0.10)
+      const retryms = this._timers.retry
       this._delay(retryms).then(() => {
         if (this._leaderReady !== leaderReady) { return }
         this._leaderAppendNoOp()

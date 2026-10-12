@@ -246,8 +246,7 @@ const makeFixture = (t, name) => {
       const send = (to, msg) => bus.send(to, id, msg)
       let node = null
       node = new MonsterFt(id, members, send, paths.get(id), {
-        electionTimeout: 60_000,
-        pingTimeout: 250,
+        electionTimeout: 250,
         appendTimeout: 5_000,
         quorum: 2,
         ...opts,
@@ -275,6 +274,8 @@ const makeFixture = (t, name) => {
           return apply(conn, current, buf, term, seq, index, matchIndex)
         },
       })
+      // Tests elect leaders explicitly.
+      node._timers.election = 60_000
       node.on('error', noop)
       node.on('warn', noop)
       bus.register(node)
@@ -1111,9 +1112,9 @@ test('MonsterFt decides as soon as delayed follower outcomes arrive', async (t) 
     for (const timer of deliveries) { clearTimeout(timer) }
   })
   // Delayed delivery makes each outcome arrive after the leader's first
-  // check, and pingTimeout 10s sets the leader's retry interval to 1.5s.
+  // check, and electionTimeout 15s sets the leader's retry interval to 1.5s.
   cluster = fixture.build({
-    opts: { pingTimeout: 10_000 },
+    opts: { electionTimeout: 15_000 },
     intercept: (to, from, msg) => {
       const timer = setTimeout(() => {
         deliveries.delete(timer)

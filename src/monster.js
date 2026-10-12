@@ -813,7 +813,7 @@ class MonsterNode extends RaftNode {
     this._monsterRememberReport(this.id, command.localDigest)
 
     let decision = null
-    const retryms = Math.max(2, this.opts.pingTimeout * 0.15)
+    const retryms = this._timers.retry
     let requested = -Infinity
     while (true) {
       this._monsterAssertLeader(term)
@@ -1040,7 +1040,7 @@ class MonsterNode extends RaftNode {
 
   _monsterSendAndAwaitCmdAck(to, msg, validate) {
     const work = this._sendAndAwaitResponse(
-      to, msg, this.opts.appendTimeout,
+      to, msg, this._timers.append,
       new Err.ErrorWithCode('forward CMD timeout', Err.APPEND_TIMEOUT),
       validate,
     ).then((response) => {
@@ -1137,7 +1137,7 @@ class MonsterNode extends RaftNode {
       )
     }
     this._monsterDraining = true
-    const retryms = Math.max(2, this.opts.pingTimeout * 0.1)
+    const retryms = this._timers.retry
     const work = this._monsterRunDbGetCmd().then(async (pending) => {
       this._throwIfClosing()
       if (pending !== null) {

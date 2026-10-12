@@ -39,20 +39,11 @@ state. Establishes transport-error reporting and fatal shutdown handling.
 
 ### findings
 
-- **Deferred: heartbeat frequency is independent of the election timeout.**
-  Leaders send heartbeats every `0.3 * pingTimeout`. Followers campaign after
-  `electionTimeout` plus up to 20 percent jitter, which disappears below a
-  5 ms election timeout. Each value is validated independently, so a
-  heartbeat interval longer than the election timeout is accepted.
-  Leadership then churns. For example, `electionTimeout: 300` with
-  `pingTimeout: 3000` changed leaders 9-13 times in six seconds, although
-  appends still succeeded. Nodes may also use different settings. Decision:
-  timeout selection is left to the user for now.
 - **Deferred: an explicit `undefined` does not select a default.**
-  `{ ...defaults, ...opts }` keeps it, so `electionTimeout`, `pingTimeout`,
-  `appendTimeout`, `rpcMax`, `rpcMaxBytes`, `applyMax`, and SQLiteLog's
-  `iterStepSize` throw `ARGUMENT_ILLEGAL`. `apply` and `quorum` do fall back
-  to their defaults. Decision: valid, but not a current focus.
+  `{ ...defaults, ...opts }` keeps it, so `electionTimeout`, `appendTimeout`,
+  `rpcMax`, `rpcMaxBytes`, `applyMax`, and SQLiteLog's `iterStepSize` throw
+  `ARGUMENT_ILLEGAL`. `apply` and `quorum` do fall back to their defaults.
+  Decision: valid, but not a current focus.
 
 ## `_throwIfClosing`
 

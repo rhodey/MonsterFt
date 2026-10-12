@@ -67,7 +67,6 @@ test('vote observes a directly persisted append before comparing logs', async (t
   const sent = []
   const node = new RaftNode('1', ids, (to, msg) => sent.push([to, msg]), log, {
     electionTimeout: 60_000,
-    pingTimeout: 60_000,
   })
   node.open()
   log.append(entry(0n, 'zero'))
@@ -119,7 +118,6 @@ test('vote observes the unchanged head after an earlier append is rejected', asy
   const sent = []
   const node = new RaftNode('1', ids, (to, msg) => sent.push([to, msg]), log, {
     electionTimeout: 60_000,
-    pingTimeout: 60_000,
   })
   node.open()
   log.append(entry(0n, 'zero'))
@@ -157,7 +155,6 @@ test('concurrent same-term vote requests grant at most one candidate', async (t)
   const sent = []
   const node = new RaftNode('1', ids, (to, msg) => sent.push([to, msg]), log, {
     electionTimeout: 60_000,
-    pingTimeout: 60_000,
   })
   node.open()
   const changes = []
@@ -188,7 +185,6 @@ test('higher-term log rejection retains the AppendEntries leader', async (t) => 
   const sent = []
   const node = new RaftNode('1', ids, (to, msg) => sent.push([to, msg]), log, {
     electionTimeout: 60_000,
-    pingTimeout: 60_000,
   })
   node.open()
 
@@ -224,7 +220,6 @@ test('follower ACKs a fully duplicated suffix without appending an empty batch',
   const sent = []
   const node = new RaftNode('1', ids, (to, msg) => sent.push(msg), log, {
     electionTimeout: 60_000,
-    pingTimeout: 60_000,
   })
   node.open()
   node.leader = '2'
@@ -254,7 +249,6 @@ test('a duplicated page preserves the follower suffix', async (t) => {
   const sent = []
   const node = new RaftNode('1', ids, (to, msg) => sent.push(msg), log, {
     electionTimeout: 60_000,
-    pingTimeout: 60_000,
   })
   node.open()
   node.leader = '2'
@@ -287,7 +281,6 @@ test('a duplicated page commits only through its verified entries', async (t) =>
   const appliedTerms = []
   const node = new RaftNode('1', ids, (to, msg) => sent.push(msg), log, {
     electionTimeout: 60_000,
-    pingTimeout: 60_000,
     apply: (appliedNode, bufs, seqs, terms) => {
       applied.push(...bufs.map((buf) => buf && buf.toString()))
       appliedTerms.push(...terms)
@@ -348,7 +341,6 @@ test('a matching heartbeat commits only through its verified seqP', async (t) =>
   const applied = []
   const node = new RaftNode('1', ids, (to, msg) => sent.push(msg), log, {
     electionTimeout: 60_000,
-    pingTimeout: 60_000,
     apply: (appliedNode, bufs) => {
       applied.push(...bufs.map((buf) => buf && buf.toString()))
       return bufs
@@ -382,7 +374,6 @@ test('follower closes rather than truncate its committed prefix', async (t) => {
   const sent = []
   const node = new RaftNode('1', ids, (to, msg) => sent.push(msg), log, {
     electionTimeout: 60_000,
-    pingTimeout: 60_000,
   })
   node.open()
   node.leader = '2'
@@ -469,7 +460,6 @@ test('follower append failure after trim leaves a retryable shorter prefix', asy
   const retrySent = []
   const retry = new RaftNode('1', ids, (to, msg) => retrySent.push(msg), retryLog, {
     electionTimeout: 60_000,
-    pingTimeout: 60_000,
   })
   retry.open()
   await retry.onReceive('2', {
@@ -711,7 +701,6 @@ test('heartbeat ACK catches a discovered follower up to the current head', async
   }
   node = new RaftNode('1', ids, send, log, {
     electionTimeout: 60_000,
-    pingTimeout: 60_000,
   })
   node._open = true
   node.state = 'leader'
@@ -825,7 +814,7 @@ test('backtrack to nextIndex zero still attempts the genesis page', async (t) =>
   }
   node = new RaftNode('1', ids, send, log, {
     appendTimeout: 1_000,
-    pingTimeout: 1_000,
+    electionTimeout: 1_000,
   })
   node._open = true
   node.state = 'leader'
@@ -874,7 +863,7 @@ test('forgotten replication response cancels without backtracking', async (t) =>
   }
   node = new RaftNode('1', ids, send, log, {
     appendTimeout: 1_000,
-    pingTimeout: 1_000,
+    electionTimeout: 1_000,
   })
   node._open = true
   node.state = 'leader'
@@ -921,7 +910,7 @@ test('an in-flight backtrack above the root does not cancel lowered shared state
     }
     node = new RaftNode('1', ids, send, log, {
       appendTimeout: 1_000,
-      pingTimeout: 20,
+      electionTimeout: 20,
     })
     node._open = true
     node.state = 'leader'
@@ -990,7 +979,7 @@ test('backtrack rejecting the genesis page cancels replication', async (t) => {
   }
   node = new RaftNode('1', ids, send, log, {
     appendTimeout: 1_000,
-    pingTimeout: 1_000,
+    electionTimeout: 1_000,
   })
   node._open = true
   node.state = 'leader'
@@ -1370,7 +1359,6 @@ test('close immediately rejects outstanding replication waiters', async (t) => {
   const node = new RaftNode('1', ids, () => {}, log, {
     appendTimeout: 60_000,
     electionTimeout: 60_000,
-    pingTimeout: 60_000,
   })
   node.open()
   log.append(entry(node.term, 'pending'))
@@ -1390,7 +1378,6 @@ test('close is durable before returning and rejects later local append', async (
   const log = fixture.create()
   const node = new RaftNode('1', ids, () => {}, log, {
     electionTimeout: 60_000,
-    pingTimeout: 60_000,
   })
   node.open()
   node._stopTimers()
@@ -1556,7 +1543,7 @@ test('timed out commands discard results while replication and application conti
     apply,
     quorum: 3,
     appendTimeout: 20,
-    pingTimeout: 1_000,
+    electionTimeout: 1_000,
   }))
   await reset(nodes)
   open(nodes)
@@ -1700,7 +1687,6 @@ test('application materializes each batch before invoking async apply', async (t
   const node = new RaftNode('1', ids, () => {}, log, {
     applyMax: 2,
     electionTimeout: 60_000,
-    pingTimeout: 60_000,
     apply: async (appliedNode, bufs, seqs) => {
       t.notOk(iterating, 'apply starts after synchronous iteration finishes')
       await Promise.resolve()

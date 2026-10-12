@@ -242,8 +242,7 @@ const clusterFixture = (t, name, { memory=false }={}) => {
       const send = (to, msg) => bus.send(to, id, msg)
       let node = null
       node = new MonsterFt(id, ids, send, paths.get(id), {
-        electionTimeout: 60_000,
-        pingTimeout: 150,
+        electionTimeout: 150,
         appendTimeout: 5_000,
         quorum: 2,
         apply: async (db, buf, term, seq, index, matchIndex) => {
@@ -262,6 +261,8 @@ const clusterFixture = (t, name, { memory=false }={}) => {
           return apply(db, buf, term, seq, index, matchIndex, current)
         },
       })
+      // Tests elect leaders explicitly.
+      node._timers.election = 60_000
       node.on('warn', noop)
       node.on('error', (err) => errors.push({ id, err }))
       bus.register(node)
@@ -340,7 +341,6 @@ test('constructors use strict paths and a literal two-file pair',
 
     const memoryRaft = new RaftNode('1', ids, noop, ':memory:', {
       electionTimeout: 60_000,
-      pingTimeout: 60_000,
     })
     nodes.push(memoryRaft)
     t.equal(memoryRaft.log.path, ':memory:',
@@ -356,7 +356,6 @@ test('constructors use strict paths and a literal two-file pair',
 
     const raft = new RaftNode('1', ids, noop, raftPath, {
       electionTimeout: 60_000,
-      pingTimeout: 60_000,
     })
     nodes.push(raft)
     t.equal(raft.log.path, raftPath,
@@ -378,7 +377,6 @@ test('constructors use strict paths and a literal two-file pair',
 
     const monster = new MonsterFt('1', ids, noop, monsterPath, {
       electionTimeout: 60_000,
-      pingTimeout: 60_000,
       apply: applyApp,
     })
     nodes.push(monster)
@@ -630,7 +628,6 @@ test('Monster open completes storage and validation before Raft start',
 
     const node = new OrderedMonsterFt('1', ids, noop, databasePath, {
       electionTimeout: 60_000,
-      pingTimeout: 60_000,
       apply: applyApp,
     })
     node.on('warn', noop)
@@ -675,7 +672,6 @@ test('sequence-zero bootstrap failure rolls back and closes the node',
     const build = (onFatal=noop, onError=noop) => {
       const current = new MonsterFt('1', ids, noop, databasePath, {
         electionTimeout: 60_000,
-        pingTimeout: 60_000,
         apply: (db, buf, term, seq, index, matchIndex) => {
           calls.push({
             db,
@@ -815,8 +811,7 @@ for (const asynchronous of [false, true]) {
         }
         const node = new MonsterFt(id, ids,
           (to, msg) => bus.send(to, id, msg), paths.get(id), {
-            electionTimeout: Number(id) * 80,
-            pingTimeout: 300,
+            electionTimeout: Number(id) * 300,
             appendTimeout: 5_000,
             apply: asynchronous ? async (...args) => {
               const result = apply(...args)
@@ -906,7 +901,6 @@ test('DB2 open failure closes DB1 and requires a fresh object',
 
     const seed = new MonsterFt('1', ids, noop, databasePath, {
       electionTimeout: 60_000,
-      pingTimeout: 60_000,
       apply: applyApp,
     })
     seed.on('warn', noop)
@@ -927,7 +921,6 @@ test('DB2 open failure closes DB1 and requires a fresh object',
     seed.close()
     node = new MonsterFt('1', ids, noop, databasePath, {
       electionTimeout: 60_000,
-      pingTimeout: 60_000,
       apply: applyApp,
     })
     node.on('warn', noop)
@@ -957,7 +950,6 @@ test('DB2 open failure closes DB1 and requires a fresh object',
 
     replacement = new MonsterFt('1', ids, noop, databasePath, {
       electionTimeout: 60_000,
-      pingTimeout: 60_000,
       apply: applyApp,
     })
     replacement.on('warn', noop)
@@ -975,7 +967,6 @@ test('DB2 close failure retains its handle for a close retry',
     removePair(databasePath)
     const node = new MonsterFt('1', ids, noop, databasePath, {
       electionTimeout: 60_000,
-      pingTimeout: 60_000,
       apply: applyApp,
     })
     node.on('warn', noop)
@@ -1072,7 +1063,6 @@ test('failed Monster open cleanup is finite and retains both failed handles',
 
     const node = new FailedOpenMonsterFt('1', ids, noop, databasePath, {
       electionTimeout: 60_000,
-      pingTimeout: 60_000,
       apply: applyApp,
     })
     node.on('warn', noop)
@@ -1142,7 +1132,6 @@ test('DB1-only close failure releases DB2 and retries only DB1',
     removePair(databasePath)
     const node = new MonsterFt('1', ids, noop, databasePath, {
       electionTimeout: 60_000,
-      pingTimeout: 60_000,
       apply: applyApp,
     })
     node.on('warn', noop)
@@ -1199,7 +1188,6 @@ test('combined DB2 and DB1 close failures are finite and retryable',
     removePair(databasePath)
     const node = new MonsterFt('1', ids, noop, databasePath, {
       electionTimeout: 60_000,
-      pingTimeout: 60_000,
       apply: applyApp,
     })
     node.on('warn', noop)
@@ -1283,7 +1271,6 @@ test('change listener can close both databases during open exactly once',
     const node = new CloseOnPublishMonsterFt(
       '1', ids, noop, databasePath, {
       electionTimeout: 60_000,
-      pingTimeout: 60_000,
       apply: applyApp,
       },
     )
@@ -1342,7 +1329,6 @@ test('Monster close abandons active DB2 FIFO work and rejects its queue',
     let queuedRan = false
     const node = new MonsterFt('1', ids, noop, databasePath, {
       electionTimeout: 60_000,
-      pingTimeout: 60_000,
       apply: applyApp,
     })
     node.on('warn', noop)
@@ -1624,7 +1610,7 @@ test('failed fresh metadata initialization leaves an empty pair that can be retr
       return super._monsterInit(db)
     }
   }
-  const opts = { electionTimeout: 60_000, pingTimeout: 60_000, apply: applyApp }
+  const opts = { electionTimeout: 60_000, apply: applyApp }
   const failed = new FailedInit('1', ids, noop, databasePath, opts)
   nodes.push(failed)
   const err = errorOfCall(() => failed.open())
@@ -1752,7 +1738,6 @@ test('checkpoint ahead of DB1 rejects and requires a fresh object',
     const nodes = []
     const seed = new MonsterFt('1', ids, noop, databasePath, {
       electionTimeout: 60_000,
-      pingTimeout: 60_000,
       apply: applyApp,
     })
     seed.on('warn', noop)
@@ -1779,7 +1764,6 @@ test('checkpoint ahead of DB1 rejects and requires a fresh object',
     const build = () => {
       const current = new MonsterFt('1', ids, noop, databasePath, {
         electionTimeout: 60_000,
-        pingTimeout: 60_000,
         apply: applyApp,
       })
       current.on('warn', noop)
@@ -1832,7 +1816,6 @@ test('repair state 1 reopens live while state 2 requires certification',
     const build = () => {
       const node = new MonsterFt('1', ids, noop, databasePath, {
         electionTimeout: 60_000,
-        pingTimeout: 60_000,
         apply: applyApp,
       })
       node.on('warn', noop)
@@ -2081,7 +2064,6 @@ test('shutdown before DB2 commit rolls back and replays the durable DB1 entry',
     const build = (blocked) => {
       const node = new MonsterFt('1', ids, noop, databasePath, {
         electionTimeout: 60_000,
-        pingTimeout: 60_000,
         apply: async (db, buf, term, seq, index, matchIndex) => {
           if (buf === null) {
             return applyApp(db, buf, term, seq, index, matchIndex)
@@ -2214,7 +2196,6 @@ test('shutdown immediately after DB2 commit prevents replay on restart',
     const build = () => {
       const node = new MonsterFt('1', ids, noop, databasePath, {
         electionTimeout: 60_000,
-        pingTimeout: 60_000,
         apply: (db, buf, term, seq, index, matchIndex) => {
           if (buf === null) {
             return applyApp(db, buf, term, seq, index, matchIndex)
@@ -2577,10 +2558,11 @@ test('drain before open leaves no draining state', async (t) => {
   const databasePath = uniquePath('drain-before-open')
   removePair(databasePath)
   const node = new MonsterFt('1', ids, noop, databasePath, {
-    electionTimeout: 60_000,
-    pingTimeout: 150,
+    electionTimeout: 150,
     apply: applyApp,
   })
+  // Tests elect leaders explicitly.
+  node._timers.election = 60_000
   node.on('warn', noop)
   node.on('error', noop)
   t.teardown(() => {
@@ -2603,10 +2585,11 @@ test('drain closes a candidate before resolving', async (t) => {
   const databasePath = uniquePath('drain-candidate')
   removePair(databasePath)
   const node = new MonsterFt('1', ids, noop, databasePath, {
-    electionTimeout: 60_000,
-    pingTimeout: 150,
+    electionTimeout: 150,
     apply: applyApp,
   })
+  // Tests elect leaders explicitly.
+  node._timers.election = 60_000
   node.on('warn', noop)
   node.on('error', noop)
   t.teardown(() => {

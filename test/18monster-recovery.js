@@ -275,8 +275,7 @@ const recoveryFixture = (
         send,
         paths.get(id),
         {
-          electionTimeout: 60_000,
-          pingTimeout: 500,
+          electionTimeout: 500,
           appendTimeout: 3_000,
           quorum,
           apply: (conn, buf, term, seq, index, matchIndex) => {
@@ -300,6 +299,8 @@ const recoveryFixture = (
           },
         },
       )
+      // Tests elect leaders explicitly.
+      node._timers.election = 60_000
       node.on('warn', noop)
       node.on('error', (err) => errors.push({ generation, id, err }))
       bus.register(node)

@@ -51,7 +51,6 @@ const waitFor = async (fn, ms=1_000) => {
 const opts = {
   appendTimeout: 25,
   electionTimeout: 60_000,
-  pingTimeout: 60_000,
 }
 
 for (const delayMs of [0, 2]) {
@@ -72,8 +71,8 @@ for (const delayMs of [0, 2]) {
         timers.add(timer)
       }
       const node = new ProductionRaftNode(id, ids, send, ':memory:', {
-        ...opts, electionTimeout: id === '1' ? 50 : 60_000,
-        pingTimeout: 100, appendTimeout: 1_000,
+        ...opts, electionTimeout: id === '1' ? 100 : 60_000,
+        appendTimeout: 1_000,
         apply: (node, bufs) => bufs.map((buf) => {
           if (buf === null) { return null }
           const result = buf.toString('hex')
@@ -137,8 +136,8 @@ for (const termDelta of [0n, 1n]) {
         return byId.get(to).onReceive(id, msg)
       }
       const node = new ProductionRaftNode(id, ids, send, ':memory:', {
-        ...opts, electionTimeout: id === '1' ? 50 : 60_000,
-        pingTimeout: 100, appendTimeout: 1_000,
+        ...opts, electionTimeout: id === '1' ? 100 : 60_000,
+        appendTimeout: 1_000,
       })
       node.on('error', (err) => errors.push(err))
       byId.set(id, node)
@@ -221,8 +220,8 @@ for (const delayMs of [0, 2]) {
           timers.add(timer)
         }
         const node = new ProductionRaftNode(id, ids, send, ':memory:', {
-          electionTimeout: { 1: 40, 2: 160, 3: 60_000 }[id],
-          pingTimeout: 250, appendTimeout: 2_000, rpcMax: 16,
+          electionTimeout: { 1: 100, 2: 400, 3: 60_000 }[id],
+          appendTimeout: 2_000, rpcMax: 16,
           apply: (node, bufs) => bufs.map((buf) => {
             if (buf === null) { return null }
             const value = buf.toString()
@@ -312,7 +311,7 @@ for (const followerLength of [2, 4, 6]) {
         return byId.get(to).onReceive(id, msg)
       }
       const node = new ProductionRaftNode(id, ids, send, ':memory:', {
-        ...opts, pingTimeout: 1500, rpcMax: 2,
+        ...opts, electionTimeout: 1_500, rpcMax: 2,
       })
       byId.set(id, node)
       return node
@@ -623,7 +622,7 @@ test('a returning stale candidate cannot postpone elections indefinitely', async
       return result
     }
     const node = new ProductionRaftNode(id, ids, send, files[idx], {
-      electionTimeout: [40, 160, 200][idx], pingTimeout: 120,
+      electionTimeout: [100, 400, 500][idx],
       appendTimeout: 1_000, rpcMax: 1, applyMax: 1,
       apply: (node, bufs) => bufs.map((buf) => buf?.toString() ?? null),
     })
@@ -1110,8 +1109,7 @@ test('replication pages retain mixed terms and raw payloads through a public ele
       return byId.get(to).onReceive(id, msg)
     }
     const node = new ProductionRaftNode(id, ids, send, fixture.file, {
-      electionTimeout: id === '1' ? 50 : 60_000,
-      pingTimeout: 100,
+      electionTimeout: id === '1' ? 100 : 60_000,
       appendTimeout: 2_000,
       rpcMax: 2,
       applyMax: 2,
