@@ -28,8 +28,8 @@ means no unresolved item is recorded. Review rules are in [RAFT.md](RAFT.md).
 
 ## `asBuffer`
 
-Preserves null, undefined, and existing Buffers. Converts another byte view
-to a Buffer sharing its backing memory, offset, and length.
+Converts byte views to Buffers without copying, preserving existing Buffers,
+null, and undefined.
 
 ### findings
 
@@ -37,10 +37,7 @@ None.
 
 ## `digestEntry`
 
-Hashes the term's eight-byte little-endian encoding followed by the payload
-with SHA-256 to produce the DB2 applied checkpoint hash. A no-op hashes only
-the term encoding. That encoding exists only for hashing and is not stored
-or replicated with entries.
+Produces the checkpoint hash identifying an entry's term and payload.
 
 ### findings
 
@@ -48,9 +45,8 @@ None.
 
 ## `outcomesWire`
 
-Converts command outcomes into compact result tuples for transport and
-hashing. Rejected outcomes include the error message and codes, with an
-optional stack string; fulfilled outcomes carry their result value.
+Converts command outcomes into tuples for transport or agreement hashing,
+optionally including error stacks.
 
 ### findings
 
@@ -58,9 +54,8 @@ None.
 
 ## `digestCmd`
 
-Hashes the MessagePack encoding of the term, command sequence, SQLite
-patchset, and outcome tuples to produce the local agreement digest.
-Excludes error stacks so different traces do not change consensus results.
+Produces the agreement digest for a command, its database changes, and its
+outcomes. Excludes error stacks from agreement.
 
 ### findings
 
@@ -68,9 +63,7 @@ None.
 
 ## `assertEncodable`
 
-Encodes an application result with MessagePack. If encoding fails, it throws
-`APPLY_ERROR: apply result is not MessagePack-encodable`, and the result is
-rejected like a thrown application error.
+Rejects results that cannot be encoded as MessagePack, using `APPLY_ERROR`.
 
 ### findings
 
@@ -78,11 +71,9 @@ None.
 
 ## `constructor`
 
-Requires an application callback and delegates Raft configuration to the
-base constructor. Derives the DB2 path as DB1's path with `2` appended, and
-checks that both database files exist or both are absent. Initializes
-retention and Monster state, and registers the `change` hook used for
-leader recovery.
+Validates the application callback, database pair, and retention settings.
+Initializes Raft and Monster state, including command processing and leader
+recovery.
 
 ### findings
 
@@ -107,8 +98,7 @@ leader recovery.
 
 ## `_autoRaft`
 
-Disables the base class's automatic Raft startup so MonsterNode can initialize
-and validate DB2 before starting elections or replication.
+Defers Raft startup until MonsterNode has initialized and validated DB2.
 
 ### findings
 
@@ -124,9 +114,7 @@ None.
 
 ## `_monsterSyncAgrees`
 
-Determines whether the local command belongs to a SYNC's agreed outcome.
-Returns false for a quorum-impossible decision, honors explicit membership in the
-agree/disagree lists, and otherwise compares the local and agreed digests.
+Determines whether the local command outcome agrees with a SYNC decision.
 
 ### findings
 
@@ -134,10 +122,8 @@ None.
 
 ## `_monsterPrune`
 
-Uses cached log and application boundaries to prune applied history when
-retention reaches its trigger, leaving the target history and all unapplied
-entries. Skips disabled retention and unresolved CMDs, and refreshes cached
-log boundaries after deleting rows.
+Prunes applied history to the retention target when its trigger is reached.
+Preserves unapplied entries and defers pruning while a CMD is unresolved.
 
 ### findings
 
@@ -174,7 +160,6 @@ None.
 ## `_monsterAssertAvailable`
 
 Rejects new commands when the node is closed, requires repair, or is draining.
-Uses the corresponding public error code for each condition.
 
 ### findings
 
@@ -191,9 +176,8 @@ None.
 
 ## `_monsterStepDownForTerm`
 
-Steps down only if shutdown has not begun and the node is leader in the
-supplied term. Returns whether it changed state, protecting newer leadership
-from failures belonging to an older operation.
+Steps down only when still leader in the supplied term and not closing.
+Returns whether leadership changed.
 
 ### findings
 
@@ -201,10 +185,8 @@ None.
 
 ## `_monsterWriteTx`
 
-Runs DB2 work in a transaction and rolls it back on failure. Neither commits
-nor rolls back after shutdown begins, and skips rollback when SQLite has
-already ended the transaction. If rollback fails, it emits the original
-error, then reports the rollback failure as fatal.
+Runs DB2 work atomically and rolls it back on failure. Reports both the
+original error and a fatal cleanup error if rollback fails.
 
 ### findings
 
@@ -212,8 +194,7 @@ None.
 
 ## `_monsterAdvanceApplied`
 
-Updates the DB2 singleton's applied sequence and entry hash. Requires exactly
-one changed row and adds DB2 operation context to SQLite failures.
+Persists the applied entry's sequence and hash in DB2.
 
 ### findings
 
@@ -221,9 +202,8 @@ None.
 
 ## `_monsterInstallPendingCmd`
 
-Computes the local command digest and stores the pending CMD together with
-its applied checkpoint in DB2. Requires previously empty pending fields and
-exactly one updated row, then returns the digest.
+Records a newly applied CMD as pending agreement, saves its checkpoint, and
+returns its local digest.
 
 ### findings
 
@@ -231,9 +211,8 @@ None.
 
 ## `_monsterWriteCmdDecision`
 
-Clears the matching pending CMD while updating the applied checkpoint and
-repair state for its SYNC. Requires exactly one matching metadata row and
-normalizes failures with operation-specific DB2 context.
+Records a SYNC decision's checkpoint and repair state and clears the matching
+pending CMD.
 
 ### findings
 
@@ -241,9 +220,7 @@ None.
 
 ## `_monsterWriteRepair`
 
-Updates the singleton's repair state without advancing its checkpoint or
-clearing the pending command. Requires one changed row and normalizes DB2
-write failures.
+Persists the repair state while preserving the checkpoint and pending command.
 
 ### findings
 
@@ -251,9 +228,8 @@ None.
 
 ## `_monsterReleaseDb`
 
-Clears the active DB work slot and settles that operation with its result or
-error. Retains the first failure for drain reporting, then starts the next
-queued operation unless shutdown has begun.
+Settles the active DB operation and allows queued work to continue. Retains
+the first failure for reporting during drain.
 
 ### findings
 
@@ -261,9 +237,7 @@ None.
 
 ## `_monsterDrainDb`
 
-Starts the oldest queued DB operation when none is active, enforcing serial
-access to DB2. Routes synchronous throws and asynchronous completion through
-the common work-release path.
+Runs queued DB operations one at a time in submission order.
 
 ### findings
 
@@ -271,8 +245,8 @@ None.
 
 ## `_monsterRunDb`
 
-Enqueues a DB operation and returns a promise for its result, starting the
-queue if it is idle. Rejects new work immediately once shutdown begins.
+Queues a DB operation and returns a promise for its result. Rejects new work
+once shutdown begins.
 
 ### findings
 
@@ -280,9 +254,8 @@ None.
 
 ## `_monsterRunDbGetCmd`
 
-Reads the cached pending command through the DB queue so the lookup follows
-earlier queued mutations. Optionally matches a specific command sequence,
-returning null if no matching command remains.
+Returns the pending command after earlier DB work completes, optionally
+requiring a specific sequence. Returns null when no matching command remains.
 
 ### findings
 
@@ -290,10 +263,8 @@ None.
 
 ## `_monsterInit`
 
-Initializes fresh DB2 metadata only when both DB2 and the log are empty.
-Otherwise restores the persisted checkpoint, repair state, and pending
-command. Checks field shapes and bounds before caching the metadata and
-allowing startup retention or Raft activity.
+Initializes fresh DB2 metadata or validates and restores its checkpoint,
+repair state, and pending command for startup.
 
 ### findings
 
@@ -309,10 +280,7 @@ allowing startup retention or Raft activity.
 
 ## `_monsterVerifyAppliedEntry`
 
-Validates the DB2 checkpoint's sequence and hash against the exact DB1 term
-and payload using `digestEntry`. For the initial checkpoint, checks that the
-hash is null. A missing checkpoint row below the head appears as a DB1
-sequence gap, which SQLiteLog iteration rejects as `LOG_CORRUPT`.
+Verifies that DB2's applied checkpoint matches the corresponding DB1 entry.
 
 ### findings
 
@@ -323,8 +291,7 @@ sequence gap, which SQLiteLog iteration rejects as `LOG_CORRUPT`.
 
 ## `_monsterRememberReport`
 
-Records the first digest received from a node for the current pending command.
-Normalizes the digest to a Buffer and ignores later reports from that node.
+Records each node's first reported digest for the pending command.
 
 ### findings
 
@@ -332,9 +299,8 @@ None.
 
 ## `_monsterDecision`
 
-Groups reported nodes by command digest and identifies a group that reaches
-quorum. Also determines whether agreement has become impossible even if all
-unreported nodes join the largest group, returning that status and the reports.
+Determines whether reported command outcomes have reached agreement or made
+agreement impossible, and returns the supporting reports.
 
 ### findings
 
@@ -342,9 +308,8 @@ None.
 
 ## `_monsterRxOutcomeRequest`
 
-Validates an outcome request and looks up its pending CMD through the DB queue.
-Replies with the local digest when the command still matches and the node is
-not closing; malformed requests emit warnings.
+Answers valid requests for the local pending command's digest. Warns on
+malformed requests.
 
 ### findings
 
@@ -352,9 +317,8 @@ None.
 
 ## `_monsterRxOutcome`
 
-Validates an incoming digest report, warning on malformed fields. While
-leader, records it only if its command matches the pending CMD, rechecking
-leadership after the queued lookup.
+While leader, records valid peer outcome reports for the pending command.
+Warns on malformed reports.
 
 ### findings
 
@@ -362,8 +326,7 @@ None.
 
 ## `_monsterAnnounceOutcome`
 
-Records the local digest directly when leader, or sends it to the known
-leader when following. Sends nothing if no leader is known.
+Reports the local command digest to the leader's agreement process.
 
 ### findings
 
@@ -371,11 +334,8 @@ None.
 
 ## `_monsterApplyNoop`
 
-Advances the durable and cached applied checkpoint for a no-op. At sequence
-zero, also calls the application with null data for schema setup and commits
-that initialization together with the checkpoint in one DB2 transaction. It
-writes the checkpoint only if that transaction is still active after the
-callback.
+Applies a no-op and advances the checkpoint. At sequence zero, also runs the
+application's schema setup as part of the same transaction.
 
 ### findings
 
@@ -384,22 +344,9 @@ applies to this sequence-zero callback.
 
 ## `_monsterApplyCmd`
 
-Applies each command under a savepoint and checks that each result can be
-MessagePack-encoded, collecting successful results and rejected errors. A
-failed item emits a local `APPLY_ERROR` warning before cleanup, using a
-separate error with the original message, SQL code, and stack. The command
-outcome retains its original code; shutdown is checked again after
-listeners run. Rejected writes are rolled back to the item's savepoint.
-If SQLite has already ended the transaction, the original error is rethrown.
-If savepoint cleanup fails, the original error is emitted before the cleanup
-failure propagates. Persists the pending command digest and applied
-checkpoint, then announces the local digest for agreement.
-
-Both leaders and followers warn once per failed item execution, including
-unencodable results. Agreed rejections need no repair; disagreement retains
-the later repair diagnostic. Restoring a stored outcome does not emit another
-warning, and late failures after shutdown remain quiet. Sequence-zero setup
-reporting is unchanged.
+Applies CMD items and collects their outcomes for agreement. Warns locally
+with `APPLY_ERROR` for failed items and rolls back their writes. Persists the
+pending command and checkpoint, then announces the local outcome digest.
 
 ### findings
 
@@ -415,11 +362,9 @@ reporting is unchanged.
 
 ## `_monsterApplySync`
 
-Applies the agreement decision, clears the pending command, and persists the
-checkpoint and repair state. Emits the SYNC event. Quorum impossibility is
-reported as a nonfatal `REPAIR_QUORUM_IMPOSSIBLE` error, while Raft stays
-online and new commands are blocked. A node outside the agreed quorum closes
-fatally.
+Records the agreement decision, clears the pending command, and emits SYNC.
+Reports required repair: quorum impossibility blocks new commands, while
+being outside agreement closes the node.
 
 ### findings
 
@@ -427,9 +372,8 @@ None.
 
 ## `_monsterApplyEntry`
 
-Dispatches committed no-op, CMD, and SYNC entries to their application paths.
-Defers CMD processing during drain, fatally rejects CMDs while repair is
-required, and rejects unknown entry types as Monster corruption.
+Dispatches committed Monster entries for application, respecting drain and
+repair state. Rejects unknown entry types as corruption.
 
 ### findings
 
@@ -437,9 +381,8 @@ None.
 
 ## `_monsterApply`
 
-Processes Raft's application batch sequentially, decoding Monster records
-and hashing each entry before dispatch. Checks for shutdown and prunes
-eligible history after each successful entry, returning one result per entry.
+Applies a batch of committed Monster entries in order and returns their
+results. Prunes eligible history as application advances.
 
 ### findings
 
@@ -457,12 +400,8 @@ None.
 
 ## `_monsterAwaitDecision`
 
-Registers the leader's own digest and requests follower outcomes until a
-quorum agrees or agreement becomes impossible, checking leadership
-throughout. Each newly recorded report wakes the wait to check again, and
-requests are re-sent at most once per `0.15 * pingTimeout`. Builds the
-corresponding SYNC record and determines whether the leader's local result
-belongs to the agreed group.
+Waits as leader until command outcomes establish agreement or make it
+impossible. Returns the resulting SYNC decision and whether the leader agrees.
 
 ### findings
 
@@ -470,9 +409,8 @@ None.
 
 ## `_monsterAppendSync`
 
-Checks that the caller is still leader in the expected term and appends a
-SYNC through the shared Monster append helper. Checks shutdown after
-completion and returns the SYNC sequence.
+Appends a SYNC while still leader in the expected term and returns its
+sequence.
 
 ### findings
 
@@ -480,9 +418,8 @@ None.
 
 ## `_monsterFenceLeader`
 
-Steps down and persists the outside-agreement repair state through the DB
-queue. Reports either a persistence failure or the resulting repair-required
-condition as fatal, then throws the error.
+Steps down, marks the leader as requiring repair for being outside agreement,
+and closes it through fatal reporting.
 
 ### findings
 
@@ -490,13 +427,9 @@ None.
 
 ## `_monsterLeaderQueue`
 
-Serializes command protocols after leader recovery. Checks leadership before
-capturing the term and waiting for that term's recovery, then requires the
-same term afterward. Settles the caller's result when agreement is known.
-Before fencing, it waits for that result promise, so a forwarding handler
-can reply first. Then completes the SYNC or repair operation. Steps down in
-the same term if the CMD/SYNC operation fails, and warns about later
-failures while open.
+Runs commands one at a time after leader recovery, from CMD submission
+through agreement and SYNC or repair. Returns the caller's outcome once
+agreement is known and steps down if the protocol fails in the same term.
 
 ### findings
 
@@ -504,10 +437,8 @@ None.
 
 ## `_monsterOnChange`
 
-Starts recovery once per leadership term, waiting for election readiness
-and committed application before examining pending command state. Resolves
-any pending CMD through SYNC or fences a leader outside agreement. On
-failure, it steps down and warns while the node is open.
+Recovers any pending command when leadership begins, completing its SYNC or
+requiring repair. Steps down and warns if recovery fails.
 
 ### findings
 
@@ -515,11 +446,8 @@ None.
 
 ## `_monsterRxFwdCmd`
 
-Validates a forwarded command request, including its size bound, and checks
-command availability, including drain, before submitting it to the leader's
-protocol queue. An oversized command is rejected as `forward CMD illegal`.
-Replies with agreed outcomes or an RPC error. After sending an error reply,
-it warns locally while open.
+Validates and handles forwarded command requests as leader. Replies with
+agreed outcomes or an error, warning locally when request processing fails.
 
 ### findings
 
@@ -527,10 +455,8 @@ None.
 
 ## `onReceive`
 
-Dispatches Monster messages from members and delegates ordinary Raft
-messages to the base class. Invalid outcome fields produce warnings in their
-handlers. Unexpected failures in detached outcome handlers enter the fatal
-reporting path.
+Routes member messages to the Monster or Raft protocol handlers. Reports
+unexpected outcome-handler failures as fatal.
 
 ### findings
 
@@ -538,9 +464,8 @@ None.
 
 ## `_monsterSendAndAwaitCmdAck`
 
-Sends a forwarded command with an append deadline and response validator.
-Returns an ACK or reconstructs the RPC error, racing the operation against
-shutdown.
+Sends a forwarded command and waits for a valid response, respecting timeout
+and shutdown. Returns the acknowledgement or throws the reported error.
 
 ### findings
 
@@ -548,9 +473,8 @@ None.
 
 ## `_monsterFwdCmdToLeader`
 
-Requires a known leader and forwards the command items with the current term
-and a unique correlation ID. Validates the reply's term and outcome shape,
-then returns the command sequence and serialized outcomes.
+Forwards command items to the known leader and returns their sequence and
+validated outcome tuples.
 
 ### findings
 
@@ -558,9 +482,8 @@ None.
 
 ## `_monsterAppendOrFwdCmd`
 
-Checks command availability and either queues the items locally as leader
-or forwards them to the leader. Converts either path's results into public
-settled outcomes, restoring error codes and available stacks.
+Submits commands to the local or remote leader and returns their sequence
+and public settled outcomes.
 
 ### findings
 
@@ -568,9 +491,8 @@ None.
 
 ## `append`
 
-Validates one command Buffer and its size bound, then submits it through the
-local-or-forwarded path with shutdown cancellation. Returns its sequence and
-value on success, or throws the command's rejected outcome.
+Submits one command and returns its sequence and agreed value. Rejects with
+the command's error when its agreed outcome is failure.
 
 ### findings
 
@@ -578,10 +500,8 @@ None.
 
 ## `appendBatch`
 
-Validates a nonempty array of command Buffers and the size bound of the CMD
-they form, then submits them as one CMD through the local-or-forwarded path.
-Returns the command sequence and settled outcomes for all items, racing
-against shutdown.
+Submits a batch as one CMD and returns its sequence and settled outcome for
+each item.
 
 ### findings
 
@@ -594,10 +514,8 @@ against shutdown.
 
 ## `drainCmd`
 
-Stops accepting commands, waits for an existing pending command to receive
-its decision, reports any saved DB failure, and closes the node. Returns the
-same drain promise on subsequent calls. On a node that is not open, it
-rejects without entering the draining state.
+Stops accepting commands and waits for any pending command's decision before
+closing. Reports saved DB failures and returns a promise for drain completion.
 
 ### findings
 
@@ -607,10 +525,8 @@ rejects without entering the draining state.
 
 ## `open`
 
-Loads DB1, initializes or validates DB2, checks repair state, prunes eligible
-history, and starts Raft. Repair state 1 opens live; repair state 2 refuses
-to open. On startup failure, closes the node's resources and rethrows the
-error.
+Opens the database pair, restores Monster state, and starts Raft. Refuses to
+open a node marked outside agreement and cleans up if startup fails.
 
 ### findings
 
@@ -620,9 +536,7 @@ error.
 
 ## `_monsterStop`
 
-Removes and rejects queued DB work and rejects any active DB operation using
-the shutdown error. This settles callers even if the active operation itself
-has not finished.
+Rejects active and queued DB work during shutdown.
 
 ### findings
 
@@ -630,9 +544,8 @@ None.
 
 ## `close`
 
-Stops Raft and rejects DB work, then attempts to close both databases.
-Preserves failed handles for another close attempt and throws the first
-cleanup failure.
+Stops the node and closes both databases. Reports cleanup failures while
+allowing failed closes to be retried.
 
 ### findings
 
@@ -641,8 +554,7 @@ cleanup failure.
 
 ## `del`
 
-Requires both database handles to be closed before deleting the database
-pair. Delegates DB1 deletion to the base class and removes DB2's SQLite files.
+Deletes both databases, requiring the pair to be closed.
 
 ### findings
 
@@ -650,8 +562,8 @@ None.
 
 ## `requireNormalFile` (`src/monsterft.js`)
 
-Requires each certification path to identify a normal file before opening
-DB2. Converts missing, inaccessible, and non-file paths into `FS_ERROR`.
+Checks that a certification path identifies a regular file, reporting invalid
+paths as `FS_ERROR`.
 
 ### findings
 
@@ -659,12 +571,9 @@ None.
 
 ## `MonsterFt.certify` (`src/monsterft.js`)
 
-Validates the database pair and override flag, then clears DB2's repair
-state in an exclusive transaction. It first sets exclusive locking mode, so
-it refuses a pair still open by a running node with `SQLITE_BUSY`. A missing
-metadata row is `MONSTER_CORRUPT`. By default it requires no unresolved CMD.
-It preserves the checkpoint and pending fields and returns the applied
-sequence.
+Clears a closed database pair's repair state and returns its applied
+sequence. Requires pending commands to be resolved unless explicitly
+overridden, and preserves the checkpoint and pending command metadata.
 
 ### findings
 
