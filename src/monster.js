@@ -1,1242 +1,414 @@
-import crypto from 'node:crypto'
-import fs from 'node:fs'
-import { DatabaseSync } from 'node:sqlite'
-import { pack, unpack } from 'msgpackr'
+import { pack } from 'msgpackr'
+import { RaftEngine, LEADER } from './raft.js'
 import * as Err from './error.js'
-import { RaftNode, MAX_SQLITE_BYTES } from './node.js'
 import * as util from './util.js'
 import * as utilm from './utilm.js'
+import * as sql from './utils.js'
+import { errorToWire } from './wire.js'
 
-const CMD = 'cmd'
-const SYNC = 'sync'
+const MONSTER_OUTCOME = 'monster_outcome'
+const MONSTER_OUTCOME_REQUEST = 'monster_outcome_request'
 
-const FWD_CMD = 'fwd_cmd'
-const OUTCOME = 'monster_outcome'
-const OUTCOME_REQUEST = 'monster_outcome_request'
-const ACK = 'ack'
-const ERR = 'err'
+const PHASE_CMD = 'cmd'
+const PHASE_DECISION = 'decision'
+const PHASE_SYNC = 'sync'
 
-const FULFILLED = 'fulfilled'
-const REJECTED = 'rejected'
-const FOLLOWER = 'follower'
-const LEADER = 'leader'
+const failure = (message, code) => new Err.ErrorWithCode(message, code)
+const MAX_SQLITE_BYTES = 999_999_000
+const commandBytes = (items, nodes) =>
+  items.reduce((total, item) => total + item.byteLength + 5, 64 + 9 * nodes)
 
-const REPAIR_NONE = 0
-const REPAIR_QUORUM_IMPOSSIBLE = 1
-const REPAIR_OUTSIDE_AGREEMENT = 2
-
-const noop = () => {}
-
-const asBuffer = (value) => {
-  if (value === null || value === undefined) { return value }
-  return Buffer.isBuffer(value)
-    ? value
-    : Buffer.from(value.buffer, value.byteOffset, value.byteLength)
-}
-
-const digestEntry = (term, buffer) => {
-  const prefix = Buffer.allocUnsafe(8)
-  prefix.writeBigUInt64LE(term)
-  const hash = crypto.createHash('sha256').update(prefix)
-  if (buffer !== null) { hash.update(buffer) }
-  return hash.digest()
-}
-
-const outcomesWire = (outcomes, includeStack=true) => outcomes.map((outcome) => {
-  if (outcome.status === FULFILLED) { return [0, outcome.result] }
-  const { message, code, sqlCode } = outcome.error
-  const item = [1, message, code, sqlCode]
-  if (includeStack && typeof outcome.error.stack === 'string') {
-    item.push(outcome.error.stack)
-  }
-  return item
-})
-
-const digestCmd = (term, cmdSeq, patchset, outcomes) => {
-  outcomes = outcomesWire(outcomes, false)
-  return crypto.createHash('sha256')
-    .update(pack([term, cmdSeq, patchset, outcomes]))
-    .digest()
-}
-
-const assertEncodable = (value) => {
-  try {
-    pack(value)
-  } catch {
-    throw new Err.ErrorWithCode(
-      'apply result is not MessagePack-encodable', Err.APPLY_ERROR,
-    )
-  }
-}
-
-// Upper bound on a packed CMD entry
-const cmdBytes = (items, nodeCount) =>
-  items.reduce((total, item) => total + item.byteLength + 5, 64 + 9 * nodeCount)
-
-const assertCmdSize = (items, nodeCount) => {
-  if (cmdBytes(items, nodeCount) <= MAX_SQLITE_BYTES) { return }
-  throw new Err.ErrorWithCode(
-    `command must encode to <= ${MAX_SQLITE_BYTES} bytes`, Err.ARGUMENT_ILLEGAL,
-  )
-}
-
-class MonsterNode extends RaftNode {
-  constructor(id, nodes, send, databasePath, opts={}) {
-    opts = typeof opts === 'function' ? opts() : opts
-    if (!opts || typeof opts.apply !== 'function') {
-      throw new Err.ErrorWithCode(
-        'apply must be a function',
-        Err.ARGUMENT_ILLEGAL,
-      )
+// Monster's pending operations are resumed only by later executor inputs.
+class MonsterEngine extends RaftEngine {
+  constructor(proc, opts = {}) {
+    super(proc, opts)
+    const meta = this.store.load()
+    this.repairState = Number(meta.repair_state)
+    this.pendingCommand = meta.pending_cmd_seq === null ? null : {
+      cmdSeq: meta.pending_cmd_seq, localDigest: utilm.asBuffer(meta.applied_local_digest),
     }
+    this.keep = utilm.normalizeKeepOptions(this.opts)
+    this.pendingApply = null
+    this.reports = new Map()
+    this.commands = []
+    this.leaderCommand = null
+    this.reportTimer = null
+    this.draining = false
+    this.drainRequests = []
+    this.fatalError = null
+    this.tickCount = 0n
+  }
 
-    const userApply = opts.apply
-    let monster = null
-    const apply = (...args) => monster._monsterApply(...args)
-    super(
-      id,
-      nodes,
-      send,
-      databasePath,
-      { ...opts, apply },
-    )
-    monster = this
-
-    const memory = databasePath === ':memory:'
-    const monsterDatabasePath = memory ? databasePath : `${databasePath}2`
-    if (!memory) {
-      const raftExists = fs.existsSync(databasePath)
-      const monsterExists = fs.existsSync(monsterDatabasePath)
-      if (raftExists !== monsterExists) {
-        throw new Err.ErrorWithCode(
-          'database pair must have both files present or both files absent',
-          Err.ARGUMENT_ILLEGAL,
-        )
-      }
+  repairError(state = this.repairState) {
+    if (state !== Err.REPAIR_NO_QUORUM && state !== Err.REPAIR_OUTSIDE) {
+      throw failure('repair state is illegal', Err.MONSTER_ILLEGAL)
     }
-
-    const keep = utilm.normalizeKeepOptions(opts)
-    this.db = null
-    this._monsterDatabasePath = monsterDatabasePath
-    this._monsterUserApply = userApply
-    this._monsterKeep = keep
-
-    this._monsterDbActive = false
-    this._monsterDbWork = null
-    this._monsterDbQueue = []
-    this._monsterDbError = null
-
-    this._monsterRepairState = REPAIR_NONE
-    this._monsterPendingCommand = null
-    this._monsterPendingReports = new Map()
-    this._monsterReportWake = null
-
-    this._monsterLeaderSync = Promise.resolve()
-    this._monsterLeaderSyncTerm = null
-    this._monsterProtocol = Promise.resolve()
-
-    this._monsterDraining = false
-    this._monsterDrainWork = null
-    this.on('change', (state) => this._monsterOnChange(state))
+    return failure('repair required', state)
   }
 
-  _autoRaft() {
-    return false
+  available() {
+    if (this.repairState !== Err.REPAIR_NONE) { throw this.repairError() }
+    if (this.draining) { throw failure('commands are draining', Err.DRAINING) }
   }
 
-  _monsterSortNodes(nodes) {
-    return [...new Set(nodes)].sort()
+  fatal(err) {
+    if (this.fatalError) { return }
+    this.fatalError = err
+    this.executor.clear()
   }
 
-  _monsterSyncAgrees(entry, localDigest) {
-    if (!entry.quorum) { return false }
-    if (entry.agree.includes(this.id)) { return true }
-    if (entry.disagree.includes(this.id)) { return false }
-    return asBuffer(localDigest).equals(asBuffer(entry.digest))
-  }
-
-  _monsterPrune() {
-    const keep = this._monsterKeep
-    if (keep === null || this.log.begin < 0n ||
-        this._monsterPendingCommand !== null) {
-      return
-    }
-    const retained = this._applySeq - this.log.begin + 1n
-    if (retained < keep.trigger) { return }
-
-    // DB2 already durably includes this applied prefix. Keep its checkpoint
-    // entry and every unapplied entry so the pair remains safe to reopen.
-    const begin = this._applySeq - keep.target + 1n
+  writeOne(query, args, context) {
     try {
-      this.log.db.prepare('DELETE FROM raft_log WHERE seq < ?').run(begin)
+      if (this.store.db.prepare(query).run(...args).changes !== 1n) {
+        throw failure('update count not one', Err.SQLITE_ERROR)
+      }
+    } catch (err) { throw Err.wrapError(err, Err.SQLITE_ERROR, `DB1 ${context} `) }
+  }
+
+  advanceApplied(seq, hash) {
+    this.writeOne(`UPDATE monsterft_meta SET applied_seq = ?, applied_entry_hash = ?
+      WHERE id = 1`, [seq, hash], 'advance applied')
+    this.appliedSeq = seq
+  }
+
+  prune() {
+    if (this.keep === null || this.log.begin < 0n || this.pendingCommand !== null) { return }
+    if (this.appliedSeq - this.log.begin + 1n < this.keep.trigger) { return }
+    try {
+      // The checkpoint and this deletion commit in the same DB1 transaction.
+      this.store.db.prepare('DELETE FROM raft_log WHERE seq < ?')
+        .run(this.appliedSeq - this.keep.target + 1n)
       this.log.readHead()
     } catch (err) {
-      throw Err.wrapError(err, Err.SQLITE_ERROR, 'DB1 retention ')
+      const code = err instanceof Err.ErrorWithCode ? err.code : Err.SQLITE_ERROR
+      throw Err.wrapError(err, code, 'DB1 retention ')
     }
   }
 
-  _monsterFatalError(err) {
-    if (!this._closing) { this._emitSafe('fatal', err) }
-    return err
+  start() {
+    if (this.repairState === Err.REPAIR_OUTSIDE) { throw this.repairError() }
+    this.prune()
+    super.start()
   }
 
-  _monsterRepairError(state=this._monsterRepairState) {
-    if (state !== REPAIR_QUORUM_IMPOSSIBLE &&
-        state !== REPAIR_OUTSIDE_AGREEMENT) {
-      throw this._monsterFatalError(new Err.ErrorWithCode(
-        'repair state is illegal', Err.MONSTER_ILLEGAL
-      ))
-    }
-    const code = state === REPAIR_QUORUM_IMPOSSIBLE
-      ? Err.REPAIR_QUORUM_IMPOSSIBLE
-      : Err.REPAIR_OUTSIDE_AGREEMENT
-    return new Err.ErrorWithCode('repair required', code)
+  reply(request, err, cmdSeq, outcomes) {
+    if (!request || request.replied) { return }
+    request.replied = true
+    const message = err ? {
+      type: 'err', term: this.term, ...errorToWire(err, false),
+    } : { type: 'ack', term: this.term, cmdSeq, results: outcomes }
+    if (request.to === 'gate') { this.output('gate', { ...message, clientId: request.clientId }) }
+    else { this.send(request.to, { ...message, cid: request.cid }) }
   }
 
-  _monsterAssertAvailable() {
-    if (!this.isOpen) {
-      throw new Err.ErrorWithCode('node not open', Err.NODE_NOT_OPEN)
-    }
-    if (this._monsterRepairState !== REPAIR_NONE) {
-      throw this._monsterRepairError()
-    }
-    if (this._monsterDraining) {
-      throw new Err.ErrorWithCode('commands are draining', Err.DRAINING)
-    }
+  protocolFailure(leaderCommand, err) {
+    if (this.leaderCommand !== leaderCommand) { return }
+    if (leaderCommand.request?.replied || !leaderCommand.request) { this.warn(err) }
+    this.reply(leaderCommand.request, err)
+    if (this.state === LEADER && this.term === leaderCommand.term) { this.follower() }
   }
 
-  _monsterAssertLeader(term=null) {
-    if (!this.isOpen) {
-      throw new Err.ErrorWithCode('node not open', Err.NODE_NOT_OPEN)
-    }
-    if (this.state !== LEADER) {
-      throw new Err.ErrorWithCode('node not leader', Err.NOT_LEADER)
-    }
-    if (term !== null && this.term !== term) {
-      throw new Err.ErrorWithCode('node term different', Err.TERM_DIFF)
-    }
+  fenceLeader() {
+    this.writeOne(`UPDATE monsterft_meta SET repair_state = ${Err.REPAIR_OUTSIDE} WHERE id = 1`, [], 'write repair')
+    this.repairState = Err.REPAIR_OUTSIDE
+    this.follower()
+    this.fatal(this.repairError())
   }
 
-  _monsterStepDownForTerm(term) {
-    if (this._closing || this.state !== LEADER || this.term !== term) {
-      return false
-    }
-    this._toFollower()
+  finishDrain() {
+    if (!this.draining || this.pendingApply !== null || this.pendingCommand !== null) { return false }
+    for (const clientId of this.drainRequests.splice(0)) { this.output('gate', { type: 'ack', clientId }) }
     return true
   }
 
-  async _monsterWriteTx(db, fn) {
-    let active = false
-    try {
-      this._throwIfClosing()
-      db.exec('BEGIN IMMEDIATE')
-      active = true
-      const result = await fn(db)
-      this._throwIfClosing()
-      db.exec('COMMIT')
-      active = false
-      return result
-    } catch (err) {
-      this._throwIfClosing()
-      if (active && db.isTransaction) {
-        try {
-          db.exec('ROLLBACK')
-        } catch (rollbackErr) {
-          this._emitSafe('error', Err.wrapError(err))
-          this._monsterFatalError(Err.wrapError(
-            rollbackErr,
-            Err.SQLITE_ERROR,
-            'DB2 rollback ',
-          ))
-        }
-      }
-      throw err
-    }
+  drain(clientId) {
+    this.draining = true
+    this.drainRequests.push(clientId)
+    for (const request of this.commands.splice(0)) { this.reply(request, failure('commands are draining', Err.DRAINING)) }
+    this.finishDrain()
   }
 
-  _monsterAdvanceApplied(db, seq, entryHash) {
-    try {
-      const result = db.prepare(`
-        UPDATE monsterft_meta
-        SET applied_seq = ?, applied_entry_hash = ?
-        WHERE id = 1
-      `).run(seq, entryHash)
-      if (result.changes !== 1n) {
-        throw new Err.ErrorWithCode(
-          'update count not one',
-          Err.SQLITE_ERROR,
-        )
-      }
-    } catch (err) {
-      throw Err.wrapError(err, Err.SQLITE_ERROR, 'DB2 advance applied ')
-    }
-  }
-
-  _monsterInstallPendingCmd(db, term, seq, patchset, outcomes, entryHash) {
-    const commandDigest = digestCmd(term, seq, patchset, outcomes)
-    try {
-      const result = db.prepare(`
-        UPDATE monsterft_meta
-        SET pending_cmd_seq = ?, pending_local_digest = ?,
-            applied_seq = ?, applied_entry_hash = ?
-        WHERE id = 1 AND pending_cmd_seq IS NULL
-          AND pending_local_digest IS NULL
-      `).run(seq, commandDigest, seq, entryHash)
-      if (result.changes !== 1n) {
-        throw new Err.ErrorWithCode(
-          'update count not one',
-          Err.SQLITE_ERROR,
-        )
-      }
-      return commandDigest
-    } catch (err) {
-      throw Err.wrapError(err, Err.SQLITE_ERROR, 'DB2 install pending CMD ')
-    }
-  }
-
-  _monsterWriteCmdDecision(db, seq, entryHash, repairState, cmdSeq) {
-    try {
-      const result = db.prepare(`
-        UPDATE monsterft_meta
-        SET pending_cmd_seq = NULL,
-            pending_local_digest = NULL,
-            applied_seq = ?,
-            applied_entry_hash = ?,
-            repair_state = ?
-        WHERE id = 1 AND pending_cmd_seq = ?
-      `).run(seq, entryHash, repairState, cmdSeq)
-      if (result.changes !== 1n) {
-        throw new Err.ErrorWithCode(
-          'update count not one',
-          Err.SQLITE_ERROR,
-        )
-      }
-    } catch (err) {
-      throw Err.wrapError(err, Err.SQLITE_ERROR, 'DB2 write CMD decision ')
-    }
-  }
-
-  _monsterWriteRepair(db, repairState) {
-    try {
-      const result = db.prepare(`
-        UPDATE monsterft_meta
-        SET repair_state = ?
-        WHERE id = 1
-      `).run(repairState)
-      if (result.changes !== 1n) {
-        throw new Err.ErrorWithCode(
-          'update count not one',
-          Err.SQLITE_ERROR,
-        )
-      }
-    } catch (err) {
-      throw Err.wrapError(err, Err.SQLITE_ERROR, 'DB2 write repair ')
-    }
-  }
-
-  _monsterReleaseDb(work, value, failed) {
-    this._monsterDbWork = null
-    this._monsterDbActive = false
-    failed ? work.reject(value) : work.resolve(value)
-    if (failed && this._monsterDbError === null) {
-      this._monsterDbError = Err.wrapError(value)
-    }
-    if (!this._closing) { this._monsterDrainDb() }
-  }
-
-  _monsterDrainDb() {
-    if (this._monsterDbActive) { return }
-    const work = this._monsterDbQueue.shift()
-    if (!work) { return }
-
-    this._monsterDbActive = true
-    this._monsterDbWork = work
-    let result = null
-    try {
-      this._throwIfClosing()
-      result = work.fn(this.db)
-    } catch (err) {
-      this._monsterReleaseDb(work, err, true)
-      return
-    }
-    Promise.resolve(result).then(
-      (value) => this._monsterReleaseDb(work, value, false),
-      (err) => this._monsterReleaseDb(work, err, true),
-    )
-  }
-
-  _monsterRunDb(fn) {
-    return new Promise((resolve, reject) => {
-      if (this._closing) {
-        reject(this._shutdownError ??
-          new Err.ErrorWithCode('node not open', Err.NODE_NOT_OPEN))
-        return
-      }
-      this._monsterDbQueue.push({
-        fn,
-        resolve,
-        reject,
-      })
-      this._monsterDrainDb()
+  execute(record, seq, hash, entry) {
+    const cid = this.random.cid()
+    this.pendingApply = { cid, seq, hash, tickCount: this.tickCount, count: entry?.items.length ?? 0 }
+    this.output('apply', {
+      type: 'execute', cid, tickCount: this.tickCount, term: record.term, seq,
+      entryHash: hash, items: entry?.items ?? null, matchIndex: entry?.matchIndex ?? null,
     })
   }
 
-  _monsterRunDbGetCmd(cmdSeq=null) {
-    return this._monsterRunDb(() => {
-      const command = this._monsterPendingCommand
-      if (command === null ||
-          (cmdSeq !== null && command.cmdSeq !== cmdSeq)) {
-        return null
-      }
-      return command
-    })
+  syncAgrees(entry, digest) {
+    if (!entry.quorum) { return false }
+    if (entry.agree.includes(this.id)) { return true }
+    if (entry.disagree.includes(this.id)) { return false }
+    return utilm.asBuffer(digest).equals(utilm.asBuffer(entry.digest))
   }
 
-  _monsterInit(db) {
-    const table = db.prepare(`
-      SELECT name FROM sqlite_schema
-      WHERE type = 'table' AND name = 'monsterft_meta'
-    `).get()
-    if (table === undefined) {
-      // Only an empty DB2 paired with an empty log can be initialized.
-      if (this.log.seq !== -1n ||
-          db.prepare('SELECT name FROM sqlite_schema LIMIT 1').get() !== undefined) {
-        throw new Err.ErrorWithCode(
-          'metadata table is missing', Err.MONSTER_CORRUPT,
-        )
-      }
-      db.exec(`
-        BEGIN IMMEDIATE;
-        CREATE TABLE monsterft_meta (
-          id INTEGER PRIMARY KEY CHECK (id = 1),
-          applied_seq INTEGER NOT NULL,
-          applied_entry_hash BLOB,
-          repair_state INTEGER NOT NULL CHECK (repair_state IN (0, 1, 2)),
-          pending_cmd_seq INTEGER,
-          pending_local_digest BLOB,
-          CHECK (
-            (applied_seq = -1 AND applied_entry_hash IS NULL) OR
-            (applied_seq >= 0 AND applied_entry_hash IS NOT NULL AND
-             length(applied_entry_hash) = 32)
-          ),
-          CHECK (
-            (pending_cmd_seq IS NULL AND pending_local_digest IS NULL) OR
-            (pending_cmd_seq IS NOT NULL AND pending_cmd_seq >= 0 AND
-             pending_cmd_seq <= applied_seq AND
-             pending_local_digest IS NOT NULL AND
-             length(pending_local_digest) = 32)
-          )
-        ) STRICT;
-
-        INSERT INTO monsterft_meta
-          (id, applied_seq, applied_entry_hash, repair_state,
-           pending_cmd_seq, pending_local_digest)
-        VALUES (1, -1, NULL, 0, NULL, NULL);
-        COMMIT;
-      `)
+  applySync(entry, seq, hash) {
+    const { agree, disagree } = utilm.validateSyncEntry(this, entry)
+    const command = this.pendingCommand
+    if (command === null || command.cmdSeq !== entry.cmdSeq) {
+      throw failure('SYNC entry is missing CMD', Err.MONSTER_CORRUPT)
     }
-
-    const meta = db.prepare(`
-      SELECT applied_seq, applied_entry_hash, repair_state,
-             pending_cmd_seq, pending_local_digest
-      FROM monsterft_meta
-      WHERE id = 1
-    `).get()
-    if (meta === undefined) {
-      throw new Err.ErrorWithCode(
-        'metadata row is missing', Err.MONSTER_CORRUPT,
-      )
-    }
-    const repairState = meta.repair_state
-    if (repairState !== BigInt(REPAIR_NONE) &&
-        repairState !== BigInt(REPAIR_QUORUM_IMPOSSIBLE) &&
-        repairState !== BigInt(REPAIR_OUTSIDE_AGREEMENT)) {
-      throw new Err.ErrorWithCode(
-        'stored repair state is corrupt', Err.MONSTER_CORRUPT,
-      )
-    }
-    this._applySeq = meta.applied_seq
-    this._monsterVerifyAppliedEntry(meta.applied_entry_hash)
-
-    const pendingSeq = meta.pending_cmd_seq
-    const pendingDigest = meta.pending_local_digest
-    if ((pendingSeq === null) !== (pendingDigest === null)) {
-      throw new Err.ErrorWithCode(
-        'pending command metadata is incomplete', Err.MONSTER_CORRUPT,
-      )
-    }
-    if (pendingSeq !== null) {
-      if (!util.isSeq(pendingSeq) || pendingSeq < 0n || pendingSeq > this._applySeq) {
-        throw new Err.ErrorWithCode(
-          'pending command sequence is corrupt', Err.MONSTER_CORRUPT,
-        )
-      }
-      if (!(pendingDigest instanceof Uint8Array) || pendingDigest.byteLength !== 32) {
-        throw new Err.ErrorWithCode(
-          'pending command digest is corrupt', Err.MONSTER_CORRUPT,
-        )
-      }
-    }
-    this._monsterRepairState = Number(repairState)
-    this._monsterPendingCommand = pendingSeq === null
-      ? null
-      : {
-          cmdSeq: pendingSeq,
-          localDigest: asBuffer(pendingDigest),
-        }
-    this._monsterPendingReports.clear()
+    const repair = !entry.quorum ? Err.REPAIR_NO_QUORUM :
+      this.syncAgrees(entry, command.localDigest) ? Err.REPAIR_NONE : Err.REPAIR_OUTSIDE
+    this.writeOne(`UPDATE monsterft_meta SET pending_cmd_seq = NULL,
+      applied_seq = ?, applied_entry_hash = ?, repair_state = ?
+      WHERE id = 1 AND pending_cmd_seq = ?`, [seq, hash, repair, entry.cmdSeq], 'write CMD decision')
+    this.pendingCommand = null
+    this.appliedSeq = seq
+    this.repairState = repair
+    this.reports.clear()
+    this.event('sync', { cmdSeq: entry.cmdSeq, syncSeq: seq, quorum: entry.quorum, agree, disagree })
+    if (repair === Err.REPAIR_NO_QUORUM) { this.queueLocalEvent('error', this.repairError()) }
+    if (repair === Err.REPAIR_OUTSIDE) { this.fatal(this.repairError()) }
   }
 
-  // Require that the log (DB1) contains the last entry that monster (DB2) applied
-  _monsterVerifyAppliedEntry(appliedEntryHash) {
-    if (!util.isSeq(this._applySeq) || this._applySeq > this.log.seq) {
-      throw new Err.ErrorWithCode(
-        'applied sequence is corrupt',
-        Err.MONSTER_CORRUPT,
-      )
-    }
-    if (this._applySeq === -1n) {
-      if (appliedEntryHash !== null) {
-        throw new Err.ErrorWithCode(
-          'applied entry hash must be null for initial state',
-          Err.MONSTER_CORRUPT,
-        )
-      }
-      return
-    }
-    if (!(appliedEntryHash instanceof Uint8Array) || appliedEntryHash.byteLength !== 32) {
-      throw new Err.ErrorWithCode(
-        'applied entry hash is corrupt', Err.MONSTER_CORRUPT,
-      )
-    }
-    const found = this.log.iter(this._applySeq, { iterStepSize: 1 }).next()
-    if (found.done) {
-      throw new Err.ErrorWithCode(
-        'applied log entry not found',
-        Err.MONSTER_CORRUPT,
-      )
-    }
-    const { term, entry } = found.value
-    const expected = digestEntry(term, entry)
-    if (!asBuffer(appliedEntryHash).equals(expected)) {
-      throw new Err.ErrorWithCode(
-        'applied entry hash does not match',
-        Err.MONSTER_CORRUPT,
-      )
+  rememberReport(from, digest) {
+    if (!this.reports.has(from)) { this.reports.set(from, utilm.asBuffer(digest)) }
+    if (this.leaderCommand?.phase === PHASE_DECISION) { this.executor.enqueue(() => this.decide()) }
+  }
+
+  announceOutcome() {
+    const command = this.pendingCommand
+    if (!command) { return }
+    if (this.state === LEADER) { this.rememberReport(this.id, command.localDigest) }
+    else if (this.leader !== null) {
+      this.send(this.leader, { type: MONSTER_OUTCOME, cmdSeq: command.cmdSeq, digest: command.localDigest })
     }
   }
 
-  _monsterRememberReport(from, digest) {
-    if (this._monsterPendingReports.has(from)) { return }
-    this._monsterPendingReports.set(from, asBuffer(digest))
-    this._monsterReportWake?.resolve()
-  }
-
-  _monsterDecision() {
-    const reports = this._monsterPendingReports
+  decide() {
+    const leaderCommand = this.leaderCommand
+    if (!leaderCommand || leaderCommand.phase !== PHASE_DECISION || this.state !== LEADER || this.term !== leaderCommand.term) { return }
     const groups = new Map()
-    let reported = 0
     let largest = 0
     let agreement = null
-    for (const [id, digest] of reports) {
-      reported++
+    for (const [id, digest] of this.reports) {
       const key = digest.toString('hex')
       let group = groups.get(key)
-      if (!group) {
-        group = { digest, nodes: [] }
-        groups.set(key, group)
-      }
+      if (!group) { group = { digest, nodes: [] }; groups.set(key, group) }
       group.nodes.push(id)
       largest = Math.max(largest, group.nodes.length)
       if (group.nodes.length >= this.quorum) { agreement = group }
     }
-    const unknown = this.nodes.length - reported
-    const impossible = !agreement && largest + unknown < this.quorum
-    return { agreement, impossible, reports }
+    const impossible = !agreement && largest + this.nodes.length - this.reports.size < this.quorum
+    if (!agreement && !impossible) { return }
+    this.executor.cancel(this.reportTimer)
+    this.reportTimer = null
+    const sync = agreement ? {
+      type: 'sync', cmdSeq: leaderCommand.cmdSeq, quorum: true, digest: agreement.digest,
+      agree: [...agreement.nodes].sort(),
+      disagree: [...this.reports].filter(([, digest]) => !digest.equals(agreement.digest)).map(([id]) => id).sort(),
+    } : {
+      type: 'sync', cmdSeq: leaderCommand.cmdSeq, quorum: false, agree: [], disagree: [...this.reports.keys()].sort(),
+    }
+    const agrees = this.syncAgrees(sync, this.pendingCommand.localDigest)
+    this.reply(leaderCommand.request,
+      agrees ? null : this.repairError(sync.quorum ? Err.REPAIR_OUTSIDE : Err.REPAIR_NO_QUORUM),
+      leaderCommand.cmdSeq, leaderCommand.outcomes)
+    if (sync.quorum && !agrees) { this.fenceLeader(); return }
+    leaderCommand.phase = PHASE_SYNC
+    leaderCommand.syncSeq = null
+    leaderCommand.syncSeq = this.appendEntry(pack(sync), (err) => {
+      if (err) { this.protocolFailure(leaderCommand, err) }
+      else { this.pumpLeader() }
+    })
   }
 
-  async _monsterRxOutcomeRequest(from, msg) {
-    try {
-      utilm.validateOutcomeRequestMsg(msg)
-    } catch (err) {
-      this._emitSafe('warn', err)
+  awaitDecision() {
+    this.rememberReport(this.id, this.pendingCommand.localDigest)
+    this.decide()
+    if (this.leaderCommand?.phase !== PHASE_DECISION) { return }
+    const ask = () => {
+      if (this.state !== LEADER || this.leaderCommand?.phase !== PHASE_DECISION) { return }
+      for (const to of this.nodes) {
+        if (to !== this.id) { this.send(to, { type: MONSTER_OUTCOME_REQUEST, cmdSeq: this.leaderCommand.cmdSeq }) }
+      }
+    }
+    ask()
+    this.executor.cancel(this.reportTimer)
+    this.reportTimer = this.executor.after(this.retryms, ask, this.retryms)
+  }
+
+  leaderChanged() {
+    if (!this.commands) { return }
+    if (this.state !== LEADER || this.leaderCommand && this.leaderCommand.term !== this.term) {
+      const err = failure('node not leader', Err.NOT_LEADER)
+      this.executor.cancel(this.reportTimer)
+      this.reportTimer = null
+      this.reply(this.leaderCommand?.request, err)
+      this.leaderCommand = null
+      for (const request of this.commands.splice(0)) { this.reply(request, err) }
       return
     }
-    const command = await this._monsterRunDbGetCmd(msg.cmdSeq)
-    if (command === null || this._closing) { return }
-    this.send(from, {
-      type: OUTCOME,
-      cmdSeq: command.cmdSeq,
-      digest: command.localDigest,
-    })
+    this.executor.enqueue(() => this.pumpLeader())
   }
 
-  async _monsterRxOutcome(from, msg) {
-    try {
-      utilm.validateOutcomeMsg(msg)
-    } catch (err) {
-      this._emitSafe('warn', err)
+  pumpLeader() {
+    if (this.stopped || this.fatalError || this.state !== LEADER) { return }
+    if (this.leaderCommand) {
+      if (this.leaderCommand.term !== this.term) { return }
+      if (this.leaderCommand.phase === PHASE_CMD && this.pendingCommand?.cmdSeq === this.leaderCommand.cmdSeq) {
+        this.leaderCommand.phase = PHASE_DECISION
+        this.awaitDecision()
+      } else if (this.leaderCommand.phase === PHASE_SYNC && this.leaderCommand.syncSeq !== null &&
+          this.appliedSeq >= this.leaderCommand.syncSeq) {
+        this.leaderCommand = null
+        this.pumpLeader()
+      }
       return
     }
-    if (this.state !== LEADER) { return }
-    const command = await this._monsterRunDbGetCmd(msg.cmdSeq)
-    if (this.state !== LEADER || command === null) { return }
-    this._monsterRememberReport(from, msg.digest)
-  }
-
-  _monsterAnnounceOutcome(cmdSeq, digest) {
-    if (this.state === LEADER) {
-      this._monsterRememberReport(this.id, digest)
-    } else if (this.leader !== null) {
-      this.send(this.leader, { type: OUTCOME, cmdSeq, digest })
-    }
-  }
-
-  async _monsterApplyNoop(term, seq, entryHash) {
-    await this._monsterRunDb(async (db) => {
-      this._throwIfClosing()
-      if (seq === 0n) {
-        await this._monsterWriteTx(db, async (db) => {
-          // user callback gets called with seq 0 (always a no-op) to allow SQL schema setup
-          await this._monsterUserApply(db, null, term, seq, 0, null)
-          this._throwIfClosing()
-          if (!db.isTransaction) {
-            throw new Err.ErrorWithCode(
-              'DB2 seq0 transaction ended', Err.SQLITE_ERROR,
-            )
-          }
-          this._monsterAdvanceApplied(db, seq, entryHash)
-        })
-        this._throwIfClosing()
-      } else {
-        this._monsterAdvanceApplied(db, seq, entryHash)
-      }
-      this._applySeq = seq
-    })
-  }
-
-  async _monsterApplyCmd(entry, term, seq, entryHash) {
-    utilm.validateCmdEntry(this, entry, seq)
-
-    let outcomes = null
-    let commandDigest = null
-    await this._monsterRunDb(async (db) => {
-      await this._monsterWriteTx(db, async (db) => {
-        const session = db.createSession({ db: 'main' })
-        let patchset = null
-        try {
-          outcomes = []
-
-          for (let index = 0; index < entry.items.length; index++) {
-            this._throwIfClosing()
-            // savepoints are faster than transactions
-            db.exec('SAVEPOINT monsterft_item')
-            let value = null
-            try {
-              value = await this._monsterUserApply(
-                db, asBuffer(entry.items[index]), term, seq, index,
-                entry.matchIndex,
-              )
-              assertEncodable(value)
-            } catch (err) {
-              this._throwIfClosing()
-              err = Err.wrapError(err)
-              this._emitSafe('warn', Err.wrapError({
-                message: err.message,
-                sqlCode: err.sqlCode,
-                stack: err.stack,
-              }, Err.APPLY_ERROR))
-              this._throwIfClosing()
-              if (!db.isTransaction) { throw err }
-              try {
-                db.exec('ROLLBACK TO monsterft_item')
-                db.exec('RELEASE monsterft_item')
-              } catch (rollbackErr) {
-                this._emitSafe('error', err)
-                throw rollbackErr
-              }
-              outcomes.push({
-                status: REJECTED,
-                error: err,
-              })
-              continue
-            }
-
-            this._throwIfClosing()
-            db.exec('RELEASE monsterft_item')
-            outcomes.push({ status: FULFILLED, result: value })
-          }
-          patchset = asBuffer(session.patchset())
-        } finally {
-          session.close()
-        }
-        commandDigest = this._monsterInstallPendingCmd(
-          db, term, seq, patchset, outcomes, entryHash,
-        )
-      })
-      this._throwIfClosing()
-      this._monsterPendingReports.clear()
-      this._monsterPendingCommand = {
-        cmdSeq: seq,
-        localDigest: commandDigest,
-      }
-      this._applySeq = seq
-      this._emitSafe(CMD, {
-        cmdSeq: seq,
-        cmdCount: entry.items.length,
-      })
-      this._throwIfClosing()
-    })
-    this._throwIfClosing()
-    this._monsterAnnounceOutcome(seq, commandDigest)
-    return {
-      localDigest: commandDigest,
-      outcomes,
-    }
-  }
-
-  async _monsterApplySync(entry, seq, entryHash) {
-    const { agree, disagree } = utilm.validateSyncEntry(this, entry)
-    const command = await this._monsterRunDbGetCmd(entry.cmdSeq)
-    if (!command) {
-      throw new Err.ErrorWithCode(
-        'SYNC entry is missing CMD',
-        Err.MONSTER_CORRUPT,
-      )
-    }
-    const healthy = this._monsterSyncAgrees(entry, command.localDigest)
-    let repairState = REPAIR_NONE
-    if (!entry.quorum) {
-      repairState = REPAIR_QUORUM_IMPOSSIBLE
-    } else if (!healthy) {
-      repairState = REPAIR_OUTSIDE_AGREEMENT
-    }
-    if (repairState === REPAIR_OUTSIDE_AGREEMENT && this.state === LEADER) {
-      this._toFollower()
-    }
-
-    await this._monsterRunDb(async (db) => {
-      await this._monsterWriteTx(db, (db) => {
-        this._monsterWriteCmdDecision(
-          db, seq, entryHash, repairState, entry.cmdSeq,
-        )
-      })
-      this._throwIfClosing()
-      this._monsterPendingCommand = null
-      this._applySeq = seq
-      this._monsterPendingReports.clear()
-      this._monsterRepairState = repairState
-      this._emitSafe(SYNC, {
-        cmdSeq: entry.cmdSeq,
-        syncSeq: seq,
-        quorum: entry.quorum,
-        agree: [...agree],
-        disagree: [...disagree],
-      })
-      this._throwIfClosing()
-    })
-
-    if (repairState === REPAIR_QUORUM_IMPOSSIBLE) {
-      this._emitSafe('error', this._monsterRepairError(repairState))
-    } else if (repairState === REPAIR_OUTSIDE_AGREEMENT) {
-      const err = this._monsterRepairError(repairState)
-      this._monsterFatalError(err)
+    // The election no-op must be committed and applied before resuming protocol work.
+    if (this.commitTerm !== this.term || this.appliedSeq < this.commitSeq || this.pendingApply) { return }
+    if (this.repairState !== Err.REPAIR_NONE) {
+      for (const request of this.commands.splice(0)) { this.reply(request, this.repairError()) }
       return
     }
-    this._throwIfClosing()
-  }
-
-  async _monsterApplyEntry(entry, term, seq, isNoop, entryHash) {
-    if (isNoop) {
-      await this._monsterApplyNoop(term, seq, entryHash)
-      return null
-    } else if (entry?.type === CMD) {
-      if (this._monsterDraining) {
-        await this._monsterDrainWork
-        // already closing at this time so null never really goes anywhere
-        return null
-      }
-      if (this._monsterRepairState !== REPAIR_NONE) {
-        this._monsterFatalError(this._monsterRepairError())
-        // fatal closes so this also goes nowhere
-        return null
-      }
-      return this._monsterApplyCmd(entry, term, seq, entryHash)
-    } else if (entry?.type === SYNC) {
-      await this._monsterApplySync(entry, seq, entryHash)
-      return null
+    if (this.pendingCommand !== null) {
+      this.leaderCommand = { term: this.term, cmdSeq: this.pendingCommand.cmdSeq, request: null, phase: PHASE_DECISION }
+      this.awaitDecision()
+      return
     }
-    throw new Err.ErrorWithCode('entry type is corrupt', Err.MONSTER_CORRUPT)
+    if (this.finishDrain()) { return }
+    const request = this.commands.shift()
+    if (!request) { return }
+    const leaderCommand = { term: this.term, request, cmdSeq: null, outcomes: null, phase: PHASE_CMD }
+    this.leaderCommand = leaderCommand
+    const matchIndex = this.nodes.map((id) => id === this.id ? this.seq : this.replication.get(id)?.matchIndex ?? -1n)
+    leaderCommand.cmdSeq = this.appendEntry(pack({ type: 'cmd', items: request.items, matchIndex }), (err) => {
+      if (err) { this.protocolFailure(leaderCommand, err) }
+      else { this.pumpLeader() }
+    })
   }
 
-  // RaftNode apply entry point
-  async _monsterApply(node, bufs, seqs, terms) {
-    const results = []
-    for (let idx = 0; idx < bufs.length; idx++) {
-      this._throwIfClosing()
-      const buf = bufs[idx]
-      const seq = seqs[idx]
-      const term = terms[idx]
-      let entry = null
-      if (buf !== null) {
-        entry = unpack(buf)
-      }
-      const entryHash = digestEntry(term, buf)
-      results.push(await this._monsterApplyEntry(
-        entry,
-        term,
-        seq,
-        buf === null,
-        entryHash,
-      ))
-      this._throwIfClosing()
-      this._monsterPrune()
-    }
-    return results
-  }
-
-  async _monsterAppendEntry(entry) {
-    if (entry.type === CMD) {
-      // matchIndex may be interesting to the user so add it here
-      const matchIndex = this.nodes.map((id) => {
-        if (id === this.id) { return this.seq }
-        return this._replication.get(id)?.matchIndex ?? -1n
-      })
-      entry = { ...entry, matchIndex }
-    }
-    return super.append(pack(entry))
-  }
-
-  async _monsterAwaitDecision(command, term=null) {
-    term = term ?? this.term
-    this._monsterAssertLeader(term)
-    this._monsterRememberReport(this.id, command.localDigest)
-
-    let decision = null
-    const retryms = this._timers.retry
-    let requested = -Infinity
-    while (true) {
-      this._monsterAssertLeader(term)
-      decision = this._monsterDecision()
-      if (decision.agreement || decision.impossible) { break }
-      if (Date.now() - requested >= retryms) {
-        requested = Date.now()
-        this.nodes.filter((id) => id !== this.id).forEach((to) => {
-          this.send(to, { type: OUTCOME_REQUEST, cmdSeq: command.cmdSeq })
-        })
-      }
-      const wake = util.oneShot()
-      this._monsterReportWake = wake
-      const timer = setTimeout(wake.resolve, retryms)
-      try {
-        await this._raceShutdown(wake.promise)
-      } finally {
-        clearTimeout(timer)
-        if (this._monsterReportWake === wake) { this._monsterReportWake = null }
-      }
-    }
-
-    let sync = null
-    if (decision.impossible) {
-      sync = {
-        type: SYNC,
-        cmdSeq: command.cmdSeq,
-        quorum: false,
-        agree: [],
-        disagree: this._monsterSortNodes(decision.reports.keys()),
-      }
-    } else {
-      const { agreement } = decision
-      const disagree = [...decision.reports]
-        .filter(([, digest]) => !asBuffer(digest).equals(agreement.digest))
-        .map(([id]) => id)
-      sync = {
-        type: SYNC,
-        cmdSeq: command.cmdSeq,
-        quorum: true,
-        digest: agreement.digest,
-        agree: this._monsterSortNodes(agreement.nodes),
-        disagree: this._monsterSortNodes(disagree),
-      }
-    }
-    const leaderAgrees = this._monsterSyncAgrees(
-      sync,
-      command.localDigest,
-    )
-    return { leaderAgrees, sync }
-  }
-
-  async _monsterAppendSync(entry, term) {
-    this._monsterAssertLeader(term)
-    const appended = await this._monsterAppendEntry(entry)
-    this._throwIfClosing()
-    const [syncSeq] = appended
-    return syncSeq
-  }
-
-  async _monsterFenceLeader() {
-    this._toFollower(null, this.state !== FOLLOWER)
-    try {
-      await this._monsterRunDb((db) => {
-        this._throwIfClosing()
-        this._monsterWriteRepair(db, REPAIR_OUTSIDE_AGREEMENT)
-        this._monsterRepairState = REPAIR_OUTSIDE_AGREEMENT
-      })
-    } catch (err) {
-      if (!(err instanceof Err.ErrorWithCode)) {
-        err = Err.wrapError(err, Err.SQLITE_ERROR, 'DB2 fence ')
-      }
-      throw this._monsterFatalError(err)
-    }
-
-    const err = this._monsterRepairError(REPAIR_OUTSIDE_AGREEMENT)
-    throw this._monsterFatalError(err)
-  }
-
-  _monsterLeaderQueue(cmdItems) {
-    const response = util.oneShot()
-    const resultPromise = this._raceShutdown(response.promise)
-    const run = async () => {
-      this._monsterAssertLeader()
-      const term = this.term
-      await this._monsterLeaderSync
-      this._monsterAssertAvailable()
-      this._monsterAssertLeader(term)
-      try {
-        const appended = await this._monsterAppendEntry({ type: CMD, items: cmdItems })
-        this._throwIfClosing()
-        const [cmdSeq, applied] = appended
-        const command = { cmdSeq, localDigest: applied.localDigest }
-        const decision = await this._monsterAwaitDecision(command, term)
-        const result = { cmdSeq, outcomes: applied.outcomes }
-        if (decision.leaderAgrees) {
-          response.resolve(result)
-        } else {
-          const repairState = decision.sync.quorum
-            ? REPAIR_OUTSIDE_AGREEMENT
-            : REPAIR_QUORUM_IMPOSSIBLE
-          response.reject(this._monsterRepairError(repairState))
-        }
-        if (decision.sync.quorum && !decision.leaderAgrees) {
-          // Let the caller send its response before fencing closes transport.
-          await resultPromise.catch(noop)
-          await this._monsterFenceLeader()
+  applyReady() {
+    if (this.stopped || this.fatalError || this.pendingApply !== null) { return }
+    while (this.appliedSeq < this.commitSeq) {
+      const seq = this.appliedSeq + 1n
+      const record = this.entry(seq)
+      if (!record) { throw failure(`apply entry ${seq} not found`, Err.MONSTER_CORRUPT) }
+      const hash = utilm.digestEntry(record.term, record.entry)
+      if (record.entry.length === 0) {
+        if (seq === 0n) {
+          this.execute(record, seq, hash, null)
           return
         }
-        const syncSeq = await this._monsterAppendSync(
-          decision.sync,
-          term,
-        )
-        return { cmdSeq, syncSeq }
-      } catch (err) {
-        // Let another leader resolve an append whose outcome is uncertain.
-        this._monsterStepDownForTerm(term)
-        throw err
-      }
-    }
-    const operation = this._monsterProtocol.then(run)
-    this._monsterProtocol = operation.then(noop, noop)
-    const completion = this._raceShutdown(operation)
-    completion.catch((err) => {
-      if (response.reject(err)) { return }
-      if (!this._closing) { this._emitSafe('warn', err) }
-    })
-    return resultPromise
-  }
-
-  // new leaders always resume CMD which need SYNC
-  _monsterOnChange(state) {
-    if (state.state !== LEADER) { return }
-    const term = state.term
-    // only start once per term
-    if (this._monsterLeaderSyncTerm === term) { return }
-    this._monsterLeaderSyncTerm = term
-    const leaderSync = async () => {
-      const ready = this._leaderReady
-      if (ready && ready.term === term) { await ready.promise }
-      this._monsterAssertLeader(term)
-      await this._apply(this._commitSeq)
-      this._monsterAssertLeader(term)
-      let command = null
-      try {
-        command = await this._monsterRunDbGetCmd()
-      } catch (err) {
-        throw this._monsterFatalError(err)
-      }
-      // CMD needs SYNC
-      if (command !== null) {
-        this._monsterAssertLeader(term)
-        const decision = await this._monsterAwaitDecision(command, term)
-        if (decision.sync.quorum && !decision.leaderAgrees) {
-          await this._monsterFenceLeader()
-        } else {
-          await this._monsterAppendSync(decision.sync, term)
+        this.advanceApplied(seq, hash)
+      } else {
+        const entry = utilm.decodeEntry(record.entry)
+        if (entry.type === 'cmd') {
+          if (this.draining) { this.finishDrain(); return }
+          if (this.repairState !== Err.REPAIR_NONE) { this.fatal(this.repairError()); return }
+          utilm.validateCmdEntry(this, entry, seq)
+          if (this.pendingCommand !== null) {
+            throw failure('CMD entry while another CMD is pending', Err.MONSTER_ILLEGAL)
+          }
+          this.execute(record, seq, hash, entry)
+          return
         }
+        this.applySync(entry, seq, hash)
+        if (this.fatalError) { return }
       }
+      this.prune()
+      if (this.finishDrain()) { return }
     }
-    this._monsterLeaderSync = leaderSync().catch((err) => {
-      this._monsterStepDownForTerm(term)
-      if (!this._closing) { this._emitSafe('warn', err) }
-      throw err
-    })
-    this._monsterLeaderSync.catch(noop)
+    this.pumpLeader()
+    this.finishDrain()
   }
 
-  // follower forward CMD to leader
-  async _monsterRxFwdCmd(from, msg) {
-    if (!util.isCid(msg.cid)) { return }
-    const error = (err) => {
-      this.send(from, util.errorRpc(this.term, msg.cid, err))
+  receiveApply(reply) {
+    const pending = this.pendingApply
+    if (!pending || reply.cid !== pending.cid || reply.tickCount !== pending.tickCount) {
+      throw failure('Apply reply has no matching request', Err.MONSTER_ILLEGAL)
     }
-    if (!utilm.isFwdCmdMsg(msg) ||
-        cmdBytes(msg.items, this.nodes.length) > MAX_SQLITE_BYTES) {
-      error(new Err.ErrorWithCode('forward CMD illegal', Err.RPC_ILLEGAL))
-      return
+    const receipt = sql.validateReceipt(reply.receipt)
+    if (receipt.seq !== pending.seq || !utilm.asBuffer(receipt.entry_hash).equals(pending.hash) ||
+        !utilm.isOutcomes(reply.outcomes, pending.count) ||
+        (receipt.seq === 0n && !utilm.asBuffer(receipt.local_digest).equals(Buffer.alloc(util.HASH_BYTES)))) {
+      throw failure('Apply reply does not match execution', Err.MONSTER_CORRUPT)
     }
-    if (this.state !== LEADER) {
-      error(new Err.ErrorWithCode('node not leader', Err.NOT_LEADER))
-      return
+    sql.copyApplyInto(this.store.db, receipt)
+    this.appliedSeq = receipt.seq
+    this.pendingApply = null
+    if (receipt.seq > 0n) {
+      this.pendingCommand = { cmdSeq: receipt.seq, localDigest: utilm.asBuffer(receipt.local_digest) }
+      this.reports.clear()
+      if (this.leaderCommand?.cmdSeq === receipt.seq) { this.leaderCommand.outcomes = reply.outcomes }
+      this.event('cmd', { cmdSeq: receipt.seq, cmdCount: pending.count })
+      this.announceOutcome()
     }
-    if (msg.term !== this.term) {
-      error(new Err.ErrorWithCode('node term different', Err.TERM_DIFF))
-      return
-    }
+    this.prune()
+    this.applyReady()
+  }
+
+  submit(clientId, items) {
+    const request = { to: 'gate', clientId, items, replied: false }
     try {
-      this._monsterAssertAvailable()
-      const result = await this._monsterLeaderQueue(msg.items)
-      this.send(from, {
-        type: ACK,
-        term: this.term,
-        cid: msg.cid,
-        cmdSeq: result.cmdSeq,
-        results: outcomesWire(result.outcomes),
-      })
-    } catch (err) {
-      error(err)
-      if (!this._closing) { this._emitSafe('warn', err) }
-    }
-  }
-
-  async onReceive(from, msg) {
-    if (!util.isRpc(msg)) { return }
-    const custom = [FWD_CMD, OUTCOME, OUTCOME_REQUEST]
-    if (!custom.includes(msg.type)) { return super.onReceive(from, msg) }
-    if (!this.nodes.includes(from) || !this.isOpen) { return }
-
-    switch (msg.type) {
-      case FWD_CMD:
-        await this._monsterRxFwdCmd(from, msg)
-        return
-      case OUTCOME:
-        this._monsterRxOutcome(from, msg)
-          .catch((err) => this._monsterFatalError(err))
-        return
-      case OUTCOME_REQUEST:
-        this._monsterRxOutcomeRequest(from, msg)
-          .catch((err) => this._monsterFatalError(err))
-        return
-    }
-  }
-
-  _monsterSendAndAwaitCmdAck(to, msg, validate) {
-    const work = this._sendAndAwaitResponse(
-      to, msg, this._timers.append,
-      new Err.ErrorWithCode('forward CMD timeout', Err.APPEND_TIMEOUT),
-      validate,
-    ).then((response) => {
-      if (response.type === ACK) { return response }
-      throw Err.wrapError(response)
-    })
-    return this._raceShutdown(work)
-  }
-
-  async _monsterFwdCmdToLeader(items) {
-    const leader = this.leader
-    const term = this.term
-    if (leader === null) {
-      throw new Err.ErrorWithCode('forward no leader', Err.NO_LEADER)
-    }
-    const cid = crypto.randomUUID()
-    const msg = { type: FWD_CMD, cid, term, items }
-    const validate = (response) => {
-      if (!util.isTerm(response.term)) { return false }
-      if (response.type === ERR) { return true }
-      return utilm.isFwdCmdAck(response, items.length)
-    }
-    const response = await this._monsterSendAndAwaitCmdAck(
-      leader, msg, validate,
-    )
-    return [response.cmdSeq, response.results]
-  }
-
-  async _monsterAppendOrFwdCmd(items) {
-    this._monsterAssertAvailable()
-    let cmdSeq = null
-    let outcomes = null
+      this.available()
+      if (commandBytes(items, this.nodes.length) > MAX_SQLITE_BYTES) {
+        throw failure('command items are illegal', Err.ARGUMENT_ILLEGAL)
+      }
+      if (this.state !== LEADER && this.leader === null) {
+        throw failure('forward no leader', Err.NO_LEADER)
+      }
+    } catch (err) { this.reply(request, err); return }
     if (this.state === LEADER) {
-      const result = await this._monsterLeaderQueue(items)
-      cmdSeq = result.cmdSeq
-      outcomes = outcomesWire(result.outcomes)
+      this.commands.push(request)
+      this.pumpLeader()
     } else {
-      [cmdSeq, outcomes] = await this._monsterFwdCmdToLeader(items)
+      const onReply = (err, reply) => {
+        if (err) {
+          // This stack came from another node.
+          if (!request.replied) {
+            request.replied = true
+            this.output('gate', { type: 'err', clientId: request.clientId, ...errorToWire(err, typeof reply?.stack === 'string') })
+          }
+        } else { this.reply(request, null, reply.cmdSeq, reply.results) }
+      }
+      const validateReply = (reply) => {
+        if (reply.type === 'err') { return true }
+        utilm.validateCommandResult(reply, items.length)
+        return true
+      }
+      this.request(this.leader, { type: 'fwd_cmd', term: this.term, items },
+        this.opts.appendTimeout, onReply, validateReply)
     }
-    outcomes = outcomes.map((item) => {
-      if (item[0] === 0) {
-        return { status: FULFILLED, value: item[1] }
-      }
-      return {
-        status: REJECTED,
-        reason: Err.wrapError({
-          message: item[1], code: item[2], sqlCode: item[3], stack: item[4],
-        }),
-      }
-    })
-    return [cmdSeq, outcomes]
   }
 
-  async append(data) {
-    if (!this.isOpen) {
-      throw new Err.ErrorWithCode('node not open', Err.NODE_NOT_OPEN)
-    }
-    if (!Buffer.isBuffer(data)) {
-      throw new Err.ErrorWithCode('data must be buffer', Err.ARGUMENT_ILLEGAL)
-    }
-    assertCmdSize([data], this.nodes.length)
-    const [cmdSeq, outcomes] = await this._raceShutdown(
-      this._monsterAppendOrFwdCmd([data]),
-    )
-    const outcome = outcomes[0]
-    if (outcome.status === REJECTED) { throw outcome.reason }
-    return [cmdSeq, outcome.value]
-  }
-
-  async appendBatch(data) {
-    if (!this.isOpen) {
-      throw new Err.ErrorWithCode('node not open', Err.NODE_NOT_OPEN)
-    }
-    if (!Array.isArray(data) || data.length <= 0) {
-      throw new Err.ErrorWithCode(
-        'data must be array with length > 0', Err.ARGUMENT_ILLEGAL)
-    }
-    if (!data.every((buf) => Buffer.isBuffer(buf))) {
-      throw new Err.ErrorWithCode(
-        'data must be array of buffers', Err.ARGUMENT_ILLEGAL)
-    }
-    assertCmdSize(data, this.nodes.length)
-    return this._raceShutdown(this._monsterAppendOrFwdCmd(data))
-  }
-
-  // drain is an important part of the supported repair procedure
-  // it would be wrong to copy a db to a node that needs repair if a CMD exists without a SYNC
-  // it would be wrong because CMD outcome from 1 node would be counted as coming from 2 nodes
-  drainCmd() {
-    if (this._monsterDrainWork) { return this._monsterDrainWork }
-    if (!this.isOpen) {
-      return Promise.reject(
-        new Err.ErrorWithCode('node not open', Err.NODE_NOT_OPEN),
-      )
-    }
-    this._monsterDraining = true
-    const retryms = this._timers.retry
-    const work = this._monsterRunDbGetCmd().then(async (pending) => {
-      this._throwIfClosing()
-      if (pending !== null) {
-        const { cmdSeq } = pending
-        while (await this._monsterRunDbGetCmd(cmdSeq) !== null) {
-          this._throwIfClosing()
-          await this._delay(retryms)
-        }
-        this._throwIfClosing()
+  receive(from, msg) {
+    if (super.receive(from, msg)) { return }
+    if (msg.type === 'fwd_cmd') {
+      if (!util.isCid(msg.cid)) {
+        this.warn(failure(`fwd_cmd from ${from} cid is illegal`, Err.RPC_ILLEGAL))
+        return
       }
-      // Drain can close before a failed DB operation reaches fatal reporting.
-      if (this._monsterDbError !== null) {
-        const err = this._monsterDbError
-        this._monsterDbError = null
-        this._emitSafe('error', err)
-      }
-      this.close()
-    })
-    this._monsterDrainWork = this._raceShutdown(work)
-    this._monsterDrainWork.catch(noop)
-    return this._monsterDrainWork
-  }
-
-  open() {
-    if (this.isOpen) { return }
-
-    try {
-      super.open()
-
+      const request = { to: from, cid: msg.cid, items: msg.items, replied: false }
       try {
-        const db = new DatabaseSync(
-          this._monsterDatabasePath,
-          { readBigInts: true },
-        )
-        this.db = db
-        db.exec('PRAGMA journal_mode = WAL')
-        db.exec('PRAGMA synchronous = FULL')
-        this._monsterInit(db)
-      } catch (err) {
-        if (!(err instanceof Err.ErrorWithCode)) {
-          err = Err.wrapError(err, Err.SQLITE_ERROR, 'DB2 open ')
+        util.validate(utilm.monsterSchemas.forwarded, msg, 'forward CMD')
+        if (commandBytes(msg.items, this.nodes.length) > MAX_SQLITE_BYTES) {
+          throw failure('forward CMD illegal', Err.RPC_ILLEGAL)
         }
-        throw err
+        if (this.state !== LEADER) { throw failure('node not leader', Err.NOT_LEADER) }
+        if (msg.term !== this.term) { throw failure('node term different', Err.TERM_DIFF) }
+        this.available()
+      } catch (err) { this.reply(request, err); this.warn(err); return }
+      this.commands.push(request)
+      this.pumpLeader()
+    } else if (msg.type === MONSTER_OUTCOME_REQUEST) {
+      try { utilm.validateOutcomeRequestMsg(msg) } catch (err) { this.warn(err); return }
+      if (this.pendingCommand?.cmdSeq === msg.cmdSeq) {
+        this.send(from, { type: MONSTER_OUTCOME, cmdSeq: msg.cmdSeq, digest: this.pendingCommand.localDigest })
       }
-      if (this._monsterRepairState === REPAIR_OUTSIDE_AGREEMENT) {
-        throw this._monsterRepairError()
+    } else if (msg.type === MONSTER_OUTCOME) {
+      try { utilm.validateOutcomeMsg(msg) } catch (err) { this.warn(err); return }
+      if (this.state === LEADER && this.pendingCommand?.cmdSeq === msg.cmdSeq) {
+        this.rememberReport(from, msg.digest)
       }
-      this._monsterPrune()
-      this._startRaft()
-    } catch (err) {
-      if (!this._closing) { this._closeAfterOpenFailure() }
-      throw err
+    } else {
+      this.warn(failure(`unknown message type '${msg.type}' from ${from}`, Err.RPC_ILLEGAL))
     }
-  }
-
-  _monsterStop() {
-    const err = this._shutdownError ??
-      new Err.ErrorWithCode('node not open', Err.NODE_NOT_OPEN)
-    const queued = this._monsterDbQueue.splice(0)
-    queued.forEach((work) => work.reject(err))
-    if (this._monsterDbWork !== null) {
-      this._monsterDbWork.reject(err)
-    }
-  }
-
-  close() {
-    this._stopRaft()
-    this._monsterStop()
-
-    let failure = null
-    if (this.db !== null) {
-      const db = this.db
-      try {
-        db.close()
-        this.db = null
-      } catch (err) {
-        failure = Err.wrapError(err, Err.SQLITE_ERROR, 'DB2 close ')
-      }
-    }
-
-    try {
-      super.close()
-    } catch (err) {
-      if (failure === null) { failure = err }
-    }
-
-    if (failure !== null) { throw failure }
-  }
-
-  del() {
-    if (this.log.isOpen) {
-      throw new Err.ErrorWithCode('DB1 is open', Err.LOG_OPEN)
-    }
-    if (this.db !== null) {
-      throw new Err.ErrorWithCode('DB2 is open', Err.LOG_OPEN)
-    }
-    super.del()
-    util.deleteSQLiteFiles(this._monsterDatabasePath)
   }
 }
 
-export { MonsterNode }
+export { MonsterEngine }

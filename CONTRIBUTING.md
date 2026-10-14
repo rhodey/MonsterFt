@@ -1,16 +1,20 @@
+(This is a medium-length doc that allows us to use merged PRs commercially)
+
+(This is not a suggestion that you should avoid reading it) 
+
 # LOCK HOST, INC. Contributor License Agreement
 
 Version 1.0
 
-Thank you for your interest in contributing to software projects managed by
-LOCK HOST, INC., a Delaware corporation ("We" or "Us").
+Thank you for your interest in contributing to the software project maintained
+in this repository (the "Project"), managed by LOCK HOST, INC., a Delaware
+corporation ("We" or "Us").
 
 This contributor agreement ("Agreement") documents the rights granted by
-contributors to Us. It covers Contributions to all current and future software
-projects managed by Us. This Agreement takes effect when We accept Your signature
-as described in Section 7 and covers Contributions Submitted before signing as
-well as future Contributions. This is a legally binding document, so please read
-it carefully before agreeing to it.
+contributors to Us. It applies only to Your Contributions to the Project,
+whether Submitted before or after signing. This Agreement takes effect when We
+accept Your signature as described in Section 7. This is a legally binding
+document, so please read it carefully before agreeing to it.
 
 ## 1. Definitions
 
@@ -28,11 +32,11 @@ elect the management or other persons who direct such Legal Entity or
 (iii) beneficial ownership of such entity. References to Your Affiliates apply
 only when You are a Legal Entity.
 
-"Contribution" means any work of authorship that is Submitted by You to Us in
-which You own or assert ownership of the Copyright. If You do not own the
-Copyright in the entire work of authorship, identify the third-party material,
-its owner, its license, and any other restrictions in the contribution's pull
-request so that We can resolve the necessary permissions before accepting it.
+"Contribution" means any work of authorship that You Submit to Us for the
+Project and in which You own or assert ownership of the Copyright. If You do
+not own the Copyright in the entire work of authorship, identify the third-party
+material, its owner, its license, and any other restrictions in the contribution's
+pull request so that We can resolve the necessary permissions before accepting it.
 
 "Copyright" means all rights protecting works of authorship owned or controlled
 by You or Your Affiliates, including copyright, moral and neighboring rights,
@@ -46,7 +50,7 @@ Contribution, it may be included in the Material.
 "Submit" means any form of electronic, verbal, or written communication sent
 to Us or our representatives, including but not limited to electronic mailing
 lists, source code control systems, and issue tracking systems that are managed
-by, or on behalf of, Us for the purpose of discussing and improving the Material,
+by, or on behalf of, Us for the purpose of discussing and improving the Project,
 but excluding communication that is conspicuously marked or otherwise designated
 in writing by You as "Not a Contribution." For a Legal Entity, submissions
 include those made on its behalf by its authorized representatives.
@@ -156,7 +160,8 @@ The United Nations Convention on Contracts for the International Sale of Goods
 does not apply to this Agreement.
 
 6.2 This Agreement sets out the entire agreement between You and Us for Your
-Contributions to Us and overrides all other agreements or understandings.
+Contributions to the Project and overrides all other agreements or understandings
+about those Contributions.
 
 6.3 If You or We assign the rights or obligations received through this
 Agreement to a third party, as a condition of the assignment, that third party
@@ -186,10 +191,10 @@ later version.
 Adapted from Project Harmony's
 [Harmony Combined Contributor Agreement Template, version 1.0](https://www.harmonyagreements.org/docs/ha-combined-v1)
 (July 4, 2011), using the individual and entity copyright-license variants and
-Outbound License Option Five. Adaptations identify LOCK HOST, INC., cover all
-of its current and future projects, combine the individual and entity terms,
-specify Delaware law, and provide disclosure, acceptance, versioning, and GitHub
-signing instructions. Unused alternatives and definitions have been removed.
+Outbound License Option Five. Adaptations identify LOCK HOST, INC., limit the
+Agreement to the Project in this repository, combine the individual and entity
+terms, specify Delaware law, and provide disclosure, acceptance, versioning, and
+GitHub signing instructions. Unused alternatives and definitions have been removed.
 The agreement text is licensed under
 [Creative Commons Attribution 3.0 Unported](https://creativecommons.org/licenses/by/3.0/).
 
@@ -203,9 +208,9 @@ personally or on behalf of the named entity, and intend your typed name to be
 your electronic signature. We accept the Agreement when a maintainer authorized
 by LOCK HOST, INC. merges that signature pull request.
 
-Your signature covers all current and future projects managed by Us in the
-capacity identified in your row. Use a separate row for each individual or
-entity capacity in which you contribute.
+Your signature covers your Contributions to this Project in the capacity
+identified in your row. Use a separate row for each individual or entity
+capacity in which you contribute.
 
 | Full name | GitHub handle | On behalf of |
 | --- | --- | --- |
