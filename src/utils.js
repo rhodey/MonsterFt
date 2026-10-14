@@ -28,6 +28,9 @@ function readMeta(db1) {
     corrupt('stored repair state is corrupt')
   }
   if (meta.applied_seq === -1n) {
+    if (meta.repair_state !== 0n) {
+      corrupt('repair_state must be 0 when applied_seq is -1')
+    }
     if (meta.applied_entry_hash !== null || meta.applied_local_digest !== null) {
       corrupt('initial applied hashes must be null')
     }
@@ -227,9 +230,6 @@ function initialize(db1, db2) {
     }
     if (meta !== null && meta.applied_seq !== -1n) {
       corrupt('meta init requires DB1 applied_seq = -1')
-    }
-    if (meta !== null && meta.repair_state !== 0n) {
-      corrupt('meta init requires DB1 repair_state = 0')
     }
     if (receipt !== null && receipt.seq !== -1n) {
       corrupt('meta init requires DB2 apply seq = -1')

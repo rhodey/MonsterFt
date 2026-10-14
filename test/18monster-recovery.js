@@ -1010,13 +1010,14 @@ test('MonsterFt.certify classifies a missing metadata row as Monster corruption'
   t.end()
 })
 
-test('MonsterFt.certify rolls back a failed repair-state update', (t) => {
+test('MonsterFt.certify rolls back a failed repair-state update', async (t) => {
   const fixture = recoveryFixture(t, 'certify-rollback')
   fixture.clear()
-  const initial = fixture.build('initial', ['1'])
-  const donor = initial.nodes[0]
-  donor.open()
-  donor.close()
+  const initial = fixture.build('initial')
+  const donor = await elect(initial.nodes)
+  await waitFor(() => initial.nodes.every((node) => node._applySeq >= 0n),
+    'donor setup')
+  fixture.close(initial.nodes)
 
   const donorPath = fixture.paths.get(donor.id)
   setRepairState(donorPath, 2)

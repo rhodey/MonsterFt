@@ -220,6 +220,50 @@ test('certification override never bypasses receipt corruption', (t) => {
   t.end()
 })
 
+for (const repairState of [1n, 2n]) {
+  test(`initial checkpoint cannot have repair state ${repairState}`, (t) => {
+    const state = fixture(t, true)
+    state.db1.prepare('UPDATE monsterft_meta SET repair_state = ?').run(repairState)
+    const beforeMeta = meta(state.db1)
+    const beforeReceipt = receipt(state.db2)
+    state.close()
+
+    let applyCalls = 0
+    const messages = []
+    const node = new MonsterFt('1', ['1', '2', '3'], (...args) => {
+      messages.push(args)
+    }, state.file, {
+      apply() { applyCalls++ },
+    })
+    t.teardown(() => node.close())
+    const isInitialRepairError = (err) => isCode(Err.MONSTER_CORRUPT)(err) &&
+      err.message === 'repair_state must be 0 when applied_seq is -1'
+
+    for (const [name, operation] of [
+      ['open', () => node.open()],
+      ['certify', () => MonsterFt.certify(state.file)],
+      ['certify override', () => MonsterFt.certify(state.file, true)],
+    ]) {
+      t.throws(operation, isInitialRepairError, `${name} rejects the initial repair fence`)
+      const db1 = new DatabaseSync(state.file, { readBigInts: true, readOnly: true })
+      const db2 = new DatabaseSync(`${state.file}2`, { readBigInts: true, readOnly: true })
+      try {
+        t.deepEqual(meta(db1), beforeMeta, `${name} leaves DB1 meta unchanged`)
+        t.deepEqual(receipt(db2), beforeReceipt, `${name} leaves DB2 receipt unchanged`)
+        t.deepEqual(db1.prepare('SELECT * FROM raft_log').all(), [],
+          `${name} leaves the log empty`)
+      } finally {
+        db1.close()
+        db2.close()
+      }
+    }
+    t.equal(applyCalls, 0, 'setup never executes')
+    t.deepEqual(messages, [], 'Raft never sends a message')
+    t.notOk(node.isOpen, 'failed startup closes the node')
+    t.end()
+  })
+}
+
 test('a second CMD cannot replace an application still awaiting SYNC', async (t) => {
   const state = fixture(t, true, false)
   state.close()

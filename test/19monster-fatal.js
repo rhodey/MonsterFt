@@ -623,7 +623,7 @@ for (const mode of ['conflict rollback', 'disk full', 'rollback cleanup', 'relea
     }
     t.notOk(leader.isOpen, 'the failed apply transaction closes the node')
 
-    const restored = new DatabaseSync(leader._monsterDatabasePath, {
+    const restored = new DatabaseSync(leader._monsterApplyDbPath, {
       readOnly: true,
       readBigInts: true,
     })

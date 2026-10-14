@@ -96,11 +96,11 @@ class MonsterNode extends RaftNode {
     monster = this
 
     const memory = databasePath === ':memory:'
-    const monsterDatabasePath = memory ? databasePath : `${databasePath}2`
+    const monsterApplyDbPath = memory ? databasePath : `${databasePath}2`
     if (!memory) {
       const raftExists = fs.existsSync(databasePath)
-      const monsterExists = fs.existsSync(monsterDatabasePath)
-      if (raftExists !== monsterExists) {
+      const applyExists = fs.existsSync(monsterApplyDbPath)
+      if (raftExists !== applyExists) {
         throw new Err.ErrorWithCode(
           'database pair must have both files present or both files absent',
           Err.ARGUMENT_ILLEGAL,
@@ -110,7 +110,7 @@ class MonsterNode extends RaftNode {
 
     const keep = utilm.normalizeKeepOptions(opts)
     this.db = null
-    this._monsterDatabasePath = monsterDatabasePath
+    this._monsterApplyDbPath = monsterApplyDbPath
     this._monsterUserApply = userApply
     this._monsterKeep = keep
 
@@ -1048,16 +1048,23 @@ class MonsterNode extends RaftNode {
 
       try {
         const db = new DatabaseSync(
-          this._monsterDatabasePath,
+          this._monsterApplyDbPath,
           { readBigInts: true },
         )
         this.db = db
         db.exec('PRAGMA journal_mode = WAL')
         db.exec('PRAGMA synchronous = FULL')
-        this._monsterInit(db)
       } catch (err) {
         if (!(err instanceof Err.ErrorWithCode)) {
           err = Err.wrapError(err, Err.SQLITE_ERROR, 'DB2 open ')
+        }
+        throw err
+      }
+      try {
+        this._monsterInit(this.db)
+      } catch (err) {
+        if (!(err instanceof Err.ErrorWithCode)) {
+          err = Err.wrapError(err, Err.SQLITE_ERROR, 'Monster init ')
         }
         throw err
       }
@@ -1114,7 +1121,7 @@ class MonsterNode extends RaftNode {
       throw new Err.ErrorWithCode('DB2 is open', Err.LOG_OPEN)
     }
     super.del()
-    util.deleteSQLiteFiles(this._monsterDatabasePath)
+    util.deleteSQLiteFiles(this._monsterApplyDbPath)
   }
 }
 

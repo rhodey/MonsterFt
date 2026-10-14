@@ -394,7 +394,7 @@ test('constructors use strict paths and a literal two-file pair',
     nodes.push(monster)
     t.equal(monster.log.path, monsterPath,
       'MonsterFt passes the original path to RaftNode')
-    t.equal(monster._monsterDatabasePath, `${monsterPath}2`,
+    t.equal(monster._monsterApplyDbPath, `${monsterPath}2`,
       'MonsterFt derives DB2 with literal string suffix 2')
     monster.open()
 
@@ -552,7 +552,7 @@ test('in-memory MonsterFt cluster elects, applies, and deletes as a no-op',
     for (const node of cluster.nodes) {
       t.equal(node.log.path, ':memory:',
         `node ${node.id} uses :memory: for DB1`)
-      t.equal(node._monsterDatabasePath, ':memory:',
+      t.equal(node._monsterApplyDbPath, ':memory:',
         `node ${node.id} uses :memory: for DB2`)
       t.notEqual(node.log.db, node.db,
         `node ${node.id} keeps independent DB1 and DB2 connections`)
@@ -909,8 +909,8 @@ for (const asynchronous of [false, true]) {
 test('DB2 open failure closes DB1 and requires a fresh object',
   async (t) => {
     const databasePath = uniquePath('db2-open-retry')
-    const monsterDatabasePath = `${databasePath}2`
-    const backupPath = `${monsterDatabasePath}.open-failure-backup`
+    const monsterApplyDbPath = `${databasePath}2`
+    const backupPath = `${monsterApplyDbPath}.open-failure-backup`
     removePair(databasePath)
     fs.rmSync(backupPath, { force: true })
 
@@ -924,9 +924,9 @@ test('DB2 open failure closes DB1 and requires a fresh object',
     let replacement = null
     t.teardown(() => {
       closeNodesQuietly([seed, node, replacement].filter(Boolean))
-      fs.rmSync(monsterDatabasePath, { recursive: true, force: true })
+      fs.rmSync(monsterApplyDbPath, { recursive: true, force: true })
       if (fs.existsSync(backupPath)) {
-        fs.renameSync(backupPath, monsterDatabasePath)
+        fs.renameSync(backupPath, monsterApplyDbPath)
       }
       removePair(databasePath)
       fs.rmSync(backupPath, { force: true })
@@ -941,8 +941,8 @@ test('DB2 open failure closes DB1 and requires a fresh object',
     node.on('warn', noop)
     node.on('error', noop)
 
-    fs.renameSync(monsterDatabasePath, backupPath)
-    fs.mkdirSync(monsterDatabasePath)
+    fs.renameSync(monsterApplyDbPath, backupPath)
+    fs.mkdirSync(monsterApplyDbPath)
     const failure = errorOfCall(() => node.open())
     t.ok(failure instanceof ErrorWithCode,
       'opening DB2 at a directory throws ErrorWithCode')
@@ -956,8 +956,8 @@ test('DB2 open failure closes DB1 and requires a fresh object',
     t.equal(node.db, null, 'DB2 open failure retains no DB2 handle')
     t.notOk(node.isOpen, 'DB2 open failure never publishes the node')
 
-    fs.rmSync(monsterDatabasePath, { recursive: true, force: true })
-    fs.renameSync(backupPath, monsterDatabasePath)
+    fs.rmSync(monsterApplyDbPath, { recursive: true, force: true })
+    fs.renameSync(backupPath, monsterApplyDbPath)
     t.throws(() => node.open(), /node not open/,
       'the failed object cannot retry after the path is repaired')
     t.notOk(node.log.isOpen,
@@ -974,6 +974,75 @@ test('DB2 open failure closes DB1 and requires a fresh object',
     t.ok(replacement.db !== null, 'the fresh object opens repaired DB2')
     t.ok(replacement.isOpen, 'the fresh object publishes after path repair')
     replacement.close()
+  })
+
+test('Monster init SQL failures identify shared initialization and close both files',
+  (t) => {
+    for (const [database, table, column] of [
+      ['DB1', 'monsterft_meta', 'applied_seq'],
+      ['DB2', 'monsterft_meta_apply', 'seq'],
+    ]) {
+      const databasePath = uniquePath(`init-column-${database}`)
+      removePair(databasePath)
+      let applies = 0
+      const options = {
+        electionTimeout: 60_000,
+        apply: () => { applies++ },
+      }
+      const seed = new MonsterFt('1', ids, noop, databasePath, options)
+      let node = null
+      t.teardown(() => {
+        closeNodesQuietly([seed, node].filter(Boolean))
+        removePair(databasePath)
+      })
+      seed.open()
+      seed.close()
+
+      const malformed = new DatabaseSync(
+        database === 'DB1' ? databasePath : `${databasePath}2`,
+      )
+      malformed.exec(`ALTER TABLE ${table} RENAME COLUMN ${column} TO missing_column`)
+      malformed.close()
+
+      let original = null
+      let db1 = null
+      let db2 = null
+      class InspectInitMonsterFt extends MonsterFt {
+        _monsterInit(database2) {
+          db1 = this.log.db
+          db2 = database2
+          try {
+            return super._monsterInit(database2)
+          } catch (err) {
+            original = err
+            throw err
+          }
+        }
+      }
+      node = new InspectInitMonsterFt('1', ids, noop, databasePath, options)
+      const failure = errorOfCall(() => node.open())
+      t.ok(failure instanceof ErrorWithCode,
+        `${database} schema failure throws ErrorWithCode`)
+      t.equal(failure?.message, `Monster init no such column: ${column}`,
+        `${database} schema failure identifies shared initialization`)
+      t.equal(failure?.code, SQLITE_ERROR,
+        `${database} schema failure uses SQLITE_ERROR`)
+      t.equal(original?.code, 'ERR_SQLITE_ERROR',
+        `${database} schema failure originates in SQLite`)
+      t.equal(failure?.sqlCode, original?.errcode,
+        `${database} schema failure retains its native SQLite code`)
+      t.equal(failure?.stack, original?.stack,
+        `${database} schema failure retains its original stack`)
+      t.equal(applies, 0, `${database} schema failure invokes no apply callback`)
+      t.notOk(node.isOpen, `${database} schema failure never publishes the node`)
+      t.notOk(node.log.isOpen, `${database} schema failure closes DB1`)
+      t.equal(node.db, null, `${database} schema failure clears DB2`)
+      t.throws(() => db1.prepare('SELECT 1'), /closed|not open/i,
+        `${database} schema failure physically closes DB1`)
+      t.throws(() => db2.prepare('SELECT 1'), /closed|not open/i,
+        `${database} schema failure physically closes DB2`)
+    }
+    t.end()
   })
 
 test('DB2 close failure retains its handle for a close retry',
@@ -1094,8 +1163,8 @@ test('failed Monster open cleanup is finite and retains both failed handles',
       'open normalizes the checkpoint-validation failure')
     t.notEqual(failed, openFailure,
       'open replaces the uncoded checkpoint-validation failure')
-    t.equal(failed.message, 'DB2 open injected validation failure',
-      'open adds DB2 context to the validation failure')
+    t.equal(failed.message, 'Monster init injected validation failure',
+      'open adds shared initialization context to the validation failure')
     t.equal(failed.code, SQLITE_ERROR,
       'open classifies the validation failure')
     t.equal(failed.sqlCode, null,
@@ -1835,8 +1904,12 @@ test('checkpoint ahead of DB1 rejects and requires a fresh object',
 
 test('repair state 1 reopens live while state 2 requires certification',
   async (t) => {
-    const databasePath = uniquePath('repair-required-open')
-    removePair(databasePath)
+    const fixture = clusterFixture(t, 'repair-required-open')
+    const cluster = fixture.build()
+    await openAndElect(cluster.nodes)
+    await waitApplied(cluster.nodes, 0n)
+    const databasePath = fixture.paths.get('1')
+    closeNodes(cluster.nodes)
     const nodes = []
     const build = () => {
       const node = new MonsterFt('1', ids, noop, databasePath, {
@@ -1852,10 +1925,6 @@ test('repair state 1 reopens live while state 2 requires certification',
       closeNodesQuietly(nodes)
       removePair(databasePath)
     })
-
-    const seed = build()
-    seed.open()
-    seed.close()
 
     const db = new DatabaseSync(databasePath, { readBigInts: true })
     db.prepare(`
@@ -2749,9 +2818,13 @@ test('drain latches admission and waits for the local SYNC',
       'the drained object cannot reopen')
   })
 
-test('certify refuses a pair while a running node has it open', (t) => {
-  const databasePath = uniquePath('certify-live')
-  removePair(databasePath)
+test('certify refuses a pair while a running node has it open', async (t) => {
+  const fixture = clusterFixture(t, 'certify-live')
+  const cluster = fixture.build()
+  await openAndElect(cluster.nodes)
+  await waitApplied(cluster.nodes, 0n)
+  const databasePath = fixture.paths.get('1')
+  closeNodes(cluster.nodes)
   const make = () => {
     const node = new MonsterFt('1', ids, noop, databasePath, {
       electionTimeout: 60_000,
@@ -2761,13 +2834,11 @@ test('certify refuses a pair while a running node has it open', (t) => {
     node.on('error', noop)
     return node
   }
-  let node = make()
+  const node = make()
   t.teardown(() => {
     closeNodesQuietly([node])
     removePair(databasePath)
   })
-  node.open()
-  node.close()
   const setup = new DatabaseSync(databasePath)
   setup.prepare('UPDATE monsterft_meta SET repair_state = 1 WHERE id = 1').run()
   setup.close()
@@ -2784,7 +2855,6 @@ test('certify refuses a pair while a running node has it open', (t) => {
     }
   }
 
-  node = make()
   node.open()
   t.ok(node.isOpen, 'repair state 1 reopens a live node')
   const err = errorOfCall(() => MonsterFt.certify(databasePath))

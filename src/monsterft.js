@@ -38,9 +38,9 @@ class MonsterFt extends MonsterNode {
       )
     }
 
-    const monsterDatabasePath = `${databasePath}2`
+    const monsterApplyDbPath = `${databasePath}2`
     requireNormalFile(databasePath, 'DB1')
-    requireNormalFile(monsterDatabasePath, 'DB2')
+    requireNormalFile(monsterApplyDbPath, 'DB2')
 
     let db1 = null
     let db2 = null
@@ -49,7 +49,7 @@ class MonsterFt extends MonsterNode {
 
     try {
       // Lock DB2 first, as apply commits there before updating DB1.
-      db2 = new DatabaseSync(monsterDatabasePath, { readBigInts: true })
+      db2 = new DatabaseSync(monsterApplyDbPath, { readBigInts: true })
       db1 = new DatabaseSync(databasePath, { readBigInts: true })
       for (const db of [db2, db1]) {
         db.exec('PRAGMA busy_timeout = 0')
