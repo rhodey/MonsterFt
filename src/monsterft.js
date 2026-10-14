@@ -2,7 +2,7 @@ import fs from 'node:fs'
 import { DatabaseSync } from 'node:sqlite'
 import * as Err from './error.js'
 import { MonsterNode } from './monster.js'
-import { reconcile } from './monstermeta.js'
+import * as utils from './utils.js'
 
 function requireNormalFile(path, name) {
   let stat = null
@@ -56,7 +56,7 @@ class MonsterFt extends MonsterNode {
         db.exec('PRAGMA locking_mode = EXCLUSIVE')
         db.exec('BEGIN EXCLUSIVE')
       }
-      const meta = reconcile(db1, db2)
+      const meta = utils.reconcile(db1, db2)
 
       if (!allowUnresolved && meta.pending_cmd_seq !== null) {
         throw new Err.ErrorWithCode(

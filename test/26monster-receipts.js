@@ -2,7 +2,8 @@ import { DatabaseSync } from 'node:sqlite'
 import test from 'tape'
 import { ErrorWithCode, MONSTER_CORRUPT } from '../src/error.js'
 import { SQLiteLog } from '../src/log.js'
-import { digestEntry, initialize, reconcile } from '../src/monstermeta.js'
+import { digestEntry } from '../src/utilm.js'
+import { initialize, reconcile } from '../src/utils.js'
 
 const fixture = (t) => {
   const log = new SQLiteLog(':memory:')

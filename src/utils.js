@@ -1,23 +1,12 @@
-import crypto from 'node:crypto'
 import * as Err from './error.js'
 import * as util from './util.js'
+import { digestEntry, isDigest } from './utilm.js'
 
 const asBuffer = (value) =>
   Buffer.from(value.buffer, value.byteOffset, value.byteLength)
 
-const isDigest = (value) =>
-  value instanceof Uint8Array && value.byteLength === 32
-
 const corrupt = (message) => {
   throw new Err.ErrorWithCode(message, Err.MONSTER_CORRUPT)
-}
-
-const digestEntry = (term, buffer) => {
-  const prefix = Buffer.allocUnsafe(8)
-  prefix.writeBigUInt64LE(term)
-  const hash = crypto.createHash('sha256').update(prefix)
-  if (buffer !== null) { hash.update(buffer) }
-  return hash.digest()
 }
 
 function readMeta(db1) {
@@ -92,7 +81,7 @@ function verifyEntry(db1, seq, hash, name='applied') {
   }
 }
 
-function importApply(db1, receipt) {
+function copyApply(db1, receipt) {
   try {
     const result = db1.prepare(`
       UPDATE monsterft_meta
@@ -111,7 +100,7 @@ function importApply(db1, receipt) {
       throw new Err.ErrorWithCode('update count not one', Err.SQLITE_ERROR)
     }
   } catch (err) {
-    throw Err.wrapError(err, Err.SQLITE_ERROR, 'DB1 import apply ')
+    throw Err.wrapError(err, Err.SQLITE_ERROR, 'DB1 copy apply ')
   }
 }
 
@@ -132,7 +121,7 @@ function reconcile(db1, db2) {
       corrupt('apply receipt is ahead of DB1 checkpoint while a repair fence is set')
     }
     verifyEntry(db1, receipt.seq, receipt.entry_hash, 'apply')
-    importApply(db1, receipt)
+    copyApply(db1, receipt)
     return readMeta(db1)
   }
   if (receipt.seq === -1n) {
@@ -251,4 +240,4 @@ function initialize(db1, db2) {
   return reconcile(db1, db2)
 }
 
-export { digestEntry, initialize, reconcile, importApply }
+export { initialize, reconcile, copyApply }

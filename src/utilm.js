@@ -1,3 +1,4 @@
+import crypto from 'node:crypto'
 import * as Err from './error.js'
 import { isCid, isSeq, isTerm } from './util.js'
 
@@ -5,6 +6,14 @@ const DIGEST_BYTES = 32
 
 const isDigest = (digest) => digest instanceof Uint8Array &&
   digest.byteLength === DIGEST_BYTES
+
+const digestEntry = (term, buffer) => {
+  const prefix = Buffer.allocUnsafe(8)
+  prefix.writeBigUInt64LE(term)
+  const hash = crypto.createHash('sha256').update(prefix)
+  if (buffer !== null) { hash.update(buffer) }
+  return hash.digest()
+}
 
 const validateOutcomeRequestMsg = (msg) => {
   if (!isSeq(msg.cmdSeq) || msg.cmdSeq < 0n) {
@@ -164,6 +173,7 @@ const normalizeKeepOptions = (opts) => {
 }
 
 export {
+  digestEntry, isDigest,
   validateOutcomeRequestMsg, validateOutcomeMsg,
   validateCmdEntry, validateSyncEntry,
   isFwdCmdMsg, isFwdCmdAck,

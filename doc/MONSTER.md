@@ -1,8 +1,9 @@
 # MonsterNode and MonsterFt
 
 Function notes for [src/monster.js](../src/monster.js),
-[src/monsterft.js](../src/monsterft.js), and
-[src/monstermeta.js](../src/monstermeta.js), in source order within each file.
+[src/monsterft.js](../src/monsterft.js),
+[src/utilm.js](../src/utilm.js), and [src/utils.js](../src/utils.js), in source
+order within each file.
 The notes cover the module helpers and every MonsterNode method. Each findings
 area lists only unresolved items: open, deferred, skipped by decision, or
 accepted. "None" means no unresolved item is recorded. Review rules are in
@@ -563,7 +564,7 @@ unless explicitly overridden.
 - **Deferred:** repairing one replica can also need a leadership reset; see
   `_monsterPrune`.
 
-## `digestEntry` (`src/monstermeta.js`)
+## `digestEntry` (`src/utilm.js`)
 
 Produces the checkpoint hash identifying an entry's term and payload.
 
@@ -571,7 +572,7 @@ Produces the checkpoint hash identifying an entry's term and payload.
 
 None.
 
-## `readMeta` (`src/monstermeta.js`)
+## `readMeta` (`src/utils.js`)
 
 Reads and validates DB1's Monster protocol metadata.
 
@@ -579,7 +580,7 @@ Reads and validates DB1's Monster protocol metadata.
 
 None.
 
-## `readApply` (`src/monstermeta.js`)
+## `readApply` (`src/utils.js`)
 
 Reads and validates DB2's latest apply receipt.
 
@@ -587,7 +588,7 @@ Reads and validates DB2's latest apply receipt.
 
 None.
 
-## `verifyEntry` (`src/monstermeta.js`)
+## `verifyEntry` (`src/utils.js`)
 
 Verifies that a stored sequence and hash identify an entry in DB1.
 
@@ -595,7 +596,7 @@ Verifies that a stored sequence and hash identify an entry in DB1.
 
 None.
 
-## `importApply` (`src/monstermeta.js`)
+## `copyApply` (`src/utils.js`)
 
 Records a completed DB2 apply transaction in DB1. Leaves a command pending
 agreement, or records sequence-zero setup without a pending command.
@@ -604,7 +605,7 @@ agreement, or records sequence-zero setup without a pending command.
 
 None.
 
-## `reconcile` (`src/monstermeta.js`)
+## `reconcile` (`src/utils.js`)
 
 Validates the database pair and finishes a recognized interrupted apply
 receipt import. Preserves resolved and repair state when DB1 already recorded
@@ -619,7 +620,7 @@ that completion.
   and `log.begin > 0`, the node opens, then fails during apply with
   `LOG_CORRUPT`. Decision: the later error is acceptable.
 
-## `createMeta` (`src/monstermeta.js`)
+## `createMeta` (`src/utils.js`)
 
 Creates DB1's protocol metadata table and its initial singleton row.
 
@@ -627,7 +628,7 @@ Creates DB1's protocol metadata table and its initial singleton row.
 
 None.
 
-## `createApply` (`src/monstermeta.js`)
+## `createApply` (`src/utils.js`)
 
 Creates DB2's apply receipt table and its initial singleton row.
 
@@ -635,7 +636,7 @@ Creates DB2's apply receipt table and its initial singleton row.
 
 None.
 
-## `createInTransaction` (`src/monstermeta.js`)
+## `createInTransaction` (`src/utils.js`)
 
 Creates a metadata table and its initial row atomically, rolling back on
 failure.
@@ -644,7 +645,7 @@ failure.
 
 None.
 
-## `initialize` (`src/monstermeta.js`)
+## `initialize` (`src/utils.js`)
 
 Initializes fresh metadata or completes interrupted pristine initialization,
 then reconciles the pair. Rejects missing metadata beside established state.

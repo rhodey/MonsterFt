@@ -6,7 +6,7 @@ import * as Err from './error.js'
 import { RaftNode, MAX_SQLITE_BYTES } from './node.js'
 import * as util from './util.js'
 import * as utilm from './utilm.js'
-import * as metadata from './monstermeta.js'
+import * as utils from './utils.js'
 
 const CMD = 'cmd'
 const SYNC = 'sync'
@@ -381,7 +381,7 @@ class MonsterNode extends RaftNode {
   }
 
   _monsterInit(db) {
-    const meta = metadata.initialize(this.log.db, db)
+    const meta = utils.initialize(this.log.db, db)
     this._applySeq = meta.applied_seq
     this._monsterRepairState = Number(meta.repair_state)
     this._monsterPendingCommand = meta.pending_cmd_seq === null
@@ -480,7 +480,7 @@ class MonsterNode extends RaftNode {
           this._monsterWriteApply(db, receipt)
         })
         this._throwIfClosing()
-        metadata.importApply(this.log.db, receipt)
+        utils.copyApply(this.log.db, receipt)
       } else {
         this._monsterAdvanceApplied(this.log.db, seq, entryHash)
       }
@@ -554,7 +554,7 @@ class MonsterNode extends RaftNode {
         this._monsterWriteApply(db, receipt)
       })
       this._throwIfClosing()
-      metadata.importApply(this.log.db, receipt)
+      utils.copyApply(this.log.db, receipt)
       this._monsterPendingReports.clear()
       this._monsterPendingCommand = {
         cmdSeq: seq,
@@ -660,7 +660,7 @@ class MonsterNode extends RaftNode {
       if (buf !== null) {
         entry = unpack(buf)
       }
-      const entryHash = metadata.digestEntry(term, buf)
+      const entryHash = utilm.digestEntry(term, buf)
       results.push(await this._monsterApplyEntry(
         entry,
         term,

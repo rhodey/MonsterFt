@@ -8,7 +8,8 @@ import test from 'tape'
 import * as Err from '../src/error.js'
 import { SQLiteLog } from '../src/log.js'
 import { MonsterFt } from '../src/monsterft.js'
-import { digestEntry, initialize, reconcile } from '../src/monstermeta.js'
+import { digestEntry } from '../src/utilm.js'
+import { initialize, reconcile } from '../src/utils.js'
 
 const fixture = (t, disk=false, initialized=true) => {
   const dir = disk ? fs.mkdtempSync(path.join(os.tmpdir(), 'monster-storage-')) : null
