@@ -149,7 +149,7 @@ sequence through the head at the time of the call.
   consumes each iterator synchronously, so this cannot happen there.
 - **Accepted: a missing trailing range ends iteration without an error,**
   even before the captured head is reached. `test/04iter.js` tests this
-  behavior. RaftNode's application and replication paths check that they
+  behavior. RaftNode's apply and replication paths check that they
   received the range they required.
 
 ## `sizes`

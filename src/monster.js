@@ -6,6 +6,7 @@ import * as Err from './error.js'
 import { RaftNode, MAX_SQLITE_BYTES } from './node.js'
 import * as util from './util.js'
 import * as utilm from './utilm.js'
+import * as metadata from './monstermeta.js'
 
 const CMD = 'cmd'
 const SYNC = 'sync'
@@ -32,14 +33,6 @@ const asBuffer = (value) => {
   return Buffer.isBuffer(value)
     ? value
     : Buffer.from(value.buffer, value.byteOffset, value.byteLength)
-}
-
-const digestEntry = (term, buffer) => {
-  const prefix = Buffer.allocUnsafe(8)
-  prefix.writeBigUInt64LE(term)
-  const hash = crypto.createHash('sha256').update(prefix)
-  if (buffer !== null) { hash.update(buffer) }
-  return hash.digest()
 }
 
 const outcomesWire = (outcomes, includeStack=true) => outcomes.map((outcome) => {
@@ -164,8 +157,8 @@ class MonsterNode extends RaftNode {
     const retained = this._applySeq - this.log.begin + 1n
     if (retained < keep.trigger) { return }
 
-    // DB2 already durably includes this applied prefix. Keep its checkpoint
-    // entry and every unapplied entry so the pair remains safe to reopen.
+    // DB1 has durably recorded apply progress through this checkpoint. Keep
+    // its entry and every unapplied entry so the pair remains safe to reopen.
     const begin = this._applySeq - keep.target + 1n
     try {
       this.log.db.prepare('DELETE FROM raft_log WHERE seq < ?').run(begin)
@@ -268,29 +261,25 @@ class MonsterNode extends RaftNode {
         )
       }
     } catch (err) {
-      throw Err.wrapError(err, Err.SQLITE_ERROR, 'DB2 advance applied ')
+      throw Err.wrapError(err, Err.SQLITE_ERROR, 'DB1 advance applied ')
     }
   }
 
-  _monsterInstallPendingCmd(db, term, seq, patchset, outcomes, entryHash) {
-    const commandDigest = digestCmd(term, seq, patchset, outcomes)
+  _monsterWriteApply(db, receipt) {
     try {
       const result = db.prepare(`
-        UPDATE monsterft_meta
-        SET pending_cmd_seq = ?, pending_local_digest = ?,
-            applied_seq = ?, applied_entry_hash = ?
-        WHERE id = 1 AND pending_cmd_seq IS NULL
-          AND pending_local_digest IS NULL
-      `).run(seq, commandDigest, seq, entryHash)
+        UPDATE monsterft_meta_apply
+        SET seq = ?, entry_hash = ?, local_digest = ?
+        WHERE id = 1 AND seq < ?
+      `).run(receipt.seq, receipt.entry_hash, receipt.local_digest, receipt.seq)
       if (result.changes !== 1n) {
         throw new Err.ErrorWithCode(
           'update count not one',
           Err.SQLITE_ERROR,
         )
       }
-      return commandDigest
     } catch (err) {
-      throw Err.wrapError(err, Err.SQLITE_ERROR, 'DB2 install pending CMD ')
+      throw Err.wrapError(err, Err.SQLITE_ERROR, 'DB2 write apply ')
     }
   }
 
@@ -299,7 +288,6 @@ class MonsterNode extends RaftNode {
       const result = db.prepare(`
         UPDATE monsterft_meta
         SET pending_cmd_seq = NULL,
-            pending_local_digest = NULL,
             applied_seq = ?,
             applied_entry_hash = ?,
             repair_state = ?
@@ -312,7 +300,7 @@ class MonsterNode extends RaftNode {
         )
       }
     } catch (err) {
-      throw Err.wrapError(err, Err.SQLITE_ERROR, 'DB2 write CMD decision ')
+      throw Err.wrapError(err, Err.SQLITE_ERROR, 'DB1 write CMD decision ')
     }
   }
 
@@ -330,7 +318,7 @@ class MonsterNode extends RaftNode {
         )
       }
     } catch (err) {
-      throw Err.wrapError(err, Err.SQLITE_ERROR, 'DB2 write repair ')
+      throw Err.wrapError(err, Err.SQLITE_ERROR, 'DB1 write repair ')
     }
   }
 
@@ -393,137 +381,16 @@ class MonsterNode extends RaftNode {
   }
 
   _monsterInit(db) {
-    const table = db.prepare(`
-      SELECT name FROM sqlite_schema
-      WHERE type = 'table' AND name = 'monsterft_meta'
-    `).get()
-    if (table === undefined) {
-      // Only an empty DB2 paired with an empty log can be initialized.
-      if (this.log.seq !== -1n ||
-          db.prepare('SELECT name FROM sqlite_schema LIMIT 1').get() !== undefined) {
-        throw new Err.ErrorWithCode(
-          'metadata table is missing', Err.MONSTER_CORRUPT,
-        )
-      }
-      db.exec(`
-        BEGIN IMMEDIATE;
-        CREATE TABLE monsterft_meta (
-          id INTEGER PRIMARY KEY CHECK (id = 1),
-          applied_seq INTEGER NOT NULL,
-          applied_entry_hash BLOB,
-          repair_state INTEGER NOT NULL CHECK (repair_state IN (0, 1, 2)),
-          pending_cmd_seq INTEGER,
-          pending_local_digest BLOB,
-          CHECK (
-            (applied_seq = -1 AND applied_entry_hash IS NULL) OR
-            (applied_seq >= 0 AND applied_entry_hash IS NOT NULL AND
-             length(applied_entry_hash) = 32)
-          ),
-          CHECK (
-            (pending_cmd_seq IS NULL AND pending_local_digest IS NULL) OR
-            (pending_cmd_seq IS NOT NULL AND pending_cmd_seq >= 0 AND
-             pending_cmd_seq <= applied_seq AND
-             pending_local_digest IS NOT NULL AND
-             length(pending_local_digest) = 32)
-          )
-        ) STRICT;
-
-        INSERT INTO monsterft_meta
-          (id, applied_seq, applied_entry_hash, repair_state,
-           pending_cmd_seq, pending_local_digest)
-        VALUES (1, -1, NULL, 0, NULL, NULL);
-        COMMIT;
-      `)
-    }
-
-    const meta = db.prepare(`
-      SELECT applied_seq, applied_entry_hash, repair_state,
-             pending_cmd_seq, pending_local_digest
-      FROM monsterft_meta
-      WHERE id = 1
-    `).get()
-    if (meta === undefined) {
-      throw new Err.ErrorWithCode(
-        'metadata row is missing', Err.MONSTER_CORRUPT,
-      )
-    }
-    const repairState = meta.repair_state
-    if (repairState !== BigInt(REPAIR_NONE) &&
-        repairState !== BigInt(REPAIR_QUORUM_IMPOSSIBLE) &&
-        repairState !== BigInt(REPAIR_OUTSIDE_AGREEMENT)) {
-      throw new Err.ErrorWithCode(
-        'stored repair state is corrupt', Err.MONSTER_CORRUPT,
-      )
-    }
+    const meta = metadata.initialize(this.log.db, db)
     this._applySeq = meta.applied_seq
-    this._monsterVerifyAppliedEntry(meta.applied_entry_hash)
-
-    const pendingSeq = meta.pending_cmd_seq
-    const pendingDigest = meta.pending_local_digest
-    if ((pendingSeq === null) !== (pendingDigest === null)) {
-      throw new Err.ErrorWithCode(
-        'pending command metadata is incomplete', Err.MONSTER_CORRUPT,
-      )
-    }
-    if (pendingSeq !== null) {
-      if (!util.isSeq(pendingSeq) || pendingSeq < 0n || pendingSeq > this._applySeq) {
-        throw new Err.ErrorWithCode(
-          'pending command sequence is corrupt', Err.MONSTER_CORRUPT,
-        )
-      }
-      if (!(pendingDigest instanceof Uint8Array) || pendingDigest.byteLength !== 32) {
-        throw new Err.ErrorWithCode(
-          'pending command digest is corrupt', Err.MONSTER_CORRUPT,
-        )
-      }
-    }
-    this._monsterRepairState = Number(repairState)
-    this._monsterPendingCommand = pendingSeq === null
+    this._monsterRepairState = Number(meta.repair_state)
+    this._monsterPendingCommand = meta.pending_cmd_seq === null
       ? null
       : {
-          cmdSeq: pendingSeq,
-          localDigest: asBuffer(pendingDigest),
+          cmdSeq: meta.pending_cmd_seq,
+          localDigest: asBuffer(meta.applied_local_digest),
         }
     this._monsterPendingReports.clear()
-  }
-
-  // Require that the log (DB1) contains the last entry that monster (DB2) applied
-  _monsterVerifyAppliedEntry(appliedEntryHash) {
-    if (!util.isSeq(this._applySeq) || this._applySeq > this.log.seq) {
-      throw new Err.ErrorWithCode(
-        'applied sequence is corrupt',
-        Err.MONSTER_CORRUPT,
-      )
-    }
-    if (this._applySeq === -1n) {
-      if (appliedEntryHash !== null) {
-        throw new Err.ErrorWithCode(
-          'applied entry hash must be null for initial state',
-          Err.MONSTER_CORRUPT,
-        )
-      }
-      return
-    }
-    if (!(appliedEntryHash instanceof Uint8Array) || appliedEntryHash.byteLength !== 32) {
-      throw new Err.ErrorWithCode(
-        'applied entry hash is corrupt', Err.MONSTER_CORRUPT,
-      )
-    }
-    const found = this.log.iter(this._applySeq, { iterStepSize: 1 }).next()
-    if (found.done) {
-      throw new Err.ErrorWithCode(
-        'applied log entry not found',
-        Err.MONSTER_CORRUPT,
-      )
-    }
-    const { term, entry } = found.value
-    const expected = digestEntry(term, entry)
-    if (!asBuffer(appliedEntryHash).equals(expected)) {
-      throw new Err.ErrorWithCode(
-        'applied entry hash does not match',
-        Err.MONSTER_CORRUPT,
-      )
-    }
   }
 
   _monsterRememberReport(from, digest) {
@@ -596,6 +463,11 @@ class MonsterNode extends RaftNode {
     await this._monsterRunDb(async (db) => {
       this._throwIfClosing()
       if (seq === 0n) {
+        const receipt = {
+          seq,
+          entry_hash: entryHash,
+          local_digest: Buffer.alloc(32),
+        }
         await this._monsterWriteTx(db, async (db) => {
           // user callback gets called with seq 0 (always a no-op) to allow SQL schema setup
           await this._monsterUserApply(db, null, term, seq, 0, null)
@@ -605,11 +477,12 @@ class MonsterNode extends RaftNode {
               'DB2 seq0 transaction ended', Err.SQLITE_ERROR,
             )
           }
-          this._monsterAdvanceApplied(db, seq, entryHash)
+          this._monsterWriteApply(db, receipt)
         })
         this._throwIfClosing()
+        metadata.importApply(this.log.db, receipt)
       } else {
-        this._monsterAdvanceApplied(db, seq, entryHash)
+        this._monsterAdvanceApplied(this.log.db, seq, entryHash)
       }
       this._applySeq = seq
     })
@@ -620,7 +493,13 @@ class MonsterNode extends RaftNode {
 
     let outcomes = null
     let commandDigest = null
+    const receipt = { seq, entry_hash: entryHash, local_digest: null }
     await this._monsterRunDb(async (db) => {
+      if (this._monsterPendingCommand !== null) {
+        throw new Err.ErrorWithCode(
+          'CMD entry while another CMD is pending', Err.MONSTER_ILLEGAL,
+        )
+      }
       await this._monsterWriteTx(db, async (db) => {
         const session = db.createSession({ db: 'main' })
         let patchset = null
@@ -670,11 +549,12 @@ class MonsterNode extends RaftNode {
         } finally {
           session.close()
         }
-        commandDigest = this._monsterInstallPendingCmd(
-          db, term, seq, patchset, outcomes, entryHash,
-        )
+        commandDigest = digestCmd(term, seq, patchset, outcomes)
+        receipt.local_digest = commandDigest
+        this._monsterWriteApply(db, receipt)
       })
       this._throwIfClosing()
+      metadata.importApply(this.log.db, receipt)
       this._monsterPendingReports.clear()
       this._monsterPendingCommand = {
         cmdSeq: seq,
@@ -715,12 +595,11 @@ class MonsterNode extends RaftNode {
       this._toFollower()
     }
 
-    await this._monsterRunDb(async (db) => {
-      await this._monsterWriteTx(db, (db) => {
-        this._monsterWriteCmdDecision(
-          db, seq, entryHash, repairState, entry.cmdSeq,
-        )
-      })
+    await this._monsterRunDb(() => {
+      this._throwIfClosing()
+      this._monsterWriteCmdDecision(
+        this.log.db, seq, entryHash, repairState, entry.cmdSeq,
+      )
       this._throwIfClosing()
       this._monsterPendingCommand = null
       this._applySeq = seq
@@ -781,7 +660,7 @@ class MonsterNode extends RaftNode {
       if (buf !== null) {
         entry = unpack(buf)
       }
-      const entryHash = digestEntry(term, buf)
+      const entryHash = metadata.digestEntry(term, buf)
       results.push(await this._monsterApplyEntry(
         entry,
         term,
@@ -877,14 +756,14 @@ class MonsterNode extends RaftNode {
   async _monsterFenceLeader() {
     this._toFollower(null, this.state !== FOLLOWER)
     try {
-      await this._monsterRunDb((db) => {
+      await this._monsterRunDb(() => {
         this._throwIfClosing()
-        this._monsterWriteRepair(db, REPAIR_OUTSIDE_AGREEMENT)
+        this._monsterWriteRepair(this.log.db, REPAIR_OUTSIDE_AGREEMENT)
         this._monsterRepairState = REPAIR_OUTSIDE_AGREEMENT
       })
     } catch (err) {
       if (!(err instanceof Err.ErrorWithCode)) {
-        err = Err.wrapError(err, Err.SQLITE_ERROR, 'DB2 fence ')
+        err = Err.wrapError(err, Err.SQLITE_ERROR, 'DB1 fence ')
       }
       throw this._monsterFatalError(err)
     }

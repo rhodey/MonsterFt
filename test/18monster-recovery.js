@@ -107,17 +107,17 @@ const valueAtPath = (database, key) => {
 }
 
 const pendingAt = (node) => {
-  const row = node.db.prepare(`
-    SELECT pending_cmd_seq, pending_local_digest
+  const row = node.log.db.prepare(`
+    SELECT pending_cmd_seq, applied_local_digest
     FROM monsterft_meta
     WHERE id = 1
   `).get()
-  if (row.pending_local_digest !== null) {
-    row.pending_local_digest = Buffer.from(row.pending_local_digest)
+  if (row.applied_local_digest !== null) {
+    row.applied_local_digest = Buffer.from(row.applied_local_digest)
   }
   return {
     pending_cmd_seq: row.pending_cmd_seq,
-    pending_local_digest: row.pending_local_digest,
+    applied_local_digest: row.applied_local_digest,
   }
 }
 
@@ -199,22 +199,22 @@ const appendRaftAtPath = (database, entries) => {
 }
 
 const readMetaAtPath = (database) => {
-  const db = new DatabaseSync(monsterPath(database), {
+  const db = new DatabaseSync(database, {
     readOnly: true,
     readBigInts: true,
   })
   try {
     const row = db.prepare(`
       SELECT applied_seq, applied_entry_hash, repair_state,
-             pending_cmd_seq, pending_local_digest
+             pending_cmd_seq, applied_local_digest
       FROM monsterft_meta
       WHERE id = 1
     `).get()
     if (row.applied_entry_hash !== null) {
       row.applied_entry_hash = Buffer.from(row.applied_entry_hash)
     }
-    if (row.pending_local_digest !== null) {
-      row.pending_local_digest = Buffer.from(row.pending_local_digest)
+    if (row.applied_local_digest !== null) {
+      row.applied_local_digest = Buffer.from(row.applied_local_digest)
     }
     return row
   } finally {
@@ -223,7 +223,7 @@ const readMetaAtPath = (database) => {
 }
 
 const setRepairState = (database, state) => {
-  const db = new DatabaseSync(monsterPath(database), { readBigInts: true })
+  const db = new DatabaseSync(database, { readBigInts: true })
   try {
     db.prepare(`
       UPDATE monsterft_meta
@@ -367,7 +367,7 @@ const waitForUnresolvedCmd = async (nodes) => {
     const pending = nodes.map((node) => pendingAt(node))
     if (!pending.every((command) => {
       return command.pending_cmd_seq !== null &&
-        command.pending_local_digest?.length === 32
+        command.applied_local_digest?.length === 32
     })) {
       return false
     }
@@ -394,7 +394,7 @@ const waitForSync = async (nodes, cmdSeq) => {
       const pending = pendingAt(node)
       return node._applySeq >= syncSeq &&
         pending.pending_cmd_seq === null &&
-        pending.pending_local_digest === null &&
+        pending.applied_local_digest?.length === 32 &&
         node._monsterPendingCommand === null
     })
   }, `SYNC for CMD ${cmdSeq}`)
@@ -553,7 +553,7 @@ for (const waitingState of ['follower', 'candidate']) {
       t.ok(secondCmdSeq > firstSyncSeq,
         'the retried command follows the SYNC that completes leader recovery')
       t.deepEqual(result, { key: 'second', value: 2 },
-        'the retried command returns its normal application result')
+        'the retried command returns its normal apply result')
 
       for (const node of cluster.nodes) {
         const records = raftBytesAtPath(fixture.paths.get(node.id))
@@ -640,8 +640,8 @@ test('MonsterFt drainCmd closes an idle follower without a protocol record',
     const meta = readMetaAtPath(database)
     t.equal(meta.pending_cmd_seq, null,
       'the closed follower has no durable pending command')
-    t.equal(meta.pending_local_digest, null,
-      'the closed follower has no durable pending digest')
+    t.deepEqual(meta.applied_local_digest, Buffer.alloc(32),
+      'the closed follower retains the completed setup digest')
     t.equal(MonsterFt.certify(database), meta.applied_seq,
       'the closed follower pair passes default certification')
 
@@ -669,7 +669,7 @@ test('MonsterFt drainCmd closes a candidate before fulfilling', async (t) => {
   const meta = readMetaAtPath(fixture.paths.get(candidate.id))
   t.equal(meta.pending_cmd_seq, null,
     'the closed candidate has no durable pending command')
-  t.equal(meta.pending_local_digest, null,
+  t.equal(meta.applied_local_digest, null,
     'the closed candidate has no durable pending digest')
 })
 
@@ -742,8 +742,8 @@ test('MonsterFt drainCmd lets a follower already applying CMD reach SYNC',
       'the closed follower checkpoints beyond the CMD')
     t.equal(meta.pending_cmd_seq, null,
       'the closed follower clears the durable pending command')
-    t.equal(meta.pending_local_digest, null,
-      'the closed follower clears the durable pending digest')
+    t.equal(meta.applied_local_digest.length, 32,
+      'the closed follower retains the completed apply digest')
     const sync = raftRecordAtPath(database, meta.applied_seq)
     t.equal(sync.type, 'sync',
       'the follower closes with SYNC as its checkpoint')
@@ -810,8 +810,8 @@ test('MonsterFt drainCmd latches admission and waits for local SYNC application'
       'the drained leader checkpoints the active CMD decision')
     t.equal(meta.pending_cmd_seq, null,
       'the drained leader clears the durable pending command')
-    t.equal(meta.pending_local_digest, null,
-      'the drained leader clears the durable pending digest')
+    t.equal(meta.applied_local_digest.length, 32,
+      'the drained leader retains the completed apply digest')
     const sync = raftRecordAtPath(database, meta.applied_seq)
     t.equal(sync.type, 'sync',
       'the durable checkpoint is a SYNC entry')
@@ -891,13 +891,13 @@ test('MonsterFt drainCmd fences a later replicated CMD before application',
 
     const meta = readMetaAtPath(database)
     t.equal(meta.applied_seq, metaBefore.applied_seq,
-      'the later CMD does not advance the DB2 checkpoint')
+      'the later CMD does not advance the DB1 checkpoint')
     t.deepEqual(meta.applied_entry_hash, metaBefore.applied_entry_hash,
-      'the later CMD does not change the DB2 checkpoint hash')
+      'the later CMD does not change the DB1 checkpoint hash')
     t.equal(meta.pending_cmd_seq, null,
       'the later CMD never becomes durable pending state')
-    t.equal(meta.pending_local_digest, null,
-      'the later CMD never installs a durable digest')
+    t.deepEqual(meta.applied_local_digest, metaBefore.applied_local_digest,
+      'the later CMD leaves the completed apply digest unchanged')
     t.equal(raftRecordAtPath(database, cmdSeq).type, 'cmd',
       'the later CMD may remain only as a DB1 suffix')
   })
@@ -933,11 +933,11 @@ test('MonsterFt drainCmd ignores an unapplied DB1-only CMD suffix',
       'drain closes DB1 with the unapplied suffix intact')
     const meta = readMetaAtPath(database)
     t.equal(meta.applied_seq, -1n,
-      'the unapplied initial no-op remains outside the DB2 checkpoint')
+      'the unapplied initial no-op remains outside the DB1 checkpoint')
     t.equal(meta.pending_cmd_seq, null,
-      'the unapplied DB1 suffix creates no pending DB2 command')
-    t.equal(meta.pending_local_digest, null,
-      'the unapplied DB1 suffix creates no pending DB2 digest')
+      'the unapplied DB1 suffix creates no pending DB1 command')
+    t.equal(meta.applied_local_digest, null,
+      'the unapplied DB1 suffix creates no apply digest')
     t.equal(raftRecordAtPath(database, cmdSeq).type, 'cmd',
       'drain leaves the unapplied Raft suffix intact')
   })
@@ -971,7 +971,7 @@ test('MonsterFt.certify accepts a healthy donor and validates its override flag'
     const second = MonsterFt.certify(donorPath, false)
 
     t.equal(first, beforeMeta.applied_seq,
-      'healthy certification returns the DB2 applied checkpoint')
+      'healthy certification returns the DB1 applied checkpoint')
     t.equal(second, first, 'healthy certification is idempotent')
     t.deepEqual(readMetaAtPath(donorPath), beforeMeta,
       'healthy certification preserves already-clear metadata')
@@ -988,18 +988,18 @@ test('MonsterFt.certify classifies a missing metadata row as Monster corruption'
   donor.close()
 
   const donorPath = fixture.paths.get(donor.id)
-  const beforeLog = fs.readFileSync(donorPath)
-  const db = new DatabaseSync(monsterPath(donorPath))
+  const db = new DatabaseSync(donorPath)
   db.exec('DELETE FROM monsterft_meta WHERE id = 1')
   db.close()
+  const beforeLog = fs.readFileSync(donorPath)
 
   for (const allowUnresolved of [false, true]) {
     const err = errorOfCall(() => MonsterFt.certify(donorPath, allowUnresolved))
     t.ok(err instanceof ErrorWithCode, 'missing metadata throws a coded error')
     t.equal(err?.code, MONSTER_CORRUPT,
       `missing metadata uses MONSTER_CORRUPT with override ${allowUnresolved}`)
-    t.equal(err?.message, 'MonsterFt certify metadata row is missing',
-      'the error identifies the missing DB2 metadata row')
+    t.equal(err?.message, 'meta row is missing or not singleton',
+      'the error identifies the missing DB1 metadata row')
   }
   t.deepEqual(fs.readFileSync(donorPath), beforeLog,
     'failed certification leaves DB1 unchanged')
@@ -1020,7 +1020,7 @@ test('MonsterFt.certify rolls back a failed repair-state update', (t) => {
 
   const donorPath = fixture.paths.get(donor.id)
   setRepairState(donorPath, 2)
-  const seeded = new DatabaseSync(monsterPath(donorPath), {
+  const seeded = new DatabaseSync(donorPath, {
     readBigInts: true,
   })
   seeded.exec(`
@@ -1048,7 +1048,7 @@ test('MonsterFt.certify rolls back a failed repair-state update', (t) => {
   t.deepEqual(raftBytesAtPath(donorPath), beforeLog,
     'failed certification leaves the Raft log unchanged')
 
-  const cleanup = new DatabaseSync(monsterPath(donorPath), {
+  const cleanup = new DatabaseSync(donorPath, {
     readBigInts: true,
   })
   cleanup.exec('DROP TRIGGER monsterft_fail_certification')
@@ -1140,14 +1140,14 @@ test('MonsterFt.certify override bypasses only the unresolved-CMD guard',
 
     t.equal(beforeMeta.pending_cmd_seq, cmdSeq,
       'the donor metadata identifies the pending CMD')
-    t.equal(beforeMeta.pending_local_digest.length, 32,
+    t.equal(beforeMeta.applied_local_digest.length, 32,
       'the donor metadata retains the pending local digest')
     const unresolvedErr = errorOfCall(() => MonsterFt.certify(donorPath))
     t.ok(unresolvedErr instanceof ErrorWithCode,
       'the unresolved donor rejection throws ErrorWithCode')
     t.match(
       unresolvedErr.message,
-      /requires every materialized CMD output to have an applied SYNC/i,
+      /requires every CMD output to have an applied SYNC/i,
       'default certification rejects the unresolved donor',
     )
     t.equal(unresolvedErr.code, ARGUMENT_ILLEGAL,
@@ -1181,7 +1181,7 @@ test('MonsterFt.certify override bypasses only the unresolved-CMD guard',
     const afterMeta = readMetaAtPath(donorPath)
 
     t.equal(result, beforeMeta.applied_seq,
-      'the explicit override returns the DB2 applied checkpoint')
+      'the explicit override returns the DB1 applied checkpoint')
     t.equal(afterMeta.repair_state, 0n,
       'the override clears only repair state 1')
     t.equal(afterMeta.applied_seq, beforeMeta.applied_seq,
@@ -1191,8 +1191,8 @@ test('MonsterFt.certify override bypasses only the unresolved-CMD guard',
     t.equal(afterMeta.pending_cmd_seq, beforeMeta.pending_cmd_seq,
       'the override preserves the pending command sequence')
     t.deepEqual(
-      afterMeta.pending_local_digest,
-      beforeMeta.pending_local_digest,
+      afterMeta.applied_local_digest,
+      beforeMeta.applied_local_digest,
       'the override preserves the pending command digest',
     )
     t.deepEqual(raftBytesAtPath(donorPath), beforeLog,
@@ -1204,7 +1204,7 @@ test('MonsterFt.certify override bypasses only the unresolved-CMD guard',
       'open hydrates the authoritative pending-command cache')
     t.deepEqual(
       hydrated._monsterPendingCommand.localDigest,
-      beforeMeta.pending_local_digest,
+      beforeMeta.applied_local_digest,
       'open hydrates the cached digest from durable metadata',
     )
     const command = await hydrated._monsterRunDbGetCmd(cmdSeq)
@@ -1212,7 +1212,7 @@ test('MonsterFt.certify override bypasses only the unresolved-CMD guard',
       'command lookup returns the authoritative pending command')
     t.deepEqual(
       command.localDigest,
-      beforeMeta.pending_local_digest,
+      beforeMeta.applied_local_digest,
       'the authoritative pending command retains its durable digest',
     )
   })
@@ -1262,7 +1262,7 @@ test('a quorum:false SYNC leaves a live state-1 donor that certify clears',
       'CMD application installs the pending sequence in metadata')
     t.deepEqual(
       node._monsterPendingCommand.localDigest,
-      pendingMeta.pending_local_digest,
+      pendingMeta.applied_local_digest,
       'CMD application publishes matching durable and cached digests',
     )
     node._commitSeq = syncSeq
@@ -1278,8 +1278,8 @@ test('a quorum:false SYNC leaves a live state-1 donor that certify clears',
       'state 1 persists the SYNC checkpoint')
     t.equal(state1Meta.pending_cmd_seq, null,
       'state 1 clears the resolved pending sequence')
-    t.equal(state1Meta.pending_local_digest, null,
-      'state 1 clears the resolved pending digest')
+    t.equal(state1Meta.applied_local_digest.length, 32,
+      'state 1 retains the resolved apply digest')
     t.deepEqual(syncs, [{
       cmdSeq,
       syncSeq,
@@ -1331,7 +1331,7 @@ test('a quorum:false SYNC leaves a live state-1 donor that certify clears',
     t.equal(state1Leader._applySeq, noopSeq,
       'the state-1 leader checkpoints the election no-op')
     t.equal(reconstructed.applyCalls.length, 0,
-      'the later election no-op invokes no user application callback')
+      'the later election no-op invokes no user apply callback')
     t.equal(state1Leader._monsterRepairState, 1,
       'election no-op checkpoint preserves cached repair state 1')
     const electedState1Meta = readMetaAtPath(donorPath)
@@ -1372,8 +1372,8 @@ test('a quorum:false SYNC leaves a live state-1 donor that certify clears',
     )
     t.equal(certifiedMeta.pending_cmd_seq, null,
       'certification keeps resolved pending state clear')
-    t.equal(certifiedMeta.pending_local_digest, null,
-      'certification does not recreate a resolved digest')
+    t.equal(certifiedMeta.applied_local_digest.length, 32,
+      'certification retains the resolved apply digest')
     t.deepEqual(raftBytesAtPath(donorPath), beforeLog,
       'certification preserves the Raft decision history')
 
@@ -1448,12 +1448,12 @@ test('five-node selective repair keeps the other three members live',
     const donorMeta = readMetaAtPath(donorPath)
     t.equal(donorMeta.pending_cmd_seq, null,
       'the drained donor has no pending command before certification')
-    t.equal(donorMeta.pending_local_digest, null,
-      'the drained donor has no pending digest before certification')
+    t.equal(donorMeta.applied_local_digest.length, 32,
+      'the drained donor retains its apply digest before certification')
     const donorLog = raftBytesAtPath(donorPath)
     const certification = MonsterFt.certify(donorPath)
     t.equal(certification, donorMeta.applied_seq,
-      'the stopped healthy donor certifies at its DB2 checkpoint')
+      'the stopped healthy donor certifies at its DB1 checkpoint')
     t.deepEqual(raftBytesAtPath(donorPath), donorLog,
       'certifying the donor preserves its history')
 

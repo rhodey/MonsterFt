@@ -156,7 +156,7 @@ test('uncaught application errors retain their trace without an anonymous script
     t.match(result.stderr, /TypeError: original application failure/,
       `${mode} preserves the original error header`)
     t.match(result.stderr, /at MonsterFt\.applicationApply/,
-      `${mode} preserves the application frame`)
+      `${mode} preserves the apply frame`)
     t.notOk(/<anonymous_script>:0|\n{3}/.test(result.stderr),
       `${mode} has no anonymous header or extra blank lines`)
   }
@@ -189,7 +189,7 @@ for (const asynchronous of [false, true]) {
     t.equal(err.code, APPLY_ERROR, 'the sequence-zero failure retains its fatal code')
     t.equal(err.message, '(apply) schema application failure', 'the contextual message is preserved')
     t.equal(err.stack, original.stack, 'the emitted error keeps the original trace')
-    t.match(err.stack, /schemaApply/, 'the trace identifies the application callback')
+    t.match(err.stack, /schemaApply/, 'the trace identifies the apply callback')
     t.equal(err, fatal, 'fatal and error events report the same error')
     t.notOk(node.isOpen, 'the initialization failure still closes the node')
     t.deepEqual(fixture.warnings, [], 'sequence-zero failures add no item warnings')
@@ -385,7 +385,7 @@ for (const asynchronous of [false, true]) {
           ['application rejected command', APPLY_ERROR, sqlCode],
           `${node.id} classifies the warning while preserving the message and SQL code`)
         t.equal(warning.stack, warning.original.stack, `${node.id} emits its original local trace`)
-        t.match(warning.stack, /applicationApply/, `${node.id} identifies the application callback`)
+        t.match(warning.stack, /applicationApply/, `${node.id} identifies the apply callback`)
       }
     }
     t.deepEqual(diagnostics, [], 'warning mutation does not change agreement or emit errors or fatals')
@@ -427,7 +427,7 @@ for (const targetId of ['1', '2']) {
     t.notEqual(warning, original, 'the warning has a separate error object')
     t.equal(warning.message, original.message, 'the warning preserves the application message')
     t.equal(warning.stack, original.stack, 'the warning preserves the application trace')
-    t.match(warning.stack, /applicationApply/, 'the trace identifies the application callback')
+    t.match(warning.stack, /applicationApply/, 'the trace identifies the apply callback')
     t.equal(diagnostics[1].err.code, REPAIR_OUTSIDE_AGREEMENT,
       'the existing repair code is retained')
     t.equal(diagnostics[2].err, diagnostics[1].err, 'the repair fatal still emits its error')
@@ -540,7 +540,7 @@ for (const mode of ['conflict rollback', 'disk full', 'rollback cleanup', 'relea
       }
     }
     const leader = await elect(fixture.nodes)
-    const metaSql = 'SELECT * FROM monsterft_meta'
+    const metaSql = 'SELECT * FROM monsterft_meta_apply'
     const before = leader.db.prepare(metaSql).get()
     if (mode === 'disk full') {
       for (const node of fixture.nodes) {
@@ -600,7 +600,7 @@ for (const mode of ['conflict rollback', 'disk full', 'rollback cleanup', 'relea
     t.equal(first.err.message, `${transactionLost ? '(apply) ' : ''}${original.message}`,
       'the original message is preserved with the applicable context')
     t.equal(first.err.stack, original.stack, 'the original stack is preserved')
-    t.match(first.err.stack, /applicationApply/, 'the trace identifies the application callback')
+    t.match(first.err.stack, /applicationApply/, 'the trace identifies the apply callback')
     const fatal = diagnostics.find(({ type }) => type === 'fatal').err
     if (transactionLost) {
       t.equal(first.err.code, APPLY_ERROR, 'the transaction loss is an application failure')
@@ -621,7 +621,7 @@ for (const mode of ['conflict rollback', 'disk full', 'rollback cleanup', 'relea
       t.ok(diagnostics.some(({ err }) => err.message === 'error listener failure'),
         'a throwing error listener does not interrupt cleanup and fatal shutdown')
     }
-    t.notOk(leader.isOpen, 'the failed application transaction closes the node')
+    t.notOk(leader.isOpen, 'the failed apply transaction closes the node')
 
     const restored = new DatabaseSync(leader._monsterDatabasePath, {
       readOnly: true,

@@ -205,25 +205,39 @@ const makeFixture = (t, name) => {
       node.on('error', noop)
       node.on('warn', noop)
 
-      const installPendingCmd = node._monsterInstallPendingCmd.bind(node)
-      node._monsterInstallPendingCmd = (
-        db, term, seq, patchset, outcomes, entryHash,
-      ) => {
-        const raw = Buffer.from(patchset)
-        const output = patchsetTransform
-          ? patchsetTransform({ node, db, term, seq, patchset: raw })
-          : raw
-        patchsetCalls.push({
-          id: node.id,
-          term,
-          seq,
-          raw,
-          output: Buffer.from(output),
-          outcomes,
-        })
-        return installPendingCmd(
-          db, term, seq, output, outcomes, entryHash,
-        )
+      let applying = null
+      const applyCmd = node._monsterApplyCmd.bind(node)
+      node._monsterApplyCmd = async (entry, term, seq, entryHash) => {
+        applying = { id: node.id, term, seq }
+        try {
+          const result = await applyCmd(entry, term, seq, entryHash)
+          applying.outcomes = result.outcomes
+          return result
+        } finally {
+          applying = null
+        }
+      }
+      const open = node.open.bind(node)
+      node.open = () => {
+        const result = open()
+        const db = node.db
+        const createSession = db.createSession.bind(db)
+        db.createSession = (options) => {
+          const session = createSession(options)
+          const patchset = session.patchset.bind(session)
+          session.patchset = () => {
+            const raw = Buffer.from(patchset())
+            const { term, seq } = applying
+            const output = patchsetTransform
+              ? patchsetTransform({ node, db, term, seq, patchset: raw })
+              : raw
+            Object.assign(applying, { raw, output: Buffer.from(output) })
+            patchsetCalls.push(applying)
+            return output
+          }
+          return session
+        }
+        return result
       }
 
       const announceOutcome = node._monsterAnnounceOutcome.bind(node)
@@ -275,14 +289,14 @@ const applyInitialNoop = async (node, term=0n) => {
 }
 
 const pendingAt = (node) => {
-  const row = node.db.prepare(`
-    SELECT pending_cmd_seq, pending_local_digest
+  const row = node.log.db.prepare(`
+    SELECT pending_cmd_seq, applied_local_digest
     FROM monsterft_meta WHERE id = 1
   `).get()
   if (row.pending_cmd_seq === null) { return null }
   return {
     cmdSeq: row.pending_cmd_seq,
-    localDigest: Buffer.from(row.pending_local_digest),
+    localDigest: Buffer.from(row.applied_local_digest),
   }
 }
 
@@ -309,14 +323,14 @@ const digestEnvelope = (term, cmdSeq, patchset, outcomes) => {
 }
 
 const metadataAtPath = (databasePath) => {
-  const db = new DatabaseSync(`${databasePath}2`, {
+  const db = new DatabaseSync(databasePath, {
     readOnly: true,
     readBigInts: true,
   })
   try {
     const row = db.prepare(`
       SELECT applied_seq, applied_entry_hash, pending_cmd_seq,
-             pending_local_digest, repair_state
+             applied_local_digest, repair_state
       FROM monsterft_meta
       WHERE id = 1
     `).get()
@@ -329,7 +343,7 @@ const metadataAtPath = (databasePath) => {
         ? null
         : {
             cmdSeq: row.pending_cmd_seq,
-            localDigest: Buffer.from(row.pending_local_digest),
+            localDigest: Buffer.from(row.applied_local_digest),
           },
       repairState: row.repair_state,
     }
@@ -484,11 +498,12 @@ test('MonsterFt normalizes DB2 rollback failures', async (t) => {
     'the synthetic rollback failure has no SQLite error code')
 })
 
-test('MonsterFt normalizes DB2 repair failures', async (t) => {
+test('MonsterFt normalizes DB1 repair failures', async (t) => {
   const repairFailure = new Error('injected repair failure')
   const fatals = []
   const target = {
     state: 'leader',
+    log: { db: {} },
     _toFollower() {},
     _monsterRunDb: async (fn) => fn({}),
     _throwIfClosing() {},
@@ -504,8 +519,8 @@ test('MonsterFt normalizes DB2 repair failures', async (t) => {
   const err = await rejects(
     t,
     MonsterFt.prototype._monsterFenceLeader.call(target),
-    /^DB2 fence injected repair failure$/,
-    'the repair failure has DB2 context',
+    /^DB1 fence injected repair failure$/,
+    'the repair failure has DB1 context',
   )
   t.ok(err instanceof ErrorWithCode,
     'the repair failure uses ErrorWithCode')
@@ -517,7 +532,7 @@ test('MonsterFt normalizes DB2 repair failures', async (t) => {
     'fatal reporting receives the normalized repair failure')
 })
 
-test('MonsterFt uses one constrained singleton bookkeeping table', (t) => {
+test('MonsterFt separates protocol metadata from the apply receipt', (t) => {
   const fixture = makeFixture(t, 'schema')
   fixture.reset()
   const cluster = fixture.build()
@@ -531,8 +546,8 @@ test('MonsterFt uses one constrained singleton bookkeeping table', (t) => {
     ORDER BY type, name
   `).all().map((row) => ({ ...row }))
   t.deepEqual(objects, [
-    { type: 'table', name: 'monsterft_meta' },
-  ], 'DB2 has only singleton metadata Monster bookkeeping')
+    { type: 'table', name: 'monsterft_meta_apply' },
+  ], 'DB2 has only the apply receipt table')
   t.equal(pendingAt(node), null, 'fresh metadata has no pending CMD')
   t.equal(cachedPendingAt(node), null, 'fresh cache has no pending CMD')
   t.notOk('_monsterCurrentCommand' in node,
@@ -541,17 +556,17 @@ test('MonsterFt uses one constrained singleton bookkeeping table', (t) => {
     'fresh nodes have no transient applying-command field')
 
   for (const state of [1n, 2n]) {
-    const updated = node.db.prepare(`
+    const updated = node.log.db.prepare(`
       UPDATE monsterft_meta SET repair_state = ? WHERE id = 1
     `).run(state)
     t.equal(updated.changes, 1n,
       `fresh metadata accepts repair state ${state}`)
-    t.equal(node.db.prepare(`
+    t.equal(node.log.db.prepare(`
       SELECT repair_state FROM monsterft_meta WHERE id = 1
     `).get().repair_state, state,
     `repair state ${state} is stored exactly`)
   }
-  node.db.prepare(`
+  node.log.db.prepare(`
     UPDATE monsterft_meta SET repair_state = 0 WHERE id = 1
   `).run()
 
@@ -563,28 +578,28 @@ test('MonsterFt uses one constrained singleton bookkeeping table', (t) => {
     {
       sql: `UPDATE monsterft_meta
             SET applied_seq = 0, applied_entry_hash = zeroblob(32),
-                pending_cmd_seq = 0, pending_local_digest = NULL
+                pending_cmd_seq = 0, applied_local_digest = NULL
             WHERE id = 1`,
       name: 'half-present pending state is rejected',
     },
     {
       sql: `UPDATE monsterft_meta
             SET applied_seq = 0, applied_entry_hash = zeroblob(32),
-                pending_cmd_seq = -1, pending_local_digest = zeroblob(32)
+                pending_cmd_seq = -1, applied_local_digest = zeroblob(32)
             WHERE id = 1`,
       name: 'a negative pending sequence is rejected',
     },
     {
       sql: `UPDATE monsterft_meta
             SET applied_seq = 0, applied_entry_hash = zeroblob(32),
-                pending_cmd_seq = 0, pending_local_digest = zeroblob(31)
+                pending_cmd_seq = 0, applied_local_digest = zeroblob(31)
             WHERE id = 1`,
       name: 'a non-digest pending value is rejected',
     },
     {
       sql: `UPDATE monsterft_meta
             SET applied_seq = 0, applied_entry_hash = zeroblob(32),
-                pending_cmd_seq = 1, pending_local_digest = zeroblob(32)
+                pending_cmd_seq = 1, applied_local_digest = zeroblob(32)
             WHERE id = 1`,
       name: 'pending state cannot be ahead of the checkpoint',
     },
@@ -596,17 +611,17 @@ test('MonsterFt uses one constrained singleton bookkeeping table', (t) => {
     },
   ]
   for (const { sql, name } of invalid) {
-    t.throws(() => node.db.exec(sql), /constraint/i, name)
+    t.throws(() => node.log.db.exec(sql), /constraint/i, name)
   }
-  t.deepEqual({ ...node.db.prepare(`
+  t.deepEqual({ ...node.log.db.prepare(`
     SELECT applied_seq, applied_entry_hash, pending_cmd_seq,
-           pending_local_digest, repair_state
+           applied_local_digest, repair_state
     FROM monsterft_meta WHERE id = 1
   `).get() }, {
     applied_seq: -1n,
     applied_entry_hash: null,
     pending_cmd_seq: null,
-    pending_local_digest: null,
+    applied_local_digest: null,
     repair_state: 0n,
   }, 'failed constraint checks preserve the seeded metadata row')
   t.end()
@@ -618,8 +633,8 @@ test('MonsterFt rejects invalid stored repair states before starting Raft', (t) 
     fixture.reset()
     const original = fixture.build().nodes[0]
     original.open()
-    original.db.exec('PRAGMA ignore_check_constraints = ON')
-    original.db.prepare('UPDATE monsterft_meta SET repair_state = ? WHERE id = 1')
+    original.log.db.exec('PRAGMA ignore_check_constraints = ON')
+    original.log.db.prepare('UPDATE monsterft_meta SET repair_state = ? WHERE id = 1')
       .run(state)
     original.close()
 
@@ -632,7 +647,7 @@ test('MonsterFt rejects invalid stored repair states before starting Raft', (t) 
       err = failure
     }
     t.ok(err instanceof ErrorWithCode, `state ${state} throws ErrorWithCode`)
-    t.equal(err?.code, MONSTER_CORRUPT, `state ${state} reports DB2 corruption`)
+    t.equal(err?.code, MONSTER_CORRUPT, `state ${state} reports DB1 corruption`)
     t.equal(err?.message, 'stored repair state is corrupt',
       `state ${state} identifies the invalid stored field`)
     t.notOk(restored.isOpen || restored.log.isOpen || restored.db !== null,
@@ -647,25 +662,25 @@ test('MonsterFt validates pending metadata and checkpoint hashes when reopening'
   fixture.reset()
   const first = fixture.build()
   const leader = await openAndElect(first)
-  const checkpoint = leader.db.prepare(`
+  const checkpoint = leader.log.db.prepare(`
     SELECT applied_seq, applied_entry_hash FROM monsterft_meta WHERE id = 1
   `).get()
   closeNodes(first.nodes)
 
   const cases = [
-    ['orphan digest', 'pending_local_digest = zeroblob(32)',
-      'pending command metadata is incomplete'],
-    ['missing digest', 'pending_cmd_seq = 0',
-      'pending command metadata is incomplete'],
-    ['negative pending sequence', 'pending_cmd_seq = -1, pending_local_digest = zeroblob(32)',
+    ['mismatched digest', `applied_local_digest = x'${Buffer.alloc(32, 1).toString('hex')}'`,
+      'apply local digest does not match'],
+    ['missing digest', 'applied_local_digest = NULL',
+      'applied local digest is corrupt'],
+    ['negative pending sequence', 'pending_cmd_seq = -1, applied_local_digest = zeroblob(32)',
       'pending command sequence is corrupt'],
     ['pending sequence ahead of checkpoint',
-      'pending_cmd_seq = applied_seq + 1, pending_local_digest = zeroblob(32)',
+      'pending_cmd_seq = applied_seq + 1, applied_local_digest = zeroblob(32)',
       'pending command sequence is corrupt'],
     ...[0, 31, 33].map((size) => [
       `${size}-byte pending digest`,
-      `pending_cmd_seq = 0, pending_local_digest = zeroblob(${size})`,
-      'pending command digest is corrupt',
+      `pending_cmd_seq = 0, applied_local_digest = zeroblob(${size})`,
+      'applied local digest is corrupt',
     ]),
     ['missing checkpoint hash', 'applied_entry_hash = NULL', 'applied entry hash is corrupt'],
     ...[0, 31, 33].map((size) => [
@@ -673,18 +688,18 @@ test('MonsterFt validates pending metadata and checkpoint hashes when reopening'
       'applied entry hash is corrupt',
     ]),
     ['initial checkpoint with a hash', 'applied_seq = -1',
-      'applied entry hash must be null for initial state'],
+      'initial applied hashes must be null'],
     ['pending command before initial checkpoint',
-      'applied_seq = -1, applied_entry_hash = NULL, pending_cmd_seq = 0, pending_local_digest = zeroblob(32)',
+      'applied_seq = -1, applied_entry_hash = NULL, pending_cmd_seq = 0, applied_local_digest = NULL',
       'pending command sequence is corrupt'],
-    ['text pending sequence', "pending_cmd_seq = 'bad', pending_local_digest = zeroblob(32)",
+    ['text pending sequence', "pending_cmd_seq = 'bad', applied_local_digest = zeroblob(32)",
       'pending command sequence is corrupt', true],
-    ['text pending digest', "pending_cmd_seq = 0, pending_local_digest = 'bad'",
-      'pending command digest is corrupt', true],
+    ['text pending digest', "pending_cmd_seq = 0, applied_local_digest = 'bad'",
+      'applied local digest is corrupt', true],
     ['text checkpoint hash', "applied_entry_hash = 'bad'", 'applied entry hash is corrupt', true],
   ]
   for (const [name, mutation, message, looseSchema] of cases) {
-    const db = new DatabaseSync(`${fixture.paths.get(leader.id)}2`)
+    const db = new DatabaseSync(fixture.paths.get(leader.id))
     try {
       db.exec('PRAGMA ignore_check_constraints = ON')
       if (looseSchema) {
@@ -696,7 +711,7 @@ test('MonsterFt validates pending metadata and checkpoint hashes when reopening'
       }
       db.prepare(`
         UPDATE monsterft_meta SET applied_seq = ?, applied_entry_hash = ?,
-          pending_cmd_seq = NULL, pending_local_digest = NULL WHERE id = 1
+          pending_cmd_seq = NULL, applied_local_digest = zeroblob(32) WHERE id = 1
       `).run(checkpoint.applied_seq, checkpoint.applied_entry_hash)
       db.exec(`UPDATE monsterft_meta SET ${mutation} WHERE id = 1`)
     } finally {
@@ -712,12 +727,12 @@ test('MonsterFt validates pending metadata and checkpoint hashes when reopening'
       err = failure
     }
     t.ok(err instanceof ErrorWithCode, `${name} throws ErrorWithCode`)
-    t.equal(err?.code, MONSTER_CORRUPT, `${name} reports DB2 corruption`)
+    t.equal(err?.code, MONSTER_CORRUPT, `${name} reports DB1 corruption`)
     t.equal(err?.message, message, `${name} identifies the invalid field`)
     t.notOk(restored.isOpen || restored.log.isOpen || restored.db !== null,
       `${name} closes both databases`)
     t.deepEqual(messages, [], `${name} sends no Raft messages`)
-    t.deepEqual(calls, [], `${name} runs no application callbacks`)
+    t.deepEqual(calls, [], `${name} runs no apply callbacks`)
   }
 })
 
@@ -728,7 +743,8 @@ test('MonsterFt classifies failed metadata mutations as SQLite errors',
     const { nodes } = fixture.build()
     const node = nodes[0]
     node.open()
-    node.db.prepare('DELETE FROM monsterft_meta WHERE id = 1').run()
+    node.log.db.prepare('DELETE FROM monsterft_meta WHERE id = 1').run()
+    node.db.prepare('DELETE FROM monsterft_meta_apply WHERE id = 1').run()
 
     const assertSqliteError = (err, message, name) => {
       t.ok(err instanceof ErrorWithCode, `${name} throws ErrorWithCode`)
@@ -746,16 +762,16 @@ test('MonsterFt classifies failed metadata mutations as SQLite errors',
     }
 
     assertSqliteError(capture(() => node._monsterAdvanceApplied(
-      node.db, 0n, Buffer.alloc(32),
-    )), 'DB2 advance applied update count not one',
+      node.log.db, 0n, Buffer.alloc(32),
+    )), 'DB1 advance applied update count not one',
     'checkpoint failure')
-    assertSqliteError(capture(() => node._monsterInstallPendingCmd(
-      node.db, 0n, 0n, Buffer.alloc(0), [], Buffer.alloc(32),
-    )), 'DB2 install pending CMD update count not one',
-    'pending-command failure')
+    assertSqliteError(capture(() => node._monsterWriteApply(
+      node.db, { seq: 0n, entry_hash: Buffer.alloc(32), local_digest: Buffer.alloc(32) },
+    )), 'DB2 write apply update count not one',
+    'apply-receipt failure')
     assertSqliteError(capture(() => node._monsterWriteRepair(
-      node.db, 1,
-    )), 'DB2 write repair update count not one', 'repair-write failure')
+      node.log.db, 1,
+    )), 'DB1 write repair update count not one', 'repair-write failure')
 
     node._monsterRunDbGetCmd = async () => ({
       cmdSeq: 0n,
@@ -769,12 +785,12 @@ test('MonsterFt classifies failed metadata mutations as SQLite errors',
         agree: [],
         disagree: [],
       }, 0n, Buffer.alloc(32)),
-      /^DB2 write CMD decision update count not one$/,
+      /^DB1 write CMD decision update count not one$/,
       'decision failure rejects with its message',
     )
     assertSqliteError(
       decisionErr,
-      'DB2 write CMD decision update count not one',
+      'DB1 write CMD decision update count not one',
       'decision failure',
     )
   })
@@ -793,24 +809,24 @@ test('MonsterFt metadata mutations retain native SQLite context', (t) => {
       'advance applied',
       () => MonsterFt.prototype._monsterAdvanceApplied.call(
         {}, db, 0n, Buffer.alloc(32)),
-      'DB2 advance applied injected SQLite failure',
+      'DB1 advance applied injected SQLite failure',
     ],
     [
-      'install pending CMD',
-      () => MonsterFt.prototype._monsterInstallPendingCmd.call(
-        {}, db, 0n, 0n, Buffer.alloc(0), [], Buffer.alloc(32)),
-      'DB2 install pending CMD injected SQLite failure',
+      'write apply receipt',
+      () => MonsterFt.prototype._monsterWriteApply.call(
+        {}, db, { seq: 0n, entry_hash: Buffer.alloc(32), local_digest: Buffer.alloc(32) }),
+      'DB2 write apply injected SQLite failure',
     ],
     [
       'write command decision',
       () => MonsterFt.prototype._monsterWriteCmdDecision.call(
         {}, db, 0n, Buffer.alloc(32), 0, 0n),
-      'DB2 write CMD decision injected SQLite failure',
+      'DB1 write CMD decision injected SQLite failure',
     ],
     [
       'write repair',
       () => MonsterFt.prototype._monsterWriteRepair.call({}, db, 1),
-      'DB2 write repair injected SQLite failure',
+      'DB1 write repair injected SQLite failure',
     ],
   ]
 
@@ -1073,7 +1089,7 @@ for (const asynchronous of [false, true]) {
         t.equal(error.code, 17, `${label} preserves the numeric code`)
         t.equal(error.sqlCode, 19, `${label} preserves the SQLite code`)
         t.equal(error.stack, original.stack, `${label} preserves the leader's exact trace`)
-        t.match(error.stack, /applicationApply/, `${label} identifies the application frame`)
+        t.match(error.stack, /applicationApply/, `${label} identifies the apply frame`)
         t.notOk(Object.hasOwn(error, 'cause'), `${label} adds no cause property`)
         const stacks = cluster.nodes.map((node) => {
           return originals.get(`${node.id}:${sync.cmdSeq}:${index}`).stack
@@ -1132,14 +1148,10 @@ test('MonsterFt uses one Session across every CMD item', async (t) => {
     }
     return session
   }
-  const installPendingCmd = leader._monsterInstallPendingCmd.bind(leader)
-  leader._monsterInstallPendingCmd = (
-    currentDb, term, seq, patchset, outcomes, entryHash,
-  ) => {
-    events.push({ action: 'write', seq })
-    return installPendingCmd(
-      currentDb, term, seq, patchset, outcomes, entryHash,
-    )
+  const writeApply = leader._monsterWriteApply.bind(leader)
+  leader._monsterWriteApply = (currentDb, receipt) => {
+    events.push({ action: 'write', seq: receipt.seq })
+    return writeApply(currentDb, receipt)
   }
 
   try {
@@ -1178,7 +1190,7 @@ test('MonsterFt uses one Session across every CMD item', async (t) => {
     ], 'each CMD uses one Session around its complete ordered transition')
   } finally {
     db.createSession = createSession
-    leader._monsterInstallPendingCmd = installPendingCmd
+    leader._monsterWriteApply = writeApply
   }
 
   const sessions = events.filter(({ action }) => action === 'create')
@@ -1325,7 +1337,7 @@ test('MonsterFt locally fences a known CMD patchset disagreement', async (t) => 
   const [actualSeq, result] = tuple
   t.equal(actualSeq, cmdSeq, 'the expected CMD receives the patchset disagreement')
   t.deepEqual(result, { key: 'minority', value: 6 },
-    'the leader inside the patchset quorum returns its application result')
+    'the leader inside the patchset quorum returns its apply result')
   t.equal(tuple.length, 2, 'the partial-disagreement result omits syncSeq')
   const { syncSeq } = await synced
   await waitFor(() => cluster.nodes.every((node) => node._applySeq >= syncSeq),
@@ -1634,7 +1646,7 @@ test('MonsterFt closes before applying a CMD in either repair state',
       const node = cluster.nodes[0]
       node.open()
       await applyInitialNoop(node)
-      node.db.prepare(`
+      node.log.db.prepare(`
         UPDATE monsterft_meta SET repair_state = ? WHERE id = 1
       `).run(repairState)
       node._monsterRepairState = repairState
@@ -1662,7 +1674,7 @@ test('MonsterFt closes before applying a CMD in either repair state',
       t.equal(cluster.calls.length, callsBefore,
         `repair state ${repairState} does not invoke user apply for the CMD`)
       t.deepEqual(metadataAtPath(fixture.paths.get(node.id)), before,
-        `repair state ${repairState} leaves the DB2 checkpoint unchanged`)
+        `repair state ${repairState} leaves the DB1 checkpoint unchanged`)
     }
   })
 
@@ -1742,10 +1754,10 @@ test('MonsterFt validates CMD matchIndex before application', async (t) => {
   }],
   'the initial no-op invokes the application with its protocol values')
   t.equal(cluster.calls.length, 1,
-    'invalid matchIndex data is rejected before the application callback')
+    'invalid matchIndex data is rejected before the apply callback')
   t.equal(transactions, 0,
     'invalid matchIndex data is rejected before opening a CMD transaction')
-  t.equal(node.db.prepare(`
+  t.equal(node.log.db.prepare(`
     SELECT applied_seq FROM monsterft_meta WHERE id = 1
   `).get().applied_seq, 0n,
   'invalid matchIndex data does not advance the durable checkpoint')
@@ -1764,11 +1776,11 @@ test('MonsterFt rolls back application work with a failed CMD transaction', asyn
     items: [toBuf({ key: 'rollback', value: 9 })],
     matchIndex: ids.map(() => 0n),
   }))
-  const installPendingCmd = node._monsterInstallPendingCmd.bind(node)
+  const writeApply = node._monsterWriteApply.bind(node)
   const failure = new Error('injected command storage failure')
   const staleReport = Buffer.alloc(32, 1)
   node._monsterPendingReports.set('2', staleReport)
-  node._monsterInstallPendingCmd = () => { throw failure }
+  node._monsterWriteApply = () => { throw failure }
   const failed = await rejects(t, node._monsterApply(node, [record], [1n], [0n]),
     /^injected command storage failure$/,
     'the post-apply storage failure aborts the CMD')
@@ -1783,16 +1795,16 @@ test('MonsterFt rolls back application work with a failed CMD transaction', asyn
     'the failed transaction stores no cached pending command')
   t.equal(node._monsterPendingReports.get('2'), staleReport,
     'the failed transaction retains the prior report state')
-  t.equal(node.db.prepare(`
+  t.equal(node.log.db.prepare(`
     SELECT applied_seq FROM monsterft_meta WHERE id = 1
   `).get().applied_seq, 0n, 'the failed transaction does not advance the checkpoint')
 
-  node._monsterInstallPendingCmd = installPendingCmd
+  node._monsterWriteApply = writeApply
   const [applied] = await node._monsterApply(node, [record], [1n], [0n])
   t.equal(node.db.prepare(`
     SELECT value FROM monster_metadata_items WHERE key = 'rollback'
   `).get().value, 9n, 'retry installs the application write')
-  t.equal(node.db.prepare(`
+  t.equal(node.log.db.prepare(`
     SELECT applied_seq FROM monsterft_meta WHERE id = 1
   `).get().applied_seq, 1n, 'retry advances the durable checkpoint')
   const expectedPending = {
@@ -1806,9 +1818,9 @@ test('MonsterFt rolls back application work with a failed CMD transaction', asyn
   t.equal(node._monsterPendingReports.size, 0,
     'the newly installed CMD starts with an empty report map')
 
-  const prepare = node.db.prepare.bind(node.db)
+  const prepare = node.log.db.prepare.bind(node.log.db)
   let pendingReads = 0
-  node.db.prepare = (sql) => {
+  node.log.db.prepare = (sql) => {
     if (/SELECT[\s\S]*pending_cmd_seq[\s\S]*FROM\s+monsterft_meta/i.test(sql)) {
       pendingReads++
     }
@@ -1828,7 +1840,7 @@ test('MonsterFt rolls back application work with a failed CMD transaction', asyn
         msg.type === 'monster_outcome' && msg.cmdSeq === 1n
     }), 'OUTCOME_REQUEST response')
   } finally {
-    node.db.prepare = prepare
+    node.log.db.prepare = prepare
   }
   t.equal(pendingReads, 0,
     'runtime command lookups use the cache without reading metadata')
@@ -1894,7 +1906,7 @@ test('MonsterFt closes a failed CMD Session and rolls back all item work',
 
     t.ok(commandClosed, 'the failed command Session is closed')
     t.equal(cluster.calls.filter(({ command }) => command !== null).length, 1,
-      'patchset extraction occurs after the application callback')
+      'patchset extraction occurs after the apply callback')
     t.equal(db.prepare(`
       SELECT COUNT(*) AS count FROM monster_metadata_items
     `).get().count, 0n, 'patchset failure rolls back application writes')
@@ -1902,7 +1914,7 @@ test('MonsterFt closes a failed CMD Session and rolls back all item work',
       'patchset failure stores no durable pending command')
     t.equal(cachedPendingAt(node), null,
       'patchset failure stores no cached pending command')
-    t.equal(db.prepare(`
+    t.equal(node.log.db.prepare(`
       SELECT applied_seq FROM monsterft_meta WHERE id = 1
     `).get().applied_seq, 0n,
       'patchset failure does not advance the checkpoint')
@@ -1942,31 +1954,22 @@ test('MonsterFt keeps pending SQL and cache aligned across SYNC rollback',
       agree: [...ids],
       disagree: [],
     }))
-    const prepare = node.db.prepare.bind(node.db)
-    const failure = new Error('injected SYNC checkpoint failure')
-    node.db.prepare = (sql) => {
-      const statement = prepare(sql)
-      if (/UPDATE\s+monsterft_meta\s+SET\s+pending_cmd_seq\s*=\s*NULL/i
-        .test(sql)) {
-        const run = statement.run.bind(statement)
-        statement.run = (...args) => {
-          run(...args)
-          throw failure
-        }
-      }
-      return statement
-    }
+    node.log.db.exec(`
+      CREATE TEMP TRIGGER fail_sync_checkpoint
+      AFTER UPDATE OF pending_cmd_seq ON monsterft_meta
+      BEGIN
+        SELECT RAISE(ABORT, 'injected SYNC checkpoint failure');
+      END
+    `)
     const failed = await rejects(t, node._monsterApply(node, [sync], [2n], [0n]),
-      /^DB2 write CMD decision injected SYNC checkpoint failure$/,
+      /^DB1 write CMD decision injected SYNC checkpoint failure$/,
       'failure after pending-state deletion rolls back SYNC')
     t.ok(failed instanceof ErrorWithCode,
       'the failed SYNC normalizes the original error')
-    t.notEqual(failed, failure,
-      'the failed SYNC replaces the uncoded original error')
     t.equal(failed.code, SQLITE_ERROR,
       'the failed SYNC uses SQLITE_ERROR')
-    t.equal(failed.sqlCode, null,
-      'the synthetic SYNC failure has no SQLite error code')
+    t.ok(Number.isSafeInteger(failed.sqlCode),
+      'the SQLite trigger failure retains its native code')
 
     t.deepEqual(pendingAt(node), expectedPending,
       'rolled-back SYNC retains durable pending state')
@@ -1977,7 +1980,7 @@ test('MonsterFt keeps pending SQL and cache aligned across SYNC rollback',
     t.equal(node._applySeq, 1n,
       'rolled-back SYNC leaves the in-memory checkpoint unchanged')
 
-    node.db.prepare = prepare
+    node.log.db.exec('DROP TRIGGER fail_sync_checkpoint')
     await node._monsterApply(node, [sync], [2n], [0n])
     t.equal(pendingAt(node), null,
       'successful retry clears durable pending state')
@@ -2044,7 +2047,7 @@ test('MonsterFt queues an early OUTCOME behind the active CMD commit',
     const sync = await withTimeout(synced, 'early OUTCOME SYNC')
     t.equal(actualSeq, cmdSeq, 'the queued report certifies the expected CMD')
     t.deepEqual(result, { key: 'early-outcome', value: 16 },
-      'the active CMD returns its application result')
+      'the active CMD returns its apply result')
     t.equal(sync.cmdSeq, cmdSeq,
       'the queued report drives the matching SYNC')
     t.notOk(cluster.messages.some(({ msg }) => {
@@ -2118,16 +2121,18 @@ test('MonsterFt ignores an OUTCOME queued behind its command SYNC',
     const syncEntered = deferred()
     const releaseSync = deferred()
     t.teardown(() => releaseSync.resolve())
-    const writeTx = node._monsterWriteTx.bind(node)
-    let pauseSync = true
-    node._monsterWriteTx = (db, fn) => writeTx(db, async (db) => {
-      if (pauseSync) {
-        pauseSync = false
-        syncEntered.resolve()
-        await releaseSync.promise
-      }
-      return fn(db)
-    })
+    const runDb = node._monsterRunDb.bind(node)
+    let queued = 0
+    node._monsterRunDb = (fn) => {
+      const pause = ++queued === 2
+      return runDb(async (db) => {
+        if (pause) {
+          syncEntered.resolve()
+          await releaseSync.promise
+        }
+        return fn(db)
+      })
+    }
     const sync = Buffer.from(pack({
       type: 'sync',
       cmdSeq: 1n,
@@ -2137,7 +2142,7 @@ test('MonsterFt ignores an OUTCOME queued behind its command SYNC',
       disagree: [],
     }))
     const syncing = node._monsterApply(node, [sync], [2n], [0n])
-    await withTimeout(syncEntered.promise, 'active SYNC transaction')
+    await withTimeout(syncEntered.promise, 'queued SYNC update')
 
     const staleOutcome = node._monsterRxOutcome('2', {
       type: 'monster_outcome',
@@ -2145,12 +2150,12 @@ test('MonsterFt ignores an OUTCOME queued behind its command SYNC',
       digest: Buffer.alloc(32, 3),
     })
     t.equal(node._monsterPendingReports.size, 0,
-      'the OUTCOME waits behind the active SYNC transaction')
+      'the OUTCOME waits behind the queued SYNC update')
 
     releaseSync.resolve()
     await withTimeout(syncing, 'resolving SYNC')
     await withTimeout(staleOutcome, 'queued stale OUTCOME')
-    node._monsterWriteTx = writeTx
+    node._monsterRunDb = runDb
     t.equal(node._monsterPendingReports.size, 0,
       'the queued OUTCOME sees that its command was resolved')
 

@@ -2,6 +2,7 @@ import fs from 'node:fs'
 import { DatabaseSync } from 'node:sqlite'
 import * as Err from './error.js'
 import { MonsterNode } from './monster.js'
+import { reconcile } from './monstermeta.js'
 
 function requireNormalFile(path, name) {
   let stat = null
@@ -41,63 +42,57 @@ class MonsterFt extends MonsterNode {
     requireNormalFile(databasePath, 'DB1')
     requireNormalFile(monsterDatabasePath, 'DB2')
 
-    let db = null
-    let transaction = false
+    let db1 = null
+    let db2 = null
     let result = null
     let failure = null
 
     try {
-      db = new DatabaseSync(monsterDatabasePath, { readBigInts: true })
-      db.exec('PRAGMA busy_timeout = 0')
-      db.exec('PRAGMA locking_mode = EXCLUSIVE')
-      db.exec('BEGIN EXCLUSIVE')
-      transaction = true
-
-      const meta = db.prepare(`
-        SELECT applied_seq AS appliedSeq,
-               pending_cmd_seq AS pendingCmdSeq,
-               pending_local_digest AS pendingLocalDigest
-        FROM monsterft_meta
-        WHERE id = 1
-      `).get()
-      if (meta === undefined) {
-        throw new Err.ErrorWithCode(
-          'MonsterFt certify metadata row is missing',
-          Err.MONSTER_CORRUPT,
-        )
+      // Lock DB2 first, as apply commits there before updating DB1.
+      db2 = new DatabaseSync(monsterDatabasePath, { readBigInts: true })
+      db1 = new DatabaseSync(databasePath, { readBigInts: true })
+      for (const db of [db2, db1]) {
+        db.exec('PRAGMA busy_timeout = 0')
+        db.exec('PRAGMA locking_mode = EXCLUSIVE')
+        db.exec('BEGIN EXCLUSIVE')
       }
+      const meta = reconcile(db1, db2)
 
-      if (!allowUnresolved &&
-          (meta.pendingCmdSeq !== null || meta.pendingLocalDigest !== null)) {
+      if (!allowUnresolved && meta.pending_cmd_seq !== null) {
         throw new Err.ErrorWithCode(
-          'MonsterFt certify requires every materialized CMD output to have an applied SYNC',
+          'MonsterFt certify requires every CMD output to have an applied SYNC',
           Err.ARGUMENT_ILLEGAL,
         )
       }
 
-      db.prepare(`
+      const changed = db1.prepare(`
         UPDATE monsterft_meta
         SET repair_state = 0
         WHERE id = 1
       `).run()
+      if (changed.changes !== 1n) {
+        throw new Err.ErrorWithCode(
+          'MonsterFt certify update count not one', Err.SQLITE_ERROR,
+        )
+      }
 
-      db.exec('COMMIT')
-      transaction = false
-      result = meta.appliedSeq
+      db1.exec('COMMIT')
+      db2.exec('COMMIT')
+      result = meta.applied_seq
     } catch (error) {
       failure = Err.wrapError(
         error,
         error instanceof Err.ErrorWithCode ? null : Err.SQLITE_ERROR,
       )
-      if (transaction) {
-        try {
-          db.exec('ROLLBACK')
-          transaction = false
-        } catch { }
+      for (const db of [db1, db2]) {
+        if (db !== null && db.isTransaction) {
+          try { db.exec('ROLLBACK') } catch { }
+        }
       }
     }
 
-    if (db !== null) {
+    for (const db of [db1, db2]) {
+      if (db === null) { continue }
       try {
         db.close()
       } catch (closeError) {

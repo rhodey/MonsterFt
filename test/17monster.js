@@ -56,7 +56,7 @@ const clearStorage = (basePath) => {
 }
 
 const monsterState = (basePath, cmdSeq=null) => {
-  const db = new DatabaseSync(`${basePath}2`, { readBigInts: true })
+  const db = new DatabaseSync(basePath, { readBigInts: true })
   try {
     const meta = db.prepare(`
       SELECT applied_seq, repair_state, pending_cmd_seq
@@ -479,7 +479,7 @@ test('MonsterFt rejects forwarded commands while drain waits for a pending CMD',
       'the original command completes normally after outcomes resume')
     t.notOk(leader.isOpen, 'drain closes the leader after resolving its pending CMD')
     t.equal(monsterState(fixture.paths.get(leader.id)).meta.pending_cmd_seq, null,
-      'drain leaves no unresolved command in DB2')
+      'drain leaves no unresolved command in DB1')
   })
 
 test('MonsterFt emits durable CMD and SYNC events around an early forwarded result',
@@ -518,7 +518,7 @@ test('MonsterFt emits durable CMD and SYNC events around an early forwarded resu
   const cmdEvents = cluster.nodes.map((node) => {
     return new Promise((resolve) => {
       node.once('cmd', (event) => {
-        const meta = node.db.prepare(`
+        const meta = node.log.db.prepare(`
           SELECT pending_cmd_seq
           FROM monsterft_meta WHERE id = 1
         `).get()
@@ -535,7 +535,7 @@ test('MonsterFt emits durable CMD and SYNC events around an early forwarded resu
   const syncEvents = cluster.nodes.map((node) => {
     return new Promise((resolve) => {
       node.once('sync', (event) => {
-        const meta = node.db.prepare(`
+        const meta = node.log.db.prepare(`
           SELECT repair_state, pending_cmd_seq
           FROM monsterft_meta WHERE id = 1
         `).get()
@@ -592,9 +592,9 @@ test('MonsterFt emits durable CMD and SYNC events around an early forwarded resu
   t.equal(headRecord(leader).type, 'cmd',
     'the forwarded caller settles while SYNC append is blocked')
 
-  const prepare = leader.db.prepare.bind(leader.db)
+  const prepare = leader.log.db.prepare.bind(leader.log.db)
   let selects = 0
-  leader.db.prepare = (sql) => {
+  leader.log.db.prepare = (sql) => {
     if (/^\s*SELECT\b/i.test(String(sql))) { selects++ }
     return prepare(sql)
   }
@@ -604,7 +604,7 @@ test('MonsterFt emits durable CMD and SYNC events around an early forwarded resu
     pendingCommand = await leader._monsterRunDbGetCmd(cmdSeq)
     pendingSnapshot = await leader._monsterRunDbGetCmd()
   } finally {
-    delete leader.db.prepare
+    delete leader.log.db.prepare
   }
   t.equal(selects, 0,
     'runtime pending-command lookups read the authoritative cache without SQL')
@@ -694,7 +694,7 @@ test('MonsterFt emits durable CMD and SYNC events around an early forwarded resu
   t.ok(sync.agree.length >= 2, 'SYNC records at least the agreeing quorum')
   t.deepEqual([...sync.agree].sort(), sync.agree, 'agree IDs are sorted')
   t.deepEqual(sync.disagree, [], 'a matching execution has no known disagreement')
-  t.equal(leader.db.prepare(`
+  t.equal(leader.log.db.prepare(`
     SELECT repair_state FROM monsterft_meta WHERE id = 1
   `).get().repair_state, 0n, 'a clean SYNC does not activate the repair fence')
 
@@ -849,7 +849,7 @@ test('MonsterFt preserves an agreed result when its later SYNC append fails',
     t.deepEqual(result, {
       key: 'settled-before-sync-failure',
       value: 18,
-    }, 'post-settlement failure cannot replace the application result')
+    }, 'post-settlement failure cannot replace the apply result')
 
     const warning = await withTimeout(warned.promise, 'post-settlement warning')
     t.equal(warnings.length, 1, 'the failed SYNC emits one warning')
@@ -1040,7 +1040,7 @@ test('MonsterFt wraps an empty buffer instead of treating it as a Raft no-op', a
   t.equal(record.items.length, 1, 'the CMD contains one user item')
   t.equal(record.items[0].length, 0, 'the wrapped item remains empty')
   t.equal(cluster.calls.filter((call) => call.seq === cmdSeq).length, 3,
-    'every node invokes the application callback for the empty item')
+    'every node invokes the apply callback for the empty item')
   await synced
 })
 
@@ -1257,7 +1257,7 @@ test('MonsterFt compares throws, rolls back failed items, and continues', async 
   await laterSynced
 })
 
-test('MonsterFt rejects application results that MessagePack cannot encode',
+test('MonsterFt rejects apply results that MessagePack cannot encode',
   async (t) => {
     const fixture = makeFixture(t, 'unencodable')
     fixture.clear()
@@ -1538,20 +1538,19 @@ test('MonsterFt trusts SYNC agree and disagree membership before local digest',
     'trusted membership generates no removed protocol traffic')
 })
 
-test('MonsterFt rolls back a terminal SYNC fence when DB2 commit fails',
+test('MonsterFt rolls back a terminal SYNC fence when the DB1 update fails',
   async (t) => {
     const fixture = makeFixture(t, 'terminal-sync-commit-failure')
     fixture.clear()
     const cluster = fixture.build()
     const target = cluster.nodes[1]
-    const failure = new Error('injected DB2 SYNC commit failure')
+    const failureMessage = 'injected DB1 SYNC update failure'
     const syncEvents = []
     const removedEvents = []
     const fatals = []
     const errors = []
     let before = null
-    let commitFailures = 0
-    let rollbacks = 0
+    let updateFailures = 0
 
     target.on('sync', (event) => syncEvents.push(event))
     target.on('repairRequired', () => removedEvents.push('repairRequired'))
@@ -1561,9 +1560,9 @@ test('MonsterFt rolls back a terminal SYNC fence when DB2 commit fails',
 
     const applySync = target._monsterApplySync.bind(target)
     target._monsterApplySync = async (...args) => {
-      const meta = target.db.prepare(`
+      const meta = target.log.db.prepare(`
         SELECT applied_seq, applied_entry_hash, repair_state,
-               pending_cmd_seq, pending_local_digest
+               pending_cmd_seq, applied_local_digest
         FROM monsterft_meta WHERE id = 1
       `).get()
       before = {
@@ -1571,25 +1570,18 @@ test('MonsterFt rolls back a terminal SYNC fence when DB2 commit fails',
         appliedHash: Buffer.from(meta.applied_entry_hash),
         repairState: meta.repair_state,
         pendingCmdSeq: meta.pending_cmd_seq,
-        pendingDigest: Buffer.from(meta.pending_local_digest),
+        pendingDigest: Buffer.from(meta.applied_local_digest),
       }
 
-      const db = target.db
-      const exec = db.exec.bind(db)
-      db.exec = (sql) => {
-        const normalized = String(sql).trim().toUpperCase()
-        if (normalized === 'COMMIT' && commitFailures === 0) {
-          commitFailures++
-          throw failure
-        }
-        if (normalized === 'ROLLBACK') { rollbacks++ }
-        return exec(sql)
-      }
-      try {
-        return await applySync(...args)
-      } finally {
-        delete db.exec
-      }
+      target.log.db.exec(`
+        CREATE TEMP TRIGGER fail_terminal_sync
+        AFTER UPDATE OF repair_state ON monsterft_meta
+        BEGIN
+          SELECT RAISE(ABORT, 'injected DB1 SYNC update failure');
+        END
+      `)
+      updateFailures++
+      return applySync(...args)
     }
 
     const leader = await openAndElect(cluster)
@@ -1619,10 +1611,8 @@ test('MonsterFt rolls back a terminal SYNC fence when DB2 commit fails',
       key: 'terminal-sync-commit-failure',
       value: 34,
     }, 'the healthy leader still returns the agreed command result')
-    t.equal(commitFailures, 1,
-      'the injected failure reaches the terminal SYNC commit')
-    t.equal(rollbacks, 1,
-      'the failed terminal transaction rolls back exactly once')
+    t.equal(updateFailures, 1,
+      'the injected failure reaches the terminal SYNC update')
     t.equal(before.appliedSeq, cmdSeq,
       'the target had durably applied only the CMD before SYNC')
     t.equal(before.repairState, 0n,
@@ -1632,13 +1622,13 @@ test('MonsterFt rolls back a terminal SYNC fence when DB2 commit fails',
     t.equal(before.pendingDigest.byteLength, 32,
       'the unresolved command had a durable local digest')
 
-    const db = new DatabaseSync(`${fixture.paths.get('2')}2`, {
+    const db = new DatabaseSync(fixture.paths.get('2'), {
       readOnly: true,
       readBigInts: true,
     })
     const meta = db.prepare(`
       SELECT applied_seq, applied_entry_hash, repair_state,
-             pending_cmd_seq, pending_local_digest
+             pending_cmd_seq, applied_local_digest
       FROM monsterft_meta WHERE id = 1
     `).get()
     db.close()
@@ -1651,7 +1641,7 @@ test('MonsterFt rolls back a terminal SYNC fence when DB2 commit fails',
       'the repair fence rolls back with the terminal decision')
     t.equal(meta.pending_cmd_seq, before.pendingCmdSeq,
       'the pending command sequence rolls back with the fence')
-    t.ok(Buffer.from(meta.pending_local_digest).equals(before.pendingDigest),
+    t.ok(Buffer.from(meta.applied_local_digest).equals(before.pendingDigest),
       'the pending command digest rolls back with the fence')
     t.equal(target._monsterPendingCommand?.cmdSeq, cmdSeq,
       'the failed commit leaves the authoritative cache pending')
@@ -1663,17 +1653,13 @@ test('MonsterFt rolls back a terminal SYNC fence when DB2 commit fails',
     t.equal(fatals.length, 1,
       'the storage failure emits one fatal')
     t.ok(fatals[0] instanceof ErrorWithCode,
-      'fatal reporting normalizes the DB2 storage failure')
-    t.notEqual(fatals[0], failure,
-      'fatal reporting replaces the original DB2 error')
+      'fatal reporting normalizes the DB1 storage failure')
     t.equal(fatals[0].code, APPLY_ERROR,
       'fatal reporting classifies the application failure')
-    t.equal(fatals[0].message, '(apply) injected DB2 SYNC commit failure',
-      'fatal reporting adds application context')
+    t.equal(fatals[0].message, `(apply) DB1 write CMD decision ${failureMessage}`,
+      'fatal reporting adds apply context')
     t.equal(errors[0], fatals[0],
       'error reporting preserves the normalized failure')
-    t.notOk(failure.message.includes('MonsterFt'),
-      'MonsterFt adds no phase or sequence text to the storage failure')
     t.deepEqual(syncEvents, [],
       'the failed terminal application emits no sync event')
     t.deepEqual(removedEvents, [],
@@ -2236,7 +2222,7 @@ test('MonsterFt restores its durable apply checkpoint in fresh node objects', as
   t.ok(second.nodes.every((node) => node._applySeq === noOpSeq),
     'the later no-op advances every restored checkpoint')
   t.equal(second.calls.length, 0,
-    'the later no-op invokes no user application callback')
+    'the later no-op invokes no user apply callback')
   const nextSynced = nextEvent(newLeader, 'sync')
   const [, current] = await newLeader.append(toBuf({ op: 'get', key: 'once' }))
   const { syncSeq: nextSync } = await nextSynced

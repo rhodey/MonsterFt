@@ -143,16 +143,28 @@ const valueAt = (node, key) => {
 }
 
 const monsterMetaAtPath = (databasePath) => {
-  const db = new DatabaseSync(`${databasePath}2`, {
+  const db = new DatabaseSync(databasePath, {
     readOnly: true,
     readBigInts: true,
   })
   try {
     return db.prepare(`
-      SELECT applied_seq, pending_cmd_seq, pending_local_digest
+      SELECT applied_seq, pending_cmd_seq, applied_local_digest
       FROM monsterft_meta
       WHERE id = 1
     `).get()
+  } finally {
+    db.close()
+  }
+}
+
+const applyMetaAtPath = (databasePath) => {
+  const db = new DatabaseSync(`${databasePath}2`, {
+    readOnly: true,
+    readBigInts: true,
+  })
+  try {
+    return db.prepare('SELECT seq, entry_hash, local_digest FROM monsterft_meta_apply WHERE id = 1').get()
   } finally {
     db.close()
   }
@@ -407,12 +419,12 @@ test('constructors use strict paths and a literal two-file pair',
         ORDER BY type, name
       `).all().map(({ type, name }) => ({ type, name })),
       [
-        { type: 'table', name: 'monsterft_meta' },
+        { type: 'table', name: 'monsterft_meta_apply' },
       ],
-      'DB2 uses only the metadata protocol table',
+      'DB2 stores only the apply receipt table before setup',
     )
     t.deepEqual(
-      monster.db.prepare('PRAGMA table_info(monsterft_meta)')
+      monster.log.db.prepare('PRAGMA table_info(monsterft_meta)')
         .all().map(({ name }) => name),
       [
         'id',
@@ -420,12 +432,22 @@ test('constructors use strict paths and a literal two-file pair',
         'applied_entry_hash',
         'repair_state',
         'pending_cmd_seq',
-        'pending_local_digest',
+        'applied_local_digest',
       ],
       'the singleton metadata row owns the pending CMD fields',
     )
+    t.deepEqual(
+      monster.db.prepare('PRAGMA table_info(monsterft_meta_apply)').all().map(({ name }) => name),
+      ['id', 'seq', 'entry_hash', 'local_digest'],
+      'DB2 stores only the apply receipt fields',
+    )
+    t.notOk(tableNames(monster.log.db).includes('monsterft_meta_apply'),
+      'DB1 contains no apply receipt table')
+    t.deepEqual({ ...monster.db.prepare('SELECT * FROM monsterft_meta_apply').get() }, {
+      id: 1n, seq: -1n, entry_hash: null, local_digest: null,
+    }, 'a fresh apply receipt is uninitialized')
     t.throws(
-      () => monster.db.prepare(`
+      () => monster.log.db.prepare(`
         INSERT INTO monsterft_meta
           (id, applied_seq, applied_entry_hash, repair_state)
         VALUES (2, -1, NULL, 0)
@@ -433,10 +455,10 @@ test('constructors use strict paths and a literal two-file pair',
       /constraint/i,
       'metadata rejects a second singleton row',
     )
-    const writeRepairState = monster.db.prepare(`
+    const writeRepairState = monster.log.db.prepare(`
       UPDATE monsterft_meta SET repair_state = ? WHERE id = 1
     `)
-    const readRepairState = monster.db.prepare(`
+    const readRepairState = monster.log.db.prepare(`
       SELECT repair_state FROM monsterft_meta WHERE id = 1
     `)
     for (const state of [1, 2, 0]) {
@@ -450,7 +472,7 @@ test('constructors use strict paths and a literal two-file pair',
       'metadata rejects an unknown repair state',
     )
     t.throws(
-      () => monster.db.prepare(`
+      () => monster.log.db.prepare(`
         UPDATE monsterft_meta
         SET pending_cmd_seq = 0
         WHERE id = 1
@@ -547,7 +569,7 @@ test('in-memory MonsterFt cluster elects, applies, and deletes as a no-op',
     }))
     const { syncSeq } = await synced
     t.deepEqual(result, { key: 'memory', value: 7 },
-      'the in-memory leader returns the application result')
+      'the in-memory leader returns the apply result')
     t.ok(cmdSeq >= 0n, 'the in-memory cluster assigns a command sequence')
     await waitApplied(cluster.nodes, syncSeq)
     for (const node of cluster.nodes) {
@@ -610,15 +632,10 @@ test('Monster open completes storage and validation before Raft start',
     class OrderedMonsterFt extends MonsterFt {
       _monsterInit(db) {
         const result = super._monsterInit(db)
-        order.push('DB2 initialization')
+        order.push('metadata initialization and validation')
         return result
       }
 
-      _monsterVerifyAppliedEntry(appliedEntryHash) {
-        const result = super._monsterVerifyAppliedEntry(appliedEntryHash)
-        order.push('checkpoint validation')
-        return result
-      }
 
       _startRaft() {
         order.push('Raft start')
@@ -649,8 +666,7 @@ test('Monster open completes storage and validation before Raft start',
     node.open()
     t.deepEqual(order, [
       'DB1',
-      'checkpoint validation',
-      'DB2 initialization',
+      'metadata initialization and validation',
       'Raft start',
       'open publication',
     ], 'open completes every stage in the required order')
@@ -721,7 +737,7 @@ test('sequence-zero bootstrap failure rolls back and closes the node',
     t.equal(rejected.code, APPLY_ERROR,
       'no-op application has APPLY_ERROR code')
     t.equal(rejected.message, '(apply) injected bootstrap failure',
-      'no-op application adds application context')
+      'no-op application adds apply context')
     t.equal(fatals[0], rejected,
       'the normalized bootstrap error is emitted as fatal')
     t.equal(await errored, rejected,
@@ -748,8 +764,8 @@ test('sequence-zero bootstrap failure rolls back and closes the node',
       readBigInts: true,
     })
     const meta = rolledBack.prepare(`
-      SELECT applied_seq, applied_entry_hash
-      FROM monsterft_meta WHERE id = 1
+      SELECT seq, entry_hash, local_digest
+      FROM monsterft_meta_apply WHERE id = 1
     `).get()
     const appTables = rolledBack.prepare(`
       SELECT count(*) AS count
@@ -757,8 +773,8 @@ test('sequence-zero bootstrap failure rolls back and closes the node',
       WHERE type = 'table' AND name = 'two_file_items'
     `).get().count
     rolledBack.close()
-    t.deepEqual({ ...meta }, { applied_seq: -1n, applied_entry_hash: null },
-      'bootstrap rollback preserves the initial durable checkpoint')
+    t.deepEqual({ ...meta }, { seq: -1n, entry_hash: null, local_digest: null },
+      'bootstrap rollback preserves the initial apply receipt')
     t.equal(appTables, 0n,
       'bootstrap rollback removes schema created in the no-op transaction')
 
@@ -770,7 +786,7 @@ test('sequence-zero bootstrap failure rolls back and closes the node',
     await replacement._apply(0n)
     t.equal(attempts, 2, 'a fresh object retries the initial no-op bootstrap')
     t.deepEqual(tableNames(replacement.db), [
-      'monsterft_meta',
+      'monsterft_meta_apply',
       'two_file_items',
     ], 'the successful retry commits the application schema')
     t.equal(replacement._applySeq, 0n,
@@ -854,16 +870,14 @@ for (const asynchronous of [false, true]) {
       })
       try {
         const meta = db.prepare(`
-          SELECT applied_seq, applied_entry_hash, pending_cmd_seq,
-            pending_local_digest FROM monsterft_meta WHERE id = 1
+          SELECT seq, entry_hash, local_digest FROM monsterft_meta_apply WHERE id = 1
         `).get()
         t.deepEqual({ ...meta }, {
-          applied_seq: -1n,
-          applied_entry_hash: null,
-          pending_cmd_seq: null,
-          pending_local_digest: null,
-        }, 'the durable checkpoint and pending state remain uninitialized')
-        t.deepEqual(tableNames(db), ['monsterft_meta'],
+          seq: -1n,
+          entry_hash: null,
+          local_digest: null,
+        }, 'the durable apply receipt remains uninitialized')
+        t.deepEqual(tableNames(db), ['monsterft_meta_apply'],
           'the failed transaction leaves no application schema')
       } finally {
         db.close()
@@ -886,7 +900,8 @@ for (const asynchronous of [false, true]) {
       const meta = monsterMetaAtPath(databasePath)
       t.ok(meta.applied_seq > seq, 'the durable checkpoint includes command SYNC')
       t.equal(meta.pending_cmd_seq, null, 'SYNC clears the pending command')
-      t.equal(meta.pending_local_digest, null, 'SYNC clears the pending digest')
+      t.deepEqual(meta.applied_local_digest, applyMetaAtPath(databasePath).local_digest,
+        'SYNC retains the apply digest matching DB2')
       t.equal(errors.length, 1, 'recovery and later commands emit no further errors')
     })
 }
@@ -1039,8 +1054,8 @@ test('failed Monster open cleanup is finite and retains both failed handles',
     let logAttempts = 0
 
     class FailedOpenMonsterFt extends MonsterFt {
-      _monsterVerifyAppliedEntry(appliedEntryHash) {
-        super._monsterVerifyAppliedEntry(appliedEntryHash)
+      _monsterInit(db2) {
+        super._monsterInit(db2)
         const currentDb = this.db
         db = currentDb
         const closeDb = currentDb.close.bind(currentDb)
@@ -1400,9 +1415,9 @@ test('two-file cluster commits, checkpoints exact entries, and restarts',
       separate: true,
     })), 'every initial no-op bootstraps through apply on DB2')
     t.deepEqual(first.nodes.map((node) => tableNames(node.db)), [
-      ['monsterft_meta', 'two_file_items'],
-      ['monsterft_meta', 'two_file_items'],
-      ['monsterft_meta', 'two_file_items'],
+      ['monsterft_meta_apply', 'two_file_items'],
+      ['monsterft_meta_apply', 'two_file_items'],
+      ['monsterft_meta_apply', 'two_file_items'],
     ], 'sequence-zero application commits schema on every member')
     for (const node of first.nodes) {
       const { term, entry } = node.log.db.prepare(`
@@ -1411,7 +1426,7 @@ test('two-file cluster commits, checkpoints exact entries, and restarts',
       const prefix = Buffer.alloc(8)
       prefix.writeBigUInt64LE(term)
       const expected = crypto.createHash('sha256').update(prefix).digest()
-      const { applied_entry_hash: hash } = node.db.prepare(`
+      const { applied_entry_hash: hash } = node.log.db.prepare(`
         SELECT applied_entry_hash FROM monsterft_meta WHERE id = 1
       `).get()
       t.equal(term, leader.term,
@@ -1420,6 +1435,12 @@ test('two-file cluster commits, checkpoints exact entries, and restarts',
         `node ${node.id} stores no prefix in the empty no-op payload`)
       t.deepEqual(Buffer.from(hash), expected,
         `node ${node.id} preserves the no-op checkpoint hash bytes`)
+      const receipt = node.db.prepare('SELECT * FROM monsterft_meta_apply WHERE id = 1').get()
+      t.equal(receipt.seq, 0n, `node ${node.id} records setup in DB2`)
+      t.deepEqual(Buffer.from(receipt.entry_hash), expected,
+        `node ${node.id} records the actual setup entry hash`)
+      t.deepEqual(Buffer.from(receipt.local_digest), Buffer.alloc(32),
+        `node ${node.id} uses the zero setup digest`)
     }
 
     const synced = nextSync(leader)
@@ -1430,7 +1451,7 @@ test('two-file cluster commits, checkpoints exact entries, and restarts',
     const sync = await withTimeout(synced, 'before-restart SYNC event')
     const { syncSeq } = sync
     t.deepEqual(result, { key: 'before-restart', value: 41 },
-      'the quorum returns the agreed application result')
+      'the quorum returns the agreed apply result')
     t.equal(sync.cmdSeq, cmdSeq,
       'the durable SYNC event identifies the completed CMD')
     await waitApplied(first.nodes, syncSeq)
@@ -1442,9 +1463,9 @@ test('two-file cluster commits, checkpoints exact entries, and restarts',
       'every apply callback receives DB2, never DB1')
 
     for (const node of first.nodes) {
-      const meta = node.db.prepare(`
+      const meta = node.log.db.prepare(`
         SELECT applied_seq, applied_entry_hash,
-               pending_cmd_seq, pending_local_digest
+               pending_cmd_seq, applied_local_digest
         FROM monsterft_meta WHERE id = 1
       `).get()
       const row = node.log.db.prepare(`
@@ -1457,13 +1478,14 @@ test('two-file cluster commits, checkpoints exact entries, and restarts',
         .update(Buffer.from(row.entry))
         .digest()
       t.equal(meta.applied_seq, node._applySeq,
-        `node ${node.id} publishes its durable DB2 checkpoint`)
+        `node ${node.id} publishes its durable DB1 checkpoint`)
       t.ok(Buffer.from(meta.applied_entry_hash).equals(expected),
         `node ${node.id} preserves the term-and-payload checkpoint hash`)
       t.equal(meta.pending_cmd_seq, null,
         `node ${node.id} clears the resolved pending sequence`)
-      t.equal(meta.pending_local_digest, null,
-        `node ${node.id} clears the resolved pending digest`)
+      t.deepEqual(meta.applied_local_digest,
+        node.db.prepare('SELECT local_digest FROM monsterft_meta_apply WHERE id = 1').get().local_digest,
+        `node ${node.id} retains the resolved apply digest`)
       t.equal(node._monsterPendingCommand, null,
         `node ${node.id} clears the resolved pending cache`)
     }
@@ -1483,9 +1505,9 @@ test('two-file cluster commits, checkpoints exact entries, and restarts',
       'the restarted leader commits a later election no-op')
     t.ok(second.nodes.every((node) => {
       return node._applySeq === restartedLeader._commitSeq
-    }), 'the later no-op advances every restored DB2 checkpoint')
+    }), 'the later no-op advances every restored DB1 checkpoint')
     t.equal(second.applies.length, 0,
-      'the later no-op invokes no user application callback')
+      'the later no-op invokes no user apply callback')
     const restartedSynced = nextSync(restartedLeader)
     const [restartedCmd, restartedResult] = await restartedLeader.append(toBuf({
       key: 'after-restart',
@@ -1532,9 +1554,9 @@ for (const missing of ['row', 'table', 'all DB2 tables']) {
     const databasePath = fixture.paths.get(leader.id)
     const db = new DatabaseSync(`${databasePath}2`)
     if (missing === 'row') {
-      db.exec('DELETE FROM monsterft_meta')
+      db.exec('DELETE FROM monsterft_meta_apply')
     } else {
-      db.exec('DROP TABLE monsterft_meta')
+      db.exec('DROP TABLE monsterft_meta_apply')
       if (missing === 'all DB2 tables') { db.exec('DROP TABLE two_file_items') }
     }
     db.close()
@@ -1545,8 +1567,11 @@ for (const missing of ['row', 'table', 'all DB2 tables']) {
     const err = errorOfCall(() => restored.open())
     t.ok(err instanceof ErrorWithCode, 'missing metadata throws ErrorWithCode')
     t.equal(err?.code, MONSTER_CORRUPT, 'missing metadata reports DB2 corruption')
-    t.equal(err?.message, `metadata ${missing === 'row' ? 'row' : 'table'} is missing`,
-      'the error identifies the missing metadata')
+    const expected = missing === 'row'
+      ? /apply meta row is missing/
+      : /meta init requires empty raft_log/
+    t.match(err?.message ?? '', expected,
+      'the error identifies why metadata cannot be restored')
     t.notOk(restored.isOpen || restored.log.isOpen || restored.db !== null,
       'failed startup closes both databases')
     t.equal(fixture.bus.messages.length, beforeMessages, 'startup sends no Raft messages')
@@ -1555,10 +1580,10 @@ for (const missing of ['row', 'table', 'all DB2 tables']) {
     const saved = new DatabaseSync(`${databasePath}2`, { readOnly: true })
     try {
       if (missing === 'row') {
-        t.deepEqual(saved.prepare('SELECT * FROM monsterft_meta').all(), [],
+        t.deepEqual(saved.prepare('SELECT * FROM monsterft_meta_apply').all(), [],
           'startup does not recreate the lost checkpoint row')
       } else {
-        t.notOk(tableNames(saved).includes('monsterft_meta'),
+        t.notOk(tableNames(saved).includes('monsterft_meta_apply'),
           'startup does not recreate the lost metadata table')
       }
       if (missing !== 'all DB2 tables') {
@@ -1578,10 +1603,10 @@ test('an empty log does not allow reseeding existing DB2 state', (t) => {
     original.open()
     t.equal(original.seq, -1n, 'the original log has no entries')
     if (missing === 'row') {
-      original.db.exec('DELETE FROM monsterft_meta')
+      original.db.exec('DELETE FROM monsterft_meta_apply')
     } else {
       initializeApp(original.db)
-      original.db.exec('DROP TABLE monsterft_meta')
+      original.db.exec('DROP TABLE monsterft_meta_apply')
     }
     original.close()
 
@@ -1606,7 +1631,7 @@ test('failed fresh metadata initialization leaves an empty pair that can be retr
   class FailedInit extends MonsterFt {
     _monsterInit(db) {
       const exec = db.exec.bind(db)
-      db.exec = (sql) => exec(sql.replace('INSERT INTO monsterft_meta', 'INSERT INTO missing_table'))
+      db.exec = (sql) => exec(sql.replace('INSERT INTO monsterft_meta_apply', 'INSERT INTO missing_table'))
       return super._monsterInit(db)
     }
   }
@@ -1629,12 +1654,12 @@ test('failed fresh metadata initialization leaves an empty pair that can be retr
   restored.open()
   t.ok(restored.isOpen, 'an existing empty pair initializes successfully on retry')
   t.equal(restored._applySeq, -1n, 'the retry starts at the initial checkpoint')
-  t.equal(restored.db.prepare('SELECT count(*) AS count FROM monsterft_meta').get().count, 1n,
+  t.equal(restored.db.prepare('SELECT count(*) AS count FROM monsterft_meta_apply').get().count, 1n,
     'the retry creates exactly one metadata row')
   t.end()
 })
 
-test('open rejects a DB2 checkpoint hash mismatch', async (t) => {
+test('open rejects a DB1 checkpoint hash mismatch', async (t) => {
   const fixture = clusterFixture(t, 'hash-mismatch')
   const first = fixture.build()
   await openAndElect(first.nodes)
@@ -1643,7 +1668,7 @@ test('open rejects a DB2 checkpoint hash mismatch', async (t) => {
   closeNodes(first.nodes)
 
   const databasePath = fixture.paths.get('1')
-  const db = new DatabaseSync(`${databasePath}2`, { readBigInts: true })
+  const db = new DatabaseSync(databasePath, { readBigInts: true })
   const before = db.prepare(`
     SELECT applied_entry_hash
     FROM monsterft_meta WHERE id = 1
@@ -1666,7 +1691,7 @@ test('open rejects a DB2 checkpoint hash mismatch', async (t) => {
   t.match(
     err?.message ?? '',
     /applied entry hash does not match/,
-    'MonsterFt compares the DB2 checkpoint hash with the exact DB1 entry',
+    'MonsterFt compares the DB1 checkpoint hash with its exact log entry',
   )
   t.notOk(second.nodes[0].log.isOpen,
     'mismatch cleanup closes DB1 before open rejects')
@@ -1712,7 +1737,7 @@ for (const field of ['term', 'entry']) {
     t.match(err?.message ?? '', /applied entry hash does not match/,
       'the stored checkpoint authenticates both the term and payload')
     t.deepEqual(second.applies, [],
-      'checkpoint validation rejects before invoking application callbacks')
+      'checkpoint validation rejects before invoking apply callbacks')
     t.notOk(second.nodes[0].isOpen || second.nodes[0].log.isOpen,
       'failed startup releases DB1 without publishing an open node')
     t.equal(second.nodes[0].db, null, 'failed startup releases DB2')
@@ -1751,12 +1776,12 @@ test('checkpoint ahead of DB1 rejects and requires a fresh object',
     seed.close()
 
     const corrupt = new DatabaseSync(
-      `${databasePath}2`,
+      databasePath,
       { readBigInts: true },
     )
     corrupt.prepare(`
       UPDATE monsterft_meta
-      SET applied_seq = 0, applied_entry_hash = ?
+      SET applied_seq = 0, applied_entry_hash = ?, applied_local_digest = zeroblob(32)
       WHERE id = 1
     `).run(Buffer.alloc(32))
     corrupt.close()
@@ -1782,19 +1807,19 @@ test('checkpoint ahead of DB1 rejects and requires a fresh object',
       'the checkpoint ahead of DB1 has no SQLite error code')
     t.match(
       err?.message ?? '',
-      /applied sequence is corrupt/,
-      'MonsterFt rejects a DB2 checkpoint ahead of DB1',
+      /applied log entry not found/,
+      'MonsterFt rejects a checkpoint ahead of the DB1 log',
     )
     t.notOk(failed.log.isOpen, 'invalid checkpoint cleanup closes DB1')
     t.equal(failed.db, null, 'invalid checkpoint cleanup closes DB2')
 
     const repaired = new DatabaseSync(
-      `${databasePath}2`,
+      databasePath,
       { readBigInts: true },
     )
     repaired.prepare(`
       UPDATE monsterft_meta
-      SET applied_seq = -1, applied_entry_hash = NULL
+      SET applied_seq = -1, applied_entry_hash = NULL, applied_local_digest = NULL
       WHERE id = 1
     `).run()
     repaired.close()
@@ -1832,7 +1857,7 @@ test('repair state 1 reopens live while state 2 requires certification',
     seed.open()
     seed.close()
 
-    const db = new DatabaseSync(`${databasePath}2`, { readBigInts: true })
+    const db = new DatabaseSync(databasePath, { readBigInts: true })
     db.prepare(`
       UPDATE monsterft_meta SET repair_state = 1 WHERE id = 1
     `).run()
@@ -1853,7 +1878,7 @@ test('repair state 1 reopens live while state 2 requires certification',
       'state-1 command fencing leaves DB1 and DB2 online')
     liveFenced.close()
 
-    const state2 = new DatabaseSync(`${databasePath}2`, {
+    const state2 = new DatabaseSync(databasePath, {
       readBigInts: true,
     })
     state2.prepare(`
@@ -2130,10 +2155,7 @@ test('shutdown before DB2 commit rolls back and replays the durable DB1 entry',
       readOnly: true,
       readBigInts: true,
     })
-    const rolledBackMeta = rolledBack.prepare(`
-      SELECT applied_seq, pending_cmd_seq, pending_local_digest
-      FROM monsterft_meta WHERE id = 1
-    `).get()
+    const rolledBackMeta = monsterMetaAtPath(databasePath)
     const rolledBackValue = rolledBack.prepare(`
       SELECT value FROM two_file_items WHERE key = 'pre-commit'
     `).get()
@@ -2142,8 +2164,8 @@ test('shutdown before DB2 commit rolls back and replays the durable DB1 entry',
       'shutdown before COMMIT preserves the no-op checkpoint')
     t.equal(rolledBackMeta.pending_cmd_seq, null,
       'shutdown before COMMIT persists no pending command sequence')
-    t.equal(rolledBackMeta.pending_local_digest, null,
-      'shutdown before COMMIT persists no pending command digest')
+    t.deepEqual(Buffer.from(rolledBackMeta.applied_local_digest), Buffer.alloc(32),
+      'shutdown before COMMIT preserves the setup digest')
     t.equal(rolledBackValue, undefined,
       'shutdown before COMMIT rolls back application state')
     t.equal(first.log.isOpen, false,
@@ -2167,16 +2189,16 @@ test('shutdown before DB2 commit rolls back and replays the durable DB1 entry',
     t.equal(valueAt(second, 'pre-commit'), 12,
       'replay commits the application transition to DB2')
     t.equal(second._applySeq, cmdSeq,
-      'replay advances the DB2 checkpoint to the durable DB1 entry')
-    const replayedMeta = second.db.prepare(`
-      SELECT pending_cmd_seq, pending_local_digest
+      'replay advances the DB1 checkpoint to its durable entry')
+    const replayedMeta = second.log.db.prepare(`
+      SELECT pending_cmd_seq, applied_local_digest
       FROM monsterft_meta WHERE id = 1
     `).get()
     t.equal(replayedMeta.pending_cmd_seq, cmdSeq,
       'replay durably installs the pending command sequence')
     t.equal(second._monsterPendingCommand.cmdSeq, cmdSeq,
       'replay publishes the matching pending-command cache')
-    t.ok(Buffer.from(replayedMeta.pending_local_digest).equals(
+    t.ok(Buffer.from(replayedMeta.applied_local_digest).equals(
       second._monsterPendingCommand.localDigest,
     ), 'replay aligns the durable and cached pending digests')
     second.close()
@@ -2267,21 +2289,23 @@ test('shutdown immediately after DB2 commit prevents replay on restart',
       readBigInts: true,
     })
     const committedMeta = committed.prepare(`
-      SELECT applied_seq, applied_entry_hash,
-             pending_cmd_seq, pending_local_digest
-      FROM monsterft_meta WHERE id = 1
+      SELECT seq, entry_hash, local_digest
+      FROM monsterft_meta_apply WHERE id = 1
     `).get()
     const committedValue = committed.prepare(`
       SELECT value FROM two_file_items WHERE key = 'post-commit'
     `).get()
     committed.close()
-    t.equal(committedMeta.applied_seq, cmdSeq,
+    t.equal(committedMeta.seq, cmdSeq,
       'the atomic DB2 commit persists its applied sequence')
-    t.equal(Buffer.from(committedMeta.applied_entry_hash).length, 32,
+    t.equal(Buffer.from(committedMeta.entry_hash).length, 32,
       'the same DB2 commit persists its entry hash')
-    t.equal(committedMeta.pending_cmd_seq, cmdSeq,
-      'the same DB2 commit persists its pending command sequence')
-    t.equal(Buffer.from(committedMeta.pending_local_digest).length, 32,
+    const pendingImport = monsterMetaAtPath(databasePath)
+    t.equal(pendingImport.applied_seq, 0n,
+      'DB1 remains at setup when shutdown interrupts receipt import')
+    t.equal(pendingImport.pending_cmd_seq, null,
+      'the interrupted import leaves no pending command in DB1')
+    t.equal(Buffer.from(committedMeta.local_digest).length, 32,
       'the same DB2 commit persists its pending command digest')
     t.equal(committedValue.value, 13n,
       'the same DB2 commit persists application state')
@@ -2291,13 +2315,13 @@ test('shutdown immediately after DB2 commit prevents replay on restart',
     t.equal(second._monsterPendingCommand.cmdSeq, cmdSeq,
       'restart hydrates the committed pending command sequence')
     t.ok(second._monsterPendingCommand.localDigest.equals(
-      Buffer.from(committedMeta.pending_local_digest),
+      Buffer.from(committedMeta.local_digest),
     ), 'restart hydrates the committed pending command digest')
     second._commitSeq = cmdSeq
     second._commitTerm = 0n
     await second._apply(cmdSeq)
     t.equal(applyCalls, 2,
-      'restart does not replay an entry included in the DB2 checkpoint')
+      'restart does not replay an entry recorded in the DB2 receipt')
     t.equal(warnings.length, 1,
       'restoring the persisted pending outcome does not repeat its warning')
     t.equal(valueAt(second, 'post-commit'), 13,
@@ -2305,7 +2329,229 @@ test('shutdown immediately after DB2 commit prevents replay on restart',
     second.close()
   })
 
-test('certify changes DB2 only and preserves its checkpoint hash',
+for (const setup of [true, false]) {
+  test(`DB1 import failure preserves committed ${setup ? 'setup' : 'CMD'} for recovery`, async (t) => {
+    const databasePath = uniquePath(`import-failure-${setup ? 'setup' : 'cmd'}`)
+    const nodes = []
+    const errors = []
+    let setupCalls = 0
+    let cmdCalls = 0
+    const build = () => {
+      const node = new MonsterFt('1', ids, noop, databasePath, {
+        electionTimeout: 60_000,
+        apply(db, buf, term, seq) {
+          if (seq === 0n) { setupCalls++ } else { cmdCalls++ }
+          return applyApp(db, buf, term, seq)
+        },
+      })
+      node.on('warn', noop)
+      node.on('error', (err) => errors.push(err))
+      nodes.push(node)
+      return node
+    }
+    t.teardown(() => {
+      closeNodesQuietly(nodes)
+      removePair(databasePath)
+    })
+    const first = build()
+    first.open()
+    first.log.append(toNoopEntry(0n))
+    first._commitSeq = 0n
+    first._commitTerm = 0n
+    if (!setup) { await first._apply(0n) }
+    const seq = setup ? 0n : first.log.append(toEntry(0n, {
+      type: 'cmd',
+      items: [toBuf({ key: 'import-once', value: 73 })],
+      matchIndex: ids.map(() => -1n),
+    }))
+    first.log.db.exec(`
+      CREATE TRIGGER fail_receipt_import BEFORE UPDATE OF applied_seq ON monsterft_meta
+      BEGIN SELECT RAISE(ABORT, 'injected receipt import failure'); END
+    `)
+    first._commitSeq = seq
+    const err = await errorOf(first._apply(seq))
+    t.match(err?.message ?? '', /injected receipt import failure/,
+      'DB1 import failure reaches the apply caller')
+    t.equal(errors.length, 1, 'DB1 import failure emits one public error')
+    t.notOk(first.isOpen, 'import failure closes the node before further application')
+    const receipt = applyMetaAtPath(databasePath)
+    t.equal(receipt.seq, seq, 'DB2 keeps the completed apply receipt')
+    t.equal(monsterMetaAtPath(databasePath).applied_seq, seq - 1n,
+      'failed DB1 import leaves the prior checkpoint intact')
+    if (setup) {
+      t.deepEqual(Buffer.from(receipt.local_digest), Buffer.alloc(32),
+        'completed setup retains its zero digest')
+    } else {
+      t.equal(valueAtPath(databasePath, 'import-once'), 73,
+        'DB2 retains the committed application write')
+    }
+
+    const interrupted = build()
+    const restartErr = errorOfCall(() => interrupted.open())
+    t.match(restartErr?.message ?? '', /injected receipt import failure/,
+      'startup import failure rejects reopening')
+    t.deepEqual(applyMetaAtPath(databasePath), receipt,
+      'failed startup import preserves the apply receipt')
+    t.equal(setupCalls, 1, 'failed startup never repeats setup')
+    t.equal(cmdCalls, setup ? 0 : 1, 'failed startup never repeats a completed CMD')
+
+    const db1 = new DatabaseSync(databasePath)
+    db1.exec('DROP TRIGGER fail_receipt_import')
+    db1.close()
+    const restored = build()
+    restored.open()
+    t.equal(restored._applySeq, seq, 'startup imports the completed apply checkpoint')
+    t.equal(restored._monsterPendingCommand?.cmdSeq ?? null, setup ? null : seq,
+      'startup restores only a completed CMD as pending')
+    t.deepEqual(monsterMetaAtPath(databasePath).applied_local_digest, receipt.local_digest,
+      'startup imports the exact apply digest')
+    restored._commitSeq = seq
+    restored._commitTerm = 0n
+    await restored._apply(seq)
+    t.equal(setupCalls, 1, 'successful restart does not rerun setup')
+    t.equal(cmdCalls, setup ? 0 : 1, 'successful restart does not rerun the CMD')
+    restored.close()
+  })
+}
+
+test('failure after durable DB1 import recovers without publishing or reapplying', async (t) => {
+  const databasePath = uniquePath('post-import-no-replay')
+  const nodes = []
+  let calls = 0
+  const build = () => {
+    const node = new MonsterFt('1', ids, noop, databasePath, {
+      electionTimeout: 60_000,
+      apply(db, buf, term, seq) {
+        if (buf !== null) { calls++ }
+        return applyApp(db, buf, term, seq)
+      },
+    })
+    node.on('warn', noop)
+    node.on('error', noop)
+    nodes.push(node)
+    return node
+  }
+  t.teardown(() => {
+    closeNodesQuietly(nodes)
+    removePair(databasePath)
+  })
+  const first = build()
+  first.open()
+  first.log.append(toNoopEntry(0n))
+  first._commitSeq = 0n
+  first._commitTerm = 0n
+  await first._apply(0n)
+  const cmdSeq = first.log.append(toEntry(0n, {
+    type: 'cmd',
+    items: [toBuf({ key: 'after-import', value: 47 })],
+    matchIndex: ids.map(() => -1n),
+  }))
+  const failure = new Error('injected failure after durable import')
+  const prepare = first.log.db.prepare.bind(first.log.db)
+  first.log.db.prepare = (sql) => {
+    const statement = prepare(sql)
+    if (/UPDATE monsterft_meta\s/.test(sql)) {
+      const run = statement.run.bind(statement)
+      statement.run = (...args) => {
+        run(...args)
+        throw failure
+      }
+    }
+    return statement
+  }
+  let cmdEvents = 0
+  first.on('cmd', () => { cmdEvents++ })
+  first._commitSeq = cmdSeq
+  const err = await errorOf(first._apply(cmdSeq))
+  t.equal(err?.stack, failure.stack, 'the post-import failure retains its original trace')
+  t.equal(cmdEvents, 0, 'failure interrupts command publication')
+  t.equal(first._monsterPendingCommand, null, 'failure interrupts pending-cache publication')
+  t.equal(monsterMetaAtPath(databasePath).pending_cmd_seq, cmdSeq,
+    'DB1 has already committed the pending command')
+  t.equal(applyMetaAtPath(databasePath).seq, cmdSeq, 'DB2 has the same completed command')
+
+  const restored = build()
+  restored.open()
+  t.equal(restored._applySeq, cmdSeq, 'restart loads the imported checkpoint')
+  t.equal(restored._monsterPendingCommand.cmdSeq, cmdSeq,
+    'restart restores the pending command without reimporting')
+  restored._commitSeq = cmdSeq
+  restored._commitTerm = 0n
+  await restored._apply(cmdSeq)
+  t.equal(calls, 1, 'restart never repeats the completed application')
+  t.equal(valueAt(restored, 'after-import'), 47, 'restart retains the committed application write')
+  restored.close()
+})
+
+test('drain reports DB1 import failure and leaves the DB2 receipt recoverable', async (t) => {
+  const fixture = clusterFixture(t, 'drain-import-failure')
+  const entered = deferred()
+  const release = deferred()
+  const calls = new Map()
+  const apply = async (db, buf, term, seq, index, matchIndex, node) => {
+    const result = applyApp(db, buf, term, seq)
+    if (buf !== null) {
+      calls.set(node.id, (calls.get(node.id) ?? 0) + 1)
+      if (node.id === '3') {
+        entered.resolve()
+        await release.promise
+      }
+    }
+    return result
+  }
+  t.teardown(() => release.resolve())
+  const first = fixture.build({ apply })
+  const leader = await openAndElect(first.nodes)
+  await waitApplied(first.nodes, leader._commitSeq)
+  const follower = first.nodes.find((node) => node.id === '3')
+  const databasePath = fixture.paths.get(follower.id)
+  follower.log.db.exec(`
+    CREATE TRIGGER fail_receipt_import BEFORE UPDATE OF applied_seq ON monsterft_meta
+    BEGIN SELECT RAISE(ABORT, 'injected drain import failure'); END
+  `)
+  const synced = nextSync(leader)
+  const appending = leader.append(toBuf({ key: 'drain-import', value: 29 }))
+  await withTimeout(entered.promise, 'follower active application before import failure')
+  const [cmdSeq] = await withTimeout(appending, 'healthy quorum command before import failure')
+  const { syncSeq } = await withTimeout(synced, 'healthy quorum SYNC before import failure')
+  let settled = false
+  const draining = follower.drainCmd()
+  draining.finally(() => { settled = true }).catch(noop)
+  await sleep(20)
+  t.notOk(settled, 'drain waits for the active application and import')
+  release.resolve()
+  await withTimeout(draining, 'drain after import failure')
+  await sleep(20)
+  const diagnostics = fixture.errors.filter(({ id }) => id === follower.id)
+  t.equal(diagnostics.length, 1, 'drain reports the failed import exactly once')
+  t.match(diagnostics[0]?.err.message ?? '', /injected drain import failure/,
+    'drain preserves the original SQLite diagnostic')
+  t.equal(diagnostics[0]?.err.sqlCode, 1811, 'drain preserves the native SQLite error code')
+  t.notOk(follower.isOpen, 'drain closes the failed follower')
+  t.equal(monsterMetaAtPath(databasePath).applied_seq, cmdSeq - 1n,
+    'failed import leaves DB1 at the previous checkpoint')
+  t.equal(applyMetaAtPath(databasePath).seq, cmdSeq,
+    'the committed DB2 receipt remains available for recovery')
+  t.equal(valueAtPath(databasePath, 'drain-import'), 29,
+    'the completed application write remains committed')
+
+  const db1 = new DatabaseSync(databasePath)
+  db1.exec('DROP TRIGGER fail_receipt_import')
+  db1.close()
+  const restored = fixture.build({ apply }).nodes.find((node) => node.id === '3')
+  for (const node of first.nodes) {
+    if (node.isOpen) { fixture.bus.register(node) }
+  }
+  restored.open()
+  t.equal(restored._applySeq, cmdSeq, 'startup imports the receipt interrupted by drain')
+  t.equal(restored._monsterPendingCommand.cmdSeq, cmdSeq,
+    'startup restores the command awaiting agreement')
+  await waitApplied([restored], syncSeq)
+  t.equal(calls.get('3'), 1, 'recovery completes SYNC without reapplying the command')
+  restored.close()
+})
+
+test('certify changes DB1 only and preserves its checkpoint hash',
   async (t) => {
     const fixture = clusterFixture(t, 'certify')
     const cluster = fixture.build()
@@ -2324,7 +2570,7 @@ test('certify changes DB2 only and preserves its checkpoint hash',
 
     const databasePath = fixture.paths.get(leader.id)
     const monsterPath = `${databasePath}2`
-    const db = new DatabaseSync(monsterPath, { readBigInts: true })
+    const db = new DatabaseSync(databasePath, { readBigInts: true })
     db.prepare(`
       UPDATE monsterft_meta
       SET repair_state = 2
@@ -2332,38 +2578,38 @@ test('certify changes DB2 only and preserves its checkpoint hash',
     `).run()
     const beforeMeta = db.prepare(`
       SELECT applied_seq, applied_entry_hash,
-             pending_cmd_seq, pending_local_digest
+             pending_cmd_seq, applied_local_digest
       FROM monsterft_meta WHERE id = 1
     `).get()
     db.close()
 
-    const raftBefore = fs.readFileSync(databasePath)
+    const appBefore = fs.readFileSync(monsterPath)
     const certified = MonsterFt.certify(databasePath)
-    const raftAfter = fs.readFileSync(databasePath)
+    const appAfter = fs.readFileSync(monsterPath)
     t.equal(certified, beforeMeta.applied_seq,
-      'certify returns DB2 applied_seq')
-    t.ok(raftAfter.equals(raftBefore),
-      'certify leaves the complete DB1 file byte-for-byte unchanged')
+      'certify returns DB1 applied_seq')
+    t.ok(appAfter.equals(appBefore),
+      'certify leaves the complete DB2 file byte-for-byte unchanged')
 
-    const after = new DatabaseSync(monsterPath, {
+    const after = new DatabaseSync(databasePath, {
       readOnly: true,
       readBigInts: true,
     })
     const afterMeta = after.prepare(`
       SELECT applied_seq, applied_entry_hash, repair_state,
-             pending_cmd_seq, pending_local_digest
+             pending_cmd_seq, applied_local_digest
       FROM monsterft_meta WHERE id = 1
     `).get()
     after.close()
     t.equal(afterMeta.repair_state, 0n,
-      'certify clears DB2 repair state 2')
+      'certify clears DB1 repair state 2')
     t.ok(Buffer.from(afterMeta.applied_entry_hash)
       .equals(Buffer.from(beforeMeta.applied_entry_hash)),
-    'certify preserves the DB2 applied-entry hash')
+    'certify preserves the DB1 applied-entry hash')
     t.equal(afterMeta.pending_cmd_seq, beforeMeta.pending_cmd_seq,
       'certify preserves the pending command sequence')
-    t.equal(afterMeta.pending_local_digest, beforeMeta.pending_local_digest,
-      'certify preserves the pending command digest')
+    t.deepEqual(afterMeta.applied_local_digest, beforeMeta.applied_local_digest,
+      'certify preserves the last apply digest')
   })
 
 test('certify requires a complete pair of normal files', (t) => {
@@ -2443,13 +2689,13 @@ test('drain latches admission and waits for the local SYNC',
     const appending = leader.append(toBuf({ key: 'drain', value: 5 }))
     appending.catch(noop)
     await waitFor(() => {
-      const row = leader.db.prepare(`
-        SELECT pending_cmd_seq, pending_local_digest
+      const row = leader.log.db.prepare(`
+        SELECT pending_cmd_seq, applied_local_digest
         FROM monsterft_meta
         WHERE id = 1
       `).get()
       return row.pending_cmd_seq !== null &&
-        row.pending_local_digest !== null &&
+        row.applied_local_digest !== null &&
         leader._monsterPendingCommand?.cmdSeq === row.pending_cmd_seq
     }, 'locally materialized unresolved command')
 
@@ -2485,12 +2731,13 @@ test('drain latches admission and waits for the local SYNC',
     const meta = monsterMetaAtPath(fixture.paths.get(leader.id))
     t.equal(meta.pending_cmd_seq, null,
       'drain observes the durable clearing of pending sequence state')
-    t.equal(meta.pending_local_digest, null,
-      'drain observes the durable clearing of pending digest state')
+    t.deepEqual(meta.applied_local_digest,
+      applyMetaAtPath(fixture.paths.get(leader.id)).local_digest,
+      'drain preserves the last apply digest')
     t.equal(leader._monsterPendingCommand, null,
       'drain observes the matching cleared pending cache')
     t.ok(meta.applied_seq >= syncSeq,
-      'drain observes a DB2 checkpoint through the matching SYNC')
+      'drain observes a DB1 checkpoint through the matching SYNC')
     t.ok(leader._applySeq >= syncSeq,
       'drain resolves only after that SYNC is locally applied')
     t.equal(
@@ -2521,11 +2768,11 @@ test('certify refuses a pair while a running node has it open', (t) => {
   })
   node.open()
   node.close()
-  const setup = new DatabaseSync(`${databasePath}2`)
+  const setup = new DatabaseSync(databasePath)
   setup.prepare('UPDATE monsterft_meta SET repair_state = 1 WHERE id = 1').run()
   setup.close()
   const repairState = () => {
-    const db = new DatabaseSync(`${databasePath}2`, {
+    const db = new DatabaseSync(databasePath, {
       readOnly: true,
       readBigInts: true,
     })
@@ -2608,8 +2855,8 @@ test('drain closes a candidate before resolving', async (t) => {
   const meta = monsterMetaAtPath(databasePath)
   t.equal(meta.pending_cmd_seq, null,
     'the closed candidate has no pending command sequence')
-  t.equal(meta.pending_local_digest, null,
-    'the closed candidate has no pending command digest')
+  t.equal(meta.applied_local_digest, null,
+    'the uninitialized candidate has no apply digest')
   t.equal(MonsterFt.certify(databasePath), meta.applied_seq,
     'the closed candidate pair passes default certification')
 })
@@ -2697,7 +2944,7 @@ test('drain captures a committing follower DB2 transaction without blocking DB1'
     t.deepEqual(result, { key: 'blocked', value: 77 },
       'an agreeing quorum completes without the blocked DB2')
     t.ok(slow._applySeq < cmdSeq,
-      'the slow member remains inside its DB2 application transaction')
+      'the slow member remains inside its DB2 apply transaction')
 
     let drainSettled = false
     const draining = slow.drainCmd()
@@ -2756,8 +3003,9 @@ test('drain captures a committing follower DB2 transaction without blocking DB1'
     const meta = monsterMetaAtPath(fixture.paths.get(slow.id))
     t.equal(meta.pending_cmd_seq, null,
       'the closed follower has no pending command sequence')
-    t.equal(meta.pending_local_digest, null,
-      'the closed follower has no pending command digest')
+    t.deepEqual(meta.applied_local_digest,
+      applyMetaAtPath(fixture.paths.get(slow.id)).local_digest,
+      'the closed follower retains the apply digest')
     t.equal(MonsterFt.certify(fixture.paths.get(slow.id)), meta.applied_seq,
       'the closed follower pair passes default certification')
   })
@@ -2785,13 +3033,13 @@ test('drain excludes an active follower CMD transaction that rolls back',
     const follower = cluster.nodes.find((node) => node.id === '3')
     const cmdSeq = follower._applySeq + 1n
     const rollbackError = new Error('injected pending-state failure')
-    const installPendingCmd = follower._monsterInstallPendingCmd
-    follower._monsterInstallPendingCmd = function(db, term, seq, ...args) {
-      if (seq === cmdSeq) { throw rollbackError }
-      return installPendingCmd.call(this, db, term, seq, ...args)
+    const writeApply = follower._monsterWriteApply
+    follower._monsterWriteApply = function(db, receipt) {
+      if (receipt.seq === cmdSeq) { throw rollbackError }
+      return writeApply.call(this, db, receipt)
     }
     t.teardown(() => {
-      follower._monsterInstallPendingCmd = installPendingCmd
+      follower._monsterWriteApply = writeApply
     })
 
     const applying = follower._monsterApplyCmd({
@@ -2822,11 +3070,11 @@ test('drain excludes an active follower CMD transaction that rolls back',
       'rollback publishes no pending-command cache state')
     const meta = monsterMetaAtPath(fixture.paths.get(follower.id))
     t.equal(meta.applied_seq, cmdSeq - 1n,
-      'rollback leaves the DB2 checkpoint unchanged')
+      'rollback leaves the DB1 checkpoint unchanged')
     t.equal(meta.pending_cmd_seq, null,
       'rollback persists no pending command sequence')
-    t.equal(meta.pending_local_digest, null,
-      'rollback persists no pending command digest')
+    t.deepEqual(Buffer.from(meta.applied_local_digest), Buffer.alloc(32),
+      'rollback preserves the setup digest')
     t.equal(valueAtPath(fixture.paths.get(follower.id), 'drain-rollback'), null,
       'rollback removes the user write from the active transaction')
     t.equal(MonsterFt.certify(fixture.paths.get(follower.id)), meta.applied_seq,
@@ -2933,7 +3181,7 @@ for (const scenario of ['normal listener', 'throwing listener', 'closing listene
       t.equal(reported?.sqlCode, 13, 'the emitted error retains the native SQLite code')
       t.equal(reported?.stack, original.stack, 'the emitted error retains the original trace')
       t.match(reported?.stack ?? '', /drainFailureApply/,
-        'the trace identifies the application callback')
+        'the trace identifies the apply callback')
       if (scenario === 'throwing listener') {
         t.ok(fixture.errors.some(({ err }) => err === listenerFailure),
           'a throwing listener does not interrupt the drain')
@@ -2974,7 +3222,7 @@ test('drain preserves the fatal path for a failing pending SYNC', async (t) => {
     follower._monsterApplySync = applySync
     release.resolve()
   })
-  follower.db.exec(`
+  follower.log.db.exec(`
     CREATE TRIGGER fail_pending_sync
     BEFORE UPDATE OF pending_cmd_seq ON monsterft_meta
     WHEN NEW.pending_cmd_seq IS NULL
@@ -3105,11 +3353,12 @@ test('drain prevents a later replicated CMD from entering application',
 
     const meta = monsterMetaAtPath(fixture.paths.get(follower.id))
     t.equal(meta.pending_cmd_seq, null,
-      'the later DB1-only CMD creates no pending DB2 sequence')
-    t.equal(meta.pending_local_digest, null,
-      'the later DB1-only CMD creates no pending DB2 digest')
+      'the later DB1-only CMD creates no pending apply sequence')
+    t.deepEqual(meta.applied_local_digest,
+      applyMetaAtPath(fixture.paths.get(follower.id)).local_digest,
+      'the later DB1-only CMD leaves the previous apply digest intact')
     t.ok(meta.applied_seq < secondCmdSeq,
-      'the DB2 checkpoint remains before the later DB1-only CMD')
+      'the DB1 checkpoint remains before the later DB1-only CMD')
     t.equal(valueAtPath(fixture.paths.get(follower.id), 'drain-second'), null,
       'the later DB1-only CMD makes no application write')
     t.equal(raftEntryAtPath(fixture.paths.get(follower.id), secondCmdSeq).type,

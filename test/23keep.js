@@ -116,21 +116,21 @@ const raftTypes = (node) => raftRows(node).map(({ entry }) => {
 })
 
 const pendingAt = (node) => {
-  const row = node.db.prepare(`
-    SELECT pending_cmd_seq, pending_local_digest
+  const row = node.log.db.prepare(`
+    SELECT pending_cmd_seq, applied_local_digest
     FROM monsterft_meta WHERE id = 1
   `).get()
   return row.pending_cmd_seq === null
     ? null
     : {
         cmdSeq: row.pending_cmd_seq,
-        localDigest: Buffer.from(row.pending_local_digest),
+        localDigest: Buffer.from(row.applied_local_digest),
       }
 }
 
-const metaAt = (node) => node.db.prepare(`
+const metaAt = (node) => node.log.db.prepare(`
   SELECT applied_seq, applied_entry_hash, repair_state,
-         pending_cmd_seq, pending_local_digest
+         pending_cmd_seq, applied_local_digest
   FROM monsterft_meta
   WHERE id = 1
 `).get()
@@ -256,7 +256,7 @@ const readPair = (databasePath) => {
   try {
     return {
       rows: raft.prepare('SELECT seq, term, entry FROM raft_log ORDER BY seq').all(),
-      meta: metaAt({ db }),
+      meta: metaAt({ log: { db: raft } }),
     }
   } finally {
     raft.close()
@@ -299,7 +299,10 @@ test('retention checks use cached state and delete in exact applied batches', as
         throw new Error('retention must not prepare a query to count rows')
       }
       if (/DELETE\s+FROM\s+raft_log\s+WHERE\s+seq\s*</i.test(sql)) {
-        events.push(metaAt(node).applied_seq)
+        const row = prepare(`
+          SELECT applied_seq FROM monsterft_meta WHERE id = 1
+        `).get()
+        events.push(row.applied_seq)
       }
       return prepare(sql)
     }
@@ -543,7 +546,7 @@ for (const stage of ['delete', 'refresh']) {
     t.equal(err.message, `(apply) DB1 retention injected ${stage} failure`,
       'the failure identifies DB1 retention')
     await waitFor(() => !leader.isOpen, 'failed retention closes the node')
-    await waitApplied(first.nodes.slice(1), 4n)
+    await waitApplied(first.nodes.slice(1), 3n)
     const saved = readPair(fixture.paths.get(leader.id))
     t.equal(saved.meta.applied_seq, 4n, 'the SYNC checkpoint committed before deletion')
     t.equal(saved.meta.pending_cmd_seq, null, 'the durable decision cleared pending state')
@@ -648,11 +651,14 @@ test('failed SYNC checkpoint rolls back before pruning and is replayed on restar
   const first = fixture.build({ apply, opts })
   const leader = await openAndElect(first.nodes)
   await appendThroughSync(leader, toBuf({ key: 'warm', value: 1 }))
-  const writeDecision = leader._monsterWriteCmdDecision.bind(leader)
-  leader._monsterWriteCmdDecision = (...args) => {
-    writeDecision(...args)
-    throw new Error('injected checkpoint failure')
-  }
+  leader.log.db.exec(`
+    CREATE TEMP TRIGGER fail_checkpoint
+    AFTER UPDATE OF pending_cmd_seq ON monsterft_meta
+    WHEN NEW.pending_cmd_seq IS NULL
+    BEGIN
+      SELECT RAISE(ABORT, 'injected checkpoint failure');
+    END
+  `)
   const fatal = deferred()
   leader.once('fatal', fatal.resolve)
   const appended = errorOf(leader.append(toBuf({ key: 'pending', value: 2 })))
@@ -660,7 +666,7 @@ test('failed SYNC checkpoint rolls back before pruning and is replayed on restar
   await appended
   t.equal(err.code, APPLY_ERROR, 'checkpoint failure remains fatal')
   await waitFor(() => !leader.isOpen, 'checkpoint failure close')
-  await waitApplied(first.nodes.slice(1), 4n)
+  await waitApplied(first.nodes.slice(1), 3n)
   const saved = readPair(fixture.paths.get(leader.id))
   t.equal(saved.meta.applied_seq, 3n, 'the failed SYNC transaction leaves the CMD checkpoint')
   t.equal(saved.meta.pending_cmd_seq, 3n, 'the failed decision leaves the CMD unresolved')
@@ -718,7 +724,7 @@ test('startup validates the checkpoint before deleting any history', async (t) =
   const leader = await openAndElect(first.nodes)
   await leader._appendToSelfAndFollowers(Array.from({ length: 4 }, () => Buffer.alloc(0)))
   await waitApplied(first.nodes, 4n)
-  leader.db.prepare('UPDATE monsterft_meta SET applied_entry_hash = ? WHERE id = 1')
+  leader.log.db.prepare('UPDATE monsterft_meta SET applied_entry_hash = ? WHERE id = 1')
     .run(Buffer.alloc(32))
   closeNodesQuietly(first.nodes)
   const restarted = fixture.build({ opts: keepOpts() }).nodes[0]
@@ -733,7 +739,7 @@ test('repair state one retains its fence while no-ops continue local pruning', a
   const { nodes } = fixture.build({ opts: keepOpts() })
   const leader = await openAndElect(nodes)
   for (const node of nodes) {
-    node.db.prepare('UPDATE monsterft_meta SET repair_state = 1 WHERE id = 1').run()
+    node.log.db.prepare('UPDATE monsterft_meta SET repair_state = 1 WHERE id = 1').run()
     node._monsterRepairState = 1
   }
   await leader._appendToSelfAndFollowers(Array.from({ length: 8 }, () => Buffer.alloc(0)))

@@ -159,7 +159,7 @@ None.
 
 ## `_subscribeApply`
 
-Creates a waiter for application results covering an inclusive sequence range.
+Creates a waiter for apply results covering an inclusive sequence range.
 
 ### findings
 
@@ -167,22 +167,22 @@ None.
 
 ## `_routeApply`
 
-Delivers application results to matching waiters and resolves completed waits.
+Delivers apply results to matching waiters and resolves completed waits.
 
 ### findings
 
-- **Accepted: holes in an application result array are never routed.**
+- **Accepted: holes in an apply result array are never routed.**
   `forEach` skips holes, and `_apply` checks only the array length. A waiter
   covering a hole never resolves, and no deadline rescues it because
   replication has already succeeded. Results filled only for non-null
   payloads leak one never-settled no-op waiter per leadership. A fully sparse
   `new Array(n)` leaves leader-local appends pending, and forwarded appends
-  time out, although the commands were applied. Decision: the application
+  time out, although the commands were applied. Decision: the apply callback
   must return one result per entry; Arrays with holes remain out of scope.
 
 ## `_rejectApplyWaiters`
 
-Rejects every currently registered application waiter with the supplied
+Rejects every currently registered apply waiter with the supplied
 error.
 
 ### findings
@@ -193,15 +193,15 @@ None.
 
 Applies committed entries in order through the configured callback. Delivers
 results, advances the applied boundary, and emits `apply`. Failures reject
-application waiters and trigger fatal shutdown.
+apply waiters and trigger fatal shutdown.
 
 ### findings
 
-- **Accepted limitation: exotic thrown values can stall application.** The
+- **Accepted limitation: exotic thrown values can stall apply.** The
   catch block calls `wrapError` before rejecting waiters or starting fatal
-  shutdown. If the application throws a frozen `ErrorWithCode` or a
+  shutdown. If the apply callback throws a frozen `ErrorWithCode` or a
   null-prototype object, `wrapError` throws and skips both steps.
-  `_applyPrev` stays rejected, so all later application is skipped. The
+  `_applyPrev` stays rejected, so all later apply calls are skipped. The
   node stays open with no error event, and the leader's append never
   settles. Decision: leave unchanged as a JavaScript-specific case.
 
@@ -354,7 +354,7 @@ None.
 
 Advances the commit boundary when a current-term entry reaches replication
 quorum. Resolves leadership readiness, announces commitment, and starts
-application.
+applying entries.
 
 ### findings
 
@@ -421,7 +421,7 @@ operation fails or shutdown begins.
 ## `_appendToSelfAndFollowers`
 
 Appends payloads locally and replicates them to quorum. Returns the starting
-sequence and results after application; local storage failures are fatal.
+sequence and results after apply completes; local storage failures are fatal.
 
 ### findings
 
@@ -454,7 +454,7 @@ and validated results. Rejects when no leader is known.
 ## `_rxFwdAppend`
 
 Validates and handles forwarded append requests as leader. Replies with the
-appended sequence and application results or an error.
+appended sequence and apply results or an error.
 
 ### findings
 
@@ -464,8 +464,8 @@ None.
 
 Handles replication and heartbeats, including term and leader changes.
 Reconciles incoming history without replacing committed entries, then
-advances commitment and starts application. Acknowledges accepted requests
-or reports why replication cannot proceed.
+advances commitment and starts applying entries. Acknowledges accepted
+requests or reports why replication cannot proceed.
 
 ### findings
 
@@ -502,7 +502,7 @@ None.
 ## `append`
 
 Submits one valid payload to the local or remote leader. Returns its sequence
-and application result after commitment and application.
+and apply result once the entry is committed and applied.
 
 ### findings
 
@@ -511,7 +511,7 @@ None.
 ## `appendBatch`
 
 Submits a valid payload batch to the local or remote leader. Returns its
-starting sequence and results after commitment and application.
+starting sequence and results once the entries are committed and applied.
 
 ### findings
 
@@ -589,8 +589,8 @@ preserving available stacks.
 
 - **Accepted limitation: exotic thrown values make normalization throw.**
   `String(err)` throws for `Object.create(null)`, and mutating a frozen
-  `ErrorWithCode` throws. The consequences are a stalled application in
-  `_apply` and a permanent outage in MonsterNode command application; see
+  `ErrorWithCode` throws. The consequences are stalled apply calls in
+  RaftNode and a permanent outage in MonsterNode command processing; see
   MONSTER.md. The same helper runs in the send-error handler and
   `util.errorRpc`, where it can escape warning handling or prevent an error
   reply. Decision: leave unchanged as JavaScript-specific.

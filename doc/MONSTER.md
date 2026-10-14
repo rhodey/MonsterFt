@@ -1,16 +1,19 @@
 # MonsterNode and MonsterFt
 
-Function notes for [src/monster.js](../src/monster.js) and
-[src/monsterft.js](../src/monsterft.js), in source order. The notes cover the
-module helpers and every MonsterNode method. Each findings area lists only
-unresolved items: open, deferred, skipped by decision, or accepted. "None"
-means no unresolved item is recorded. Review rules are in [RAFT.md](RAFT.md).
+Function notes for [src/monster.js](../src/monster.js),
+[src/monsterft.js](../src/monsterft.js), and
+[src/monstermeta.js](../src/monstermeta.js), in source order within each file.
+The notes cover the module helpers and every MonsterNode method. Each findings
+area lists only unresolved items: open, deferred, skipped by decision, or
+accepted. "None" means no unresolved item is recorded. Review rules are in
+[RAFT.md](RAFT.md).
 
 ## Policies and accepted limitations
 
 - **Error codes:** `MONSTER_CORRUPT` covers malformed CMD/SYNC records, a
-  SYNC without its pending CMD, unknown entry types, and DB2 metadata
-  corruption. SQLiteLog row, sequence, and term errors use `LOG_CORRUPT`.
+  SYNC without its pending CMD, unknown entry types, and Monster metadata
+  corruption in either database. SQLiteLog row, sequence, and term errors use
+  `LOG_CORRUPT`.
 - **Hashing:** patchsets are hashed as opaque buffers, so every member must
   run the same Node.js version, as AGENTS.md notes. Agreement digests
   exclude error stacks. The default msgpackr `pack` does not use records, so
@@ -21,7 +24,7 @@ means no unresolved item is recorded. Review rules are in [RAFT.md](RAFT.md).
 - **Sparse arrays:** out of scope under AGENTS.md. See `appendBatch`.
 - **Exotic thrown values:** see `_monsterApplyCmd` and `wrapError` in
   RAFT.md.
-- **Application transactions:** see the open doc gap under
+- **Apply transactions:** see the open doc gap under
   `_monsterApplyCmd`.
 - **Repair:** certification is an offline step. Retention and repair are not
   being redesigned; see `_monsterPrune`.
@@ -30,14 +33,6 @@ means no unresolved item is recorded. Review rules are in [RAFT.md](RAFT.md).
 
 Converts byte views to Buffers without copying, preserving existing Buffers,
 null, and undefined.
-
-### findings
-
-None.
-
-## `digestEntry`
-
-Produces the checkpoint hash identifying an entry's term and payload.
 
 ### findings
 
@@ -71,7 +66,7 @@ None.
 
 ## `constructor`
 
-Validates the application callback, database pair, and retention settings.
+Validates the apply callback, database pair, and retention settings.
 Initializes Raft and Monster state, including command processing and leader
 recovery.
 
@@ -80,7 +75,7 @@ recovery.
 - **Skipped by decision: the file-pair check can become stale before
   `open()`.** It runs only in the constructor. If DB1 is deleted after
   construction, `open()` creates a fresh DB1 with term zero and no vote,
-  because DB2 still holds a valid initial checkpoint. The node can then grant
+  because DB2 still holds a valid initial receipt. The node can then grant
   a second vote in a term where it already voted. Decision: no open-time
   check for now.
 - **Open, left as is: nodes with different `quorum` settings reject each
@@ -98,7 +93,8 @@ recovery.
 
 ## `_autoRaft`
 
-Defers Raft startup until MonsterNode has initialized and validated DB2.
+Defers Raft startup until MonsterNode has initialized and reconciled both
+databases.
 
 ### findings
 
@@ -129,7 +125,7 @@ Preserves unapplied entries and defers pruning while a CMD is unresolved.
 
 - **Accepted: drain can hide a retention failure.** Pruning runs outside the
   DB queue. If normal drain closure wins the race, the retention error is
-  never reported. The DB2 checkpoint is already durable, and startup retries
+  never reported. The DB1 checkpoint is already durable, and startup retries
   any pruning that is still due.
 - **Deferred: repairing one replica after retention needs a leadership
   reset.** The surviving leader may already have cancelled replication to a
@@ -194,16 +190,15 @@ None.
 
 ## `_monsterAdvanceApplied`
 
-Persists the applied entry's sequence and hash in DB2.
+Persists the applied entry's sequence and hash in DB1.
 
 ### findings
 
 None.
 
-## `_monsterInstallPendingCmd`
+## `_monsterWriteApply`
 
-Records a newly applied CMD as pending agreement, saves its checkpoint, and
-returns its local digest.
+Records the latest apply receipt within its DB2 transaction.
 
 ### findings
 
@@ -211,8 +206,8 @@ None.
 
 ## `_monsterWriteCmdDecision`
 
-Records a SYNC decision's checkpoint and repair state and clears the matching
-pending CMD.
+Records a SYNC decision in DB1 and clears the matching pending CMD.
+Preserves the last apply digest.
 
 ### findings
 
@@ -263,31 +258,17 @@ None.
 
 ## `_monsterInit`
 
-Initializes fresh DB2 metadata or validates and restores its checkpoint,
-repair state, and pending command for startup.
+Initializes and reconciles the database pair, then restores the protocol
+checkpoint, repair state, and pending command.
 
 ### findings
 
-- **Skipped by decision: startup does not cross-check pending metadata with
-  the log.** Monster writes the pending fields and the checkpoint together in
-  one statement, so they stay consistent on their own. They can disagree only
-  if someone hand-edits the DB2 row. For example, the pending sequence could
-  point at an entry that is not a CMD, or it could be cleared while a CMD is
-  unresolved. Startup would accept such an edit, and later outcome replies or
-  startup pruning would act on it. If this is revisited, note that election
-  no-ops may follow a pending CMD, and the pending digest cannot be
-  recomputed from the log.
-
-## `_monsterVerifyAppliedEntry`
-
-Verifies that DB2's applied checkpoint matches the corresponding DB1 entry.
-
-### findings
-
-- **Skipped by decision: an initial checkpoint is accepted even when
-  retention has removed sequence zero.** With `applied_seq = -1` and
-  `log.begin > 0`, the node opens, then fails application with
-  `LOG_CORRUPT`. Decision: the later error is acceptable.
+- **Accepted: receipt reconciliation checks entry identity, not entry type.**
+  The referenced sequence must exist and match its stored hash when retained;
+  reconciliation does not decode the entry to verify that it is a CMD or
+  sequence-zero no-op. Ordinary protocol processing still validates types.
+  Manually clearing `pending_cmd_seq` is not detected solely from a matching
+  receipt.
 
 ## `_monsterRememberReport`
 
@@ -334,23 +315,25 @@ None.
 
 ## `_monsterApplyNoop`
 
-Applies a no-op and advances the checkpoint. At sequence zero, also runs the
-application's schema setup as part of the same transaction.
+Advances the protocol checkpoint for a no-op. At sequence zero, commits
+the setup callback's changes and DB2 receipt before recording completion
+in DB1.
 
 ### findings
 
-None. The application transaction rule under `_monsterApplyCmd` also
+None. The apply transaction rule under `_monsterApplyCmd` also
 applies to this sequence-zero callback.
 
 ## `_monsterApplyCmd`
 
 Applies CMD items and collects their outcomes for agreement. Warns locally
 with `APPLY_ERROR` for failed items and rolls back their writes. Persists the
-pending command and checkpoint, then announces the local outcome digest.
+apply receipt in DB2 and then the pending command in DB1 before
+announcing the local outcome digest.
 
 ### findings
 
-- **Open: the application contract does not cover SQL after a caught
+- **Open: the apply contract does not cover SQL after a caught
   automatic rollback.** The callback receives the raw DB2 connection. If it
   catches a native SQLite error that ended the transaction, any further SQL
   autocommits. Monster then fails the CMD and closes, but those writes are
@@ -372,8 +355,8 @@ None.
 
 ## `_monsterApplyEntry`
 
-Dispatches committed Monster entries for application, respecting drain and
-repair state. Rejects unknown entry types as corruption.
+Dispatches committed Monster entries to their handlers, respecting drain
+and repair state. Rejects unknown entry types as corruption.
 
 ### findings
 
@@ -382,7 +365,7 @@ None.
 ## `_monsterApply`
 
 Applies a batch of committed Monster entries in order and returns their
-results. Prunes eligible history as application advances.
+results. Prunes eligible history as the applied checkpoint advances.
 
 ### findings
 
@@ -571,11 +554,101 @@ None.
 
 ## `MonsterFt.certify` (`src/monsterft.js`)
 
-Clears a closed database pair's repair state and returns its applied
-sequence. Requires pending commands to be resolved unless explicitly
-overridden, and preserves the checkpoint and pending command metadata.
+Validates and reconciles a closed database pair, clears its repair state,
+and returns its applied sequence. Requires pending commands to be resolved
+unless explicitly overridden.
 
 ### findings
 
 - **Deferred:** repairing one replica can also need a leadership reset; see
   `_monsterPrune`.
+
+## `digestEntry` (`src/monstermeta.js`)
+
+Produces the checkpoint hash identifying an entry's term and payload.
+
+### findings
+
+None.
+
+## `readMeta` (`src/monstermeta.js`)
+
+Reads and validates DB1's Monster protocol metadata.
+
+### findings
+
+None.
+
+## `readApply` (`src/monstermeta.js`)
+
+Reads and validates DB2's latest apply receipt.
+
+### findings
+
+None.
+
+## `verifyEntry` (`src/monstermeta.js`)
+
+Verifies that a stored sequence and hash identify an entry in DB1.
+
+### findings
+
+None.
+
+## `importApply` (`src/monstermeta.js`)
+
+Records a completed DB2 apply transaction in DB1. Leaves a command pending
+agreement, or records sequence-zero setup without a pending command.
+
+### findings
+
+None.
+
+## `reconcile` (`src/monstermeta.js`)
+
+Validates the database pair and finishes a recognized interrupted apply
+receipt import. Preserves resolved and repair state when DB1 already recorded
+that completion.
+
+### findings
+
+- **Accepted: receipt reconciliation does not check entry types.** See
+  `_monsterInit`.
+- **Skipped by decision: initial checkpoints are accepted even when
+  retention has removed sequence zero.** With both metadata records initial
+  and `log.begin > 0`, the node opens, then fails during apply with
+  `LOG_CORRUPT`. Decision: the later error is acceptable.
+
+## `createMeta` (`src/monstermeta.js`)
+
+Creates DB1's protocol metadata table and its initial singleton row.
+
+### findings
+
+None.
+
+## `createApply` (`src/monstermeta.js`)
+
+Creates DB2's apply receipt table and its initial singleton row.
+
+### findings
+
+None.
+
+## `createInTransaction` (`src/monstermeta.js`)
+
+Creates a metadata table and its initial row atomically, rolling back on
+failure.
+
+### findings
+
+None.
+
+## `initialize` (`src/monstermeta.js`)
+
+Initializes fresh metadata or completes interrupted pristine initialization,
+then reconciles the pair. Rejects missing metadata beside established state.
+
+### findings
+
+None.
