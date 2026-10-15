@@ -65,36 +65,81 @@ does not impose a blanket prohibition on in-memory databases.
 
 Inter-node `send` may lose messages. Raft and Monster keep their existing
 handling of network loss and timeouts. `localSend` is expected to deliver
-messages without loss; a missing required local reply or completion is a
-fatal timeout for the local node. There are no local request retries or
-retransmission rules.
+messages in send order for each sender/destination pair, and without loss
+once the local components are ready. Messages queued ahead of a new hello
+stay ahead of it, including across component replacement. This does not
+require a separate queue-purging mechanism. Startup hello is the sole
+retry exception. After that handshake, a missing required local reply or
+completion is a fatal timeout for the local node, with no request retries.
 
 Follow the existing RaftNode RPC convention: `msg.type` identifies the
 message, requests carry a `cid`, and replies use `type: 'ack'` or
 `type: 'err'` with the request's `cid`. Match replies to the expected
-sender and outstanding request. ERR replies follow the operation's error
-handling; ordinary apply rejections remain command outcomes. Replies need
-no ACK of their own.
+sender and outstanding request. Use sufficiently random CIDs to make
+reuse across restarts negligible; an unmatched reply cannot complete a
+request. ERR replies follow the operation's error handling; ordinary
+apply rejections remain command outcomes. Replies need no ACK of their own.
 
 Where local RPCs carry cluster messages, keep local request correlation
 separate from the enclosed message's type and cid. Local envelope fields
 must not make the encoded payload differ between Procs that checksum it.
 A remote ERR carried through Gate keeps its existing protocol meaning.
 
-Gate sends one hello request to each local component and requires its
-ACK before startup proceeds. Each startup phase and runtime input also
-requires completion replies. A Proc's completion ACK means that step has
-finished and its DB1 transaction has committed, not merely that the
-message arrived. Completion also delimits all outputs from that step;
-Gate must have the full output sequence before accepting it as complete.
-It need not mean that a public append awaiting external responses has
-finished.
+Gate sends hello to ProcA, ProcB, ProcC, and Apply. Each attempt uses a
+fresh cid and the ordinary local RPC timeout path. Hello catches timeout
+rejections and retries only components that have not ACKed. ACKs for
+expired attempts cannot complete newer requests. A peer that is not yet
+online, or too slow to reply within the timeout, keeps Gate waiting and
+retrying. Explicit startup errors still fail startup. A hello ACK means
+ready to participate in coordinated startup; it does not mean
+reconciliation has already completed.
+
+An early component waits after ACKing hello, without starting its runtime
+tick timeout while the others come online. Gate begins reconciliation
+only after all four ACK. Hello uses `{ type: 'hello', cid }`, and its reply
+is `{ type: 'ack', cid }` with the request's cid.
+
+Each component starts with `pastHello = false` and ACKs every hello in
+that phase. Before processing its first subsequent startup request, set
+`pastHello = true`. Any hello received after that causes fatal shutdown
+without an ACK, regardless of its cid. A replacement starts in hello and
+can ACK Gate's next retry. Hello never resets an active component in place.
+
+No startup identity field is needed. Ordered delivery keeps outstanding
+hello retries ahead of the first subsequent startup request, so they
+cannot arrive afterward and cause a false restart. Ordinary protocol
+work is rejected before hello and reconciliation complete. Fresh CIDs
+and matching to outstanding requests prevent old replies from satisfying
+new requests.
+
+Subsequent startup phases and runtime inputs require completion replies
+without retries. A Proc's completion ACK means that step has finished and
+its DB1 transaction has committed, not merely that the message arrived.
+Completion also delimits all outputs from that step; Gate must have the
+full output sequence before accepting it as complete. It need not mean
+that a public append awaiting external responses has finished.
 
 Local timeout guards must remain able to expire while Gate waits for
 completion. After a fatal timeout, stop this node's run; recovery goes
 through coordinated startup and reconciliation. A missing Apply reply
 may follow a successful DB2 commit, so it must not cause Apply to run the
 same work again during that run.
+
+## Deployment and shutdown
+
+For production, recommend an external supervisor that restarts failed
+processes, waiting for an old OS process to exit before replacing it.
+The library does not require a particular supervisor or spawn its own
+processes. All components may run in a single Node.js process without a
+supervisor, including for examples and tests.
+
+The shutdown requirement is the same in either arrangement: old instances
+must stop issuing messages and changing their databases before replacement
+components use those databases or reconciliation reads them. Process exit
+provides that boundary for separate processes. In one process, await the
+components' shutdown, including completion or rollback of outstanding DB
+work. A user apply callback must not resume later and commit after the new
+reconciliation has captured DB2's receipt.
 
 ## One input, one durable transition
 
@@ -168,7 +213,9 @@ The user callback runs in Apply, outside the Proc executors.
 Local task ordering, timer processing, generated request IDs, and random
 choices must be deterministic from the shared inputs and seed. Merely
 giving three ordinary Node.js event loops the same tick count does not
-establish that ordering.
+establish that ordering. Gate chooses a fresh random seed on each start;
+the three Procs use it to generate matching CIDs and choices without
+repeating the previous execution's CID sequence.
 
 On an unexpected execution or SQL failure, discard buffered success
 outputs, attempt rollback, and stop the Proc. Do not report successful
@@ -212,9 +259,11 @@ Continuing normal execution with only two Procs would give up the
 recovery property described here; other cluster nodes can continue if
 they retain quorum.
 
-Completion replies must correspond to the current input and startup run.
-A late or duplicate reply cannot count for another request or replace a
-missing Proc's completion. No local request is resent after a timeout.
+Completion replies must match the current outstanding input request by
+cid and expected sender. A late or duplicate reply cannot count for
+another request or replace a missing Proc's completion. The startup hello
+exception does not apply to these processing requests; they are not
+resent after a timeout.
 
 ## Why these rules help reconciliation
 
@@ -355,10 +404,10 @@ pages to arrive over RPC.
 - **Output and completion encoding:** define ordered message/checksum
   matching, completion records, and how the selected full-message and
   checksum roles provide the needed bytes.
-- **Startup identity and timeouts:** settle startup identity and local
-  timeout settings using the cid and ACK/ERR convention. Delayed replies
-  from a previous run must not satisfy current requests. Local requests
-  are not retried. No migration or protocol-version negotiation is proposed.
+- **Timeout settings:** choose the local RPC timeout settings. Hello uses
+  the same request/timeout path and catches timeout rejections to retry.
+  The hello phase rule and cid/ACK/ERR convention are settled. No startup
+  identity field, migration, or protocol-version negotiation is proposed.
 - **In-memory access:** choose a simple read interface if needed to keep
   `:memory:` usable. It must preserve ownership and startup barriers; this
   does not require making a private in-memory database visible across OS
@@ -374,10 +423,26 @@ pages to arrive over RPC.
 - Delay one Proc and verify that no next input reaches either of the
   others, including when outputs have already been released.
 - Exercise synchronous and delayed transports, empty output sequences,
-  and mismatched outputs. Drop local requests or replies, including hello,
-  completion, and Apply replies; verify fatal timeout without retries.
+  and mismatched outputs. Drop local requests or replies after hello,
+  including completion and Apply replies; verify fatal timeout without retries.
   Late or duplicate replies must not satisfy another request or barrier.
   Keep coverage for ordinary inter-node message loss and protocol recovery.
+- Bring local components online at different times and drop hello requests
+  or ACKs. Gate must keep retrying only unacknowledged components, while
+  early components wait without a runtime timeout. Repeated hellos during
+  that phase must ACK again, and all four must ACK before reconciliation
+  begins. Explicit startup errors still fail.
+- Delay a hello ACK past its timeout and verify the retry has a fresh cid.
+  The expired ACK must not complete the new attempt; a current ACK must
+  arrive within its timeout. Ordered delivery must put hello retries
+  before the subsequent startup request. After a component moves past
+  hello, any hello must cause fatal shutdown without an ACK. A replacement
+  can ACK the next retry, and protocol work must not execute before startup
+  permits it.
+- Exercise both supervised process replacement and shutdown/restart in a
+  single process. Previous callbacks and transactions must not change the
+  databases after reconciliation begins; no supervisor is required for
+  the single-process case.
 - Verify no output or successful completion escapes a failed DB1 commit,
   and no protocol write runs after completion outside another input.
 - Verify intentional repair fences commit before error reporting and

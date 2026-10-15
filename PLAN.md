@@ -53,6 +53,15 @@ given to the Apply component/class somehow. As written before the JS instance
 of Gate will be the location of append, appendBatch, and drainCmd. Also certify
 will maybe live on Gate too.
 
+For production, recommend an external supervisor that restarts failed
+processes and waits for each old OS process to exit before replacing it.
+This is deployment guidance, not a required supervisor or process layout.
+Running every component in one Node.js process without a supervisor
+remains supported. In that case, await component shutdown before replacing
+it or starting reconciliation against its databases. Old callbacks and
+transactions must have finished or been stopped before the new components
+begin using those databases.
+
 It is envisioned that the three Procs will mostly be instances of MonsterNode
 with changes made around the clock being driven by ticks over localSend coming
 from Gate. Proc outputs will identify the input being processed, including
@@ -71,9 +80,14 @@ of random numbers must be replaced with a seeded random number generator.
 
 The inter-node send transport may lose messages; Raft and Monster retain
 their existing handling of loss and timeouts. LocalSend is expected to
-deliver messages without loss. A missing required local reply or
-completion is a fatal timeout for the local node. Do not retry local
-requests or build a local retransmission protocol.
+deliver messages in send order for each sender/destination pair, and
+without loss once the local components are ready. Messages already queued
+ahead of a new hello must stay ahead of it, including across component
+replacement. No separate queue-purging mechanism is required.
+Startup hello is the one retry exception, allowing components to come
+online at different times. After hello completes, a missing required
+local reply or completion is a fatal timeout for the local node. Do not
+retry those requests or build a general local retransmission protocol.
 
 Every input requires completion from all three Procs, even when it produces
 no outbound RPC. Each Proc replies with an ACK only after finishing and
@@ -84,10 +98,11 @@ it.
 
 RPCs follow the existing RaftNode convention: messages have a type,
 requests have a cid, and ACK or ERR replies carry the request's cid.
-Match replies to the expected sender and outstanding request; replies
-need no ACK of their own. A local completion ACK covers that processing
-step, not necessarily the whole public append operation. Ordinary apply
-rejections remain command outcomes.
+Use sufficiently random CIDs to make reuse across restarts negligible.
+Match replies to the expected sender and outstanding request; an unmatched
+reply cannot complete a request. Replies need no ACK of their own. A local
+completion ACK covers that processing step, not necessarily the whole
+public append operation. Ordinary apply rejections remain command outcomes.
 
 ## Shared database access
 
@@ -138,18 +153,34 @@ Having a stateful transport like TCP or unix domain socket streams would be
 nice because open is explicit and close is also explicit. But we want to copy
 this library in to Rust sooner or later and we want the rust to target micro
 controllers where a stateful transport may not be easy. So we must do
-something else. On start Gate sends one "hello" RPC to each of ProcA,
-ProcB, ProcC, and Apply. Each must return an ACK with the request's cid
-within the configured timeout; a missing reply is fatal, with no hello
-retries. The components must complete the handshake before normal
-processing. A new Gate run requires coordinated shutdown and startup.
-Late replies from a stopped run must not satisfy requests in the new run.
-The exact startup identity and message fields remain to be planned.
-This hello scheme combined with Gate sending tick events/messages should be
-enough to cause local errors to shutdown things pretty fast and to also give a
-good pattern for things being able to come back online in a coordinated way. Do
-not take my word for this being perfect, you need to analyze the idea and ask
-questions as needed.
+something else. On start Gate sends a "hello" RPC to each of ProcA,
+ProcB, ProcC, and Apply. Each attempt uses a fresh cid and the ordinary
+local RPC timeout path. Hello catches timeout rejections and tries again
+for components that have not ACKed. A late ACK for an expired attempt
+does not complete a newer request. A component that is not yet online,
+or too slow to reply within the timeout, keeps Gate waiting and retrying.
+An explicit startup error still fails startup.
+
+A hello ACK means the component is ready to participate in coordinated
+startup. Components that ACK early wait for the others; their runtime
+tick timeout does not start during this wait. Gate begins reconciliation
+only after all four have ACKed, and normal processing only after
+reconciliation completes.
+
+Hello uses `{ type: 'hello', cid }` and its ACK uses
+`{ type: 'ack', cid }` with the request's cid. Each component starts with
+`pastHello = false` and ACKs every hello while still in that phase. Set
+`pastHello = true` before processing the first subsequent startup request.
+From then on, any hello causes fatal shutdown without an ACK, regardless
+of its cid. A replacement component starts in hello again and can ACK
+Gate's next retry. Do not reset an active component in place on hello.
+
+There is no separate startup identity field. Ordered local delivery means
+outstanding hello retries arrive before the subsequent startup request,
+so they cannot trigger this shutdown merely by arriving late. Components
+reject ordinary protocol work before hello and reconciliation complete.
+Fresh CIDs and matching to outstanding requests keep old replies from
+satisfying new requests.
 
 Also I think we can say that to give RPCs a checksum scheme we can say ProcA
 will send a msgpackr encoded msg something like:
@@ -172,7 +203,10 @@ to have some back and forth between us maybe.
 
 For random number generators that need a seed the seed should be shared by the
 local components/procs but different nodes in the cluster should use different
-seeds. Also I think ProcA, ProcB, ProcC, Gate, Apply should expose
+seeds. Choose a fresh random seed each time Gate starts, so restarting
+does not repeat the generated CIDs. ProcA, ProcB, and ProcC use the shared
+seed to make identical protocol choices and generate matching CIDs.
+Also I think ProcA, ProcB, ProcC, Gate, Apply should expose
 .onReceive(from, msg) and also .tickCount which can be read to get the latest
 tickCount value as seen by that local component.
 
@@ -204,7 +238,8 @@ is separate from majority reconciliation among Procs within one node.
 
 Gate coordinates phases using local RPCs and ACK/ERR replies. A phase
 ACK confirms completion of that phase; missing required replies cause a
-fatal timeout. Database state and repair rows are read directly through
+fatal timeout. These phases begin after the retrying hello handshake has
+completed. Database state and repair rows are read directly through
 SQLite, without snapshot or log-transfer RPCs between Procs.
 
 1. Open the databases and keep their contents stable. Normal processing,
