@@ -177,7 +177,32 @@ of DB1 A, B, C before agreeing on what is the majority and thus updating their
 DB to match as needed. For example we dont want A seeing A, B, C and deciding
 to make a change to its A and then B and C seeing A after that change. To make
 this work I think we just need a small protocol that runs on boot after the
-first tick event/msg is received (after the hello from gate). A first idea is
-that idk rn.
+first tick event/msg is received (after the hello from gate).
 
-raft_log may be more than 1 entry ahead.
+A first idea is that all procs after first tick will send RPC type "reconcile"
+to every other proc and wait for ACK. And they will keep sending reconcile
+until all have ACKd. And reconcile should contain the latest row from SQLite
+for each table: raft_election, raft_log, and monsterft_meta. And I think this
+should be a winner takes all situation where a majority is chosen over all 3
+tables instead of trying to choose a majority for each table individually.
+
+And the rule for ACK should be that a proc is not allowed to ack reconcile
+until it has seen RPC reconcile for every other proc and has also chosen a
+winner. And then as each node gets these ACKs they are then cleared to continue
+with startup/boot.
+
+This plan overrides some things previously said about reconciliation and
+importantly the direction now is to try to avoid A, B, C needing to read each
+others DB thru the FS and instead using RPC to do comms.
+
+This plan about reconciliation needs to be analyzed with care, and especially
+with care given to the question: will any proc raft_log be at most 1 row/entry
+ahead such that this idea to compare the latest entry is valid?
+
+## Total
+
+This total plan is not 100% ready to go just yet. We are going to enter into
+planning more to search for any clarifications needed and they will be appended
+to the plan. The first step tho is to analyze/investigate the idea for the
+reconciliation scheme before we analyze too closely other parts of the total
+plan because reconciliation I am right now least confident about.
