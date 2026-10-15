@@ -214,13 +214,15 @@ the three Procs use it to generate matching CIDs and choices without
 repeating the previous execution's CID sequence.
 
 On an unexpected execution or SQL failure, discard buffered success
-outputs, attempt rollback, and stop the Proc. Do not report successful
-completion or keep using runtime state derived from a failed transaction.
+outputs, report the original error, and stop the Proc and close its database.
+Connection teardown or crash recovery discards uncommitted work; these
+fatal paths need no separate `ROLLBACK`. Report cleanup errors too, and
+never continue using the failed connection or report successful completion.
 
-A protocol decision to persist a repair fence and stop is different:
-commit that decision before publishing its error and closing. The current
-code sometimes persists a fence and then deliberately throws. The executor
-must not mistake that intended stop for a reason to roll back the fence.
+For a repair fence that requires shutdown, commit the fence before reporting
+its error and closing. Both fatal paths report errors and stop; the fence
+is an intended durable change. Keep explicit rollback where processing
+continues, such as a failed CMD item's savepoint.
 
 ## Gate waits for all three
 
@@ -300,11 +302,14 @@ copies the receipt into DB1 and processes newly ready protocol work in
 that input's transaction. Only committed outputs from that transition
 may authorize further Apply work.
 
-Use the receipt captured in the reply, not a fresh DB2 query. The first
-two Procs can release a request for later Apply work while the third is
-still processing the current input; DB2 may then contain a newer receipt.
-Startup direct reads avoid this race by keeping Apply idle for the whole
-reconciliation process.
+Use the receipt captured in the reply, not a fresh DB2 query. A lagging
+cluster follower can receive committed `SYNC1` and `CMD2` while its Apply
+is still executing `CMD1`. On reply 1, ProcA/B can copy receipt 1, process
+the ready SYNC, and commit their DB1 changes. Their matching outputs let
+Gate request CMD2; Apply can finish it before ProcC handles reply 1, leaving
+DB2 with receipt 2. Apply still executes commands sequentially; Gate queues
+reply 2 until ProcC completes the current input. Startup direct reads avoid
+this race by keeping Apply idle throughout reconciliation.
 
 While Apply is busy, Procs can process later inputs such as elections and
 replication. They must preserve protocol application order: the applied
@@ -440,12 +445,14 @@ pages to arrive over RPC.
 - Verify no output or successful completion escapes a failed DB1 commit,
   and no protocol write runs after completion outside another input.
 - Verify intentional repair fences commit before error reporting and
-  shutdown, while unexpected processing failures roll back.
+  shutdown. Unexpected failures must also report and stop; close/reopen
+  or crash recovery must discard uncommitted work without explicit rollback.
 - Crash after DB2 commits with zero, one, two, or three receipt imports;
   completed Apply work must never execute again. Include slow Apply with
   intervening elections and no-ops.
-- Let later Apply work finish before the third Proc handles the preceding
-  Apply reply. Verify that it still uses the receipt from its input.
+- On a follower with committed `CMD1`, `SYNC1`, and `CMD2`, let Apply finish
+  CMD2 before ProcC finishes reply 1. Verify ProcC uses receipt 1 from its
+  input and Gate withholds reply 2 until that input completes.
 - Interrupt both startup adoption and receipt import. Reopening should
   retain a majority for each phase under the stated assumptions. Old Apply
   work must not change the receipt after startup captures it.
