@@ -2,18 +2,18 @@
 
 This document develops the reconciliation ideas in [PLAN.md](PLAN.md).
 It records the direction agreed after reviewing the current write paths:
-make each Proc's work for one Gate input atomic, and have Gate wait for
-all three Procs before delivering the next input. The executor below is
-a proposed way to implement that direction, not a finished class design.
+make each Proc's work for one Gate input atomic, have Gate wait for all
+three Procs before delivering the next input, and use direct read-only
+database access during startup. The executor below is a proposed way to
+implement that direction, not a finished class design.
 
 ## Goal and boundaries
 
 Each cluster node has ProcA, ProcB, and ProcC, with their own DB1 files.
 Apply owns the single DB2 and executes user-supplied apply work for all
-three Procs.
-Gate orders inputs and coordinates communication between these components
-and the rest of the cluster. The cluster still requires at least three
-nodes; the three Procs are copies within one node.
+three Procs. Gate orders inputs and coordinates communication between
+these components and the rest of the cluster. The cluster still requires
+at least three nodes; the three Procs are copies within one node.
 
 The goal is to prevent ordinary interrupted progress from leaving three
 different DB1 states with no majority. Reconciliation should be able to
@@ -33,6 +33,33 @@ digest of all retained history. Consequently, this comparison does not
 detect differences hidden in earlier log rows, and the recovery argument
 below assumes valid, consistent earlier history. It is not a proof of the
 larger single-fault-tolerance goal.
+
+## Shared database access
+
+Gate, Apply, and all three Procs run on the same OS with access to the
+same local filesystem. Each Proc writes only its own DB1, and Apply is
+the only writer of DB2. Other local components may read these databases
+through read-only SQLite connections.
+
+Startup uses this permission directly: each Proc reads DB1A, DB1B, DB1C,
+and the DB2 receipt independently. Gate coordinates the read and write
+phases with small completion messages. It does not choose the winner on
+the Procs' behalf, and no database snapshot or log rows need to travel
+through reconciliation RPCs.
+
+Runtime protocol decisions still follow the ordered Gate inputs. Read
+access must not introduce independently timed observations into those
+decisions. Apply replies continue to carry the receipt and results for
+the particular execution; direct reads do not replace those replies.
+
+Keep `:memory:` available when it can be supported without substantial
+extra machinery. An in-process read interface to the owner's existing
+database is one possible way to provide the needed access while retaining
+write ownership. Reopening the path `:memory:` creates a different
+database and cannot provide cross-process access to the original one.
+Tests may use temporary files. A complete in-memory deployment design is
+not a prerequisite for this work, and the shared-filesystem direction
+does not impose a blanket prohibition on in-memory databases.
 
 ## One input, one durable transition
 
@@ -192,6 +219,12 @@ copies the receipt into DB1 and processes newly ready protocol work in
 that input's transaction. Only committed outputs from that transition
 may authorize further Apply work.
 
+Use the receipt captured in the reply, not a fresh DB2 query. The first
+two Procs can release a request for later Apply work while the third is
+still processing the current input; DB2 may then contain a newer receipt.
+Startup direct reads avoid this race by keeping Apply idle for the whole
+reconciliation process.
+
 While Apply is busy, Procs can process later inputs such as elections and
 replication. They must preserve protocol application order: the applied
 checkpoint cannot pass the CMD whose Apply result is still outstanding.
@@ -209,28 +242,35 @@ apply warnings.
 ## Startup in separate phases
 
 Normal protocol processing and new Apply execution stay blocked during
-reconciliation. Procs communicate through Gate, without reading each
-other's database files or reading DB2 themselves.
+reconciliation. Each database owner first finishes opening its database.
+Receipt import and pruning remain blocked while the Procs read the
+original states. Fresh metadata creation is handled before that read
+phase, with all DB1 tables and initial rows created in one transaction.
 
 Apply must also have no unfinished work from the previous run that could
 later change DB2. That work must finish or be stopped with its transaction
 rolled back before capturing the receipt. Keep Apply idle and its receipt
 stable until reconciliation finishes.
 
-1. **Capture original state.** Each Proc captures its original comparison
-   state once. Apply supplies its durable receipt. Keep original state
-   messages unchanged for every retry throughout this reconciliation
-   round; do not replace them with a repaired view.
-2. **Choose the original majority.** Each Proc receives all three original
-   views and independently selects the same combined winner. No majority
-   means failure. Choosing the winner is not yet permission to start Raft.
-3. **Adopt that state.** Repair the outlier atomically. Wait until all
-   three Procs confirm durable adoption of the selected state. Keep the
-   winning sources stable until adoption finishes.
-4. **Reconcile the receipt.** From that common state, each Proc validates
-   the shared DB2 receipt and performs any required DB1 import in one
-   transaction. Wait for all three to complete this phase too. Invalid
-   receipt combinations fail rather than causing Apply to run again.
+1. **Capture original state.** Each Proc reads the comparison state of
+   all three DB1s and the DB2 receipt through SQLite. Validate the stored
+   fields, then retain those original reads for the entire round. Finish
+   the read transactions; retries use the cached reads and selection.
+2. **Choose the original majority.** Each Proc independently selects the
+   combined winner and reports its selection and captured receipt's
+   identity to Gate. No majority means failure. Gate waits for all three
+   reports to agree before permitting any repair. No Proc can write early
+   and change what another Proc observes during capture.
+3. **Adopt that state.** The outlier reads a stable winning donor directly
+   and replaces its own contents in one transaction, as described below.
+   Gate waits for all three to confirm durable adoption. The winning
+   databases stay unchanged until this phase finishes.
+4. **Reconcile the receipt.** Each Proc validates the captured DB2 receipt
+   against its adopted DB1 and performs any required import in one
+   transaction. These DB1-dependent receipt checks happen after adoption;
+   do not reject an outlier merely because its original DB1 differs.
+   Gate waits for all three to complete this phase too. Invalid receipt
+   combinations fail rather than causing Apply to run again.
 5. **Start normal operation.** Restore protocol runtime state and release
    the Gate input queue. Any startup pruning must respect these same
    boundaries, not run independently between phases.
@@ -241,17 +281,38 @@ bringing everyone to `X` means the subsequent import can leave only `X`
 or `Z`. Combining adoption and import in one transaction per Proc does
 not solve this because their starting states differ.
 
-Fresh DB1 creation should put all its tables and initial rows in one
-transaction. Initialization of DB2 remains separate. Established files
-must not be silently reinitialized when reconciliation fails.
+Initialization of DB2 remains separate from DB1 creation. Established
+files must not be silently reinitialized when reconciliation fails.
+
+## Repair through local SQL reads
+
+Use the first winning Proc in fixed A, B, C order as the donor. The
+outlier reads that donor through a read-only SQLite connection and copies
+its entire retained `raft_log` plus both singleton rows into its own DB1
+in one transaction. Stream the rows rather than requiring the whole log
+in memory. Check that the installed comparison state matches the selected
+winner before commit, then refresh the outlier's runtime caches.
+
+The destination transaction includes all replacement deletes and inserts.
+A failure rolls back the replacement and stops startup. Winning Procs
+do not rewrite their databases. The all-three adoption barrier keeps
+donor contents stable until the copy has finished.
+
+This copies the donor's retained range as well as its head, handling
+missing pages, extra entries, and conflicting suffixes without a separate
+suffix-repair protocol. It costs a full retained-log read and rewrite for
+an outlier, but adds no history digest to the selected startup comparison.
+Copying older rows does not establish that majority voting authenticated
+their contents.
+
+Copy logical contents through SQLite. Committed rows may still reside in
+the WAL, so replacing only the main database file is not the intended
+repair mechanism. See [SQLite's WAL documentation](https://sqlite.org/wal.html).
+These are local reads and writes; no database transaction waits for log
+pages to arrive over RPC.
 
 ## Details still to settle
 
-- **Outlier log repair:** latest-row comparison selects the winning
-  state but does not supply the missing or replacement rows. One input
-  can change a whole page or suffix. We still need to choose how Procs
-  transfer the necessary history and install it atomically, including
-  retention boundaries. No one-row repair assumption is valid.
 - **Executor interface:** choose the task and continuation API and map
   existing promise chains onto it. The rules above are requirements;
   exact class and method names are not yet decided.
@@ -262,6 +323,10 @@ must not be silently reinitialized when reconciliation fails.
   retransmission, and timeout rules. Delayed messages from a previous run
   must not be treated as evidence for the current run. No migration or
   protocol-version negotiation is proposed.
+- **In-memory access:** choose a simple read interface if needed to keep
+  `:memory:` usable. It must preserve ownership and startup barriers; this
+  does not require making a private in-memory database visible across OS
+  processes.
 
 ## Validation targets
 
@@ -281,9 +346,17 @@ must not be silently reinitialized when reconciliation fails.
 - Crash after DB2 commits with zero, one, two, or three receipt imports;
   completed Apply work must never execute again. Include slow Apply with
   intervening elections and no-ops.
+- Let later Apply work finish before the third Proc handles the preceding
+  Apply reply. Verify that it still uses the receipt from its input.
 - Interrupt both startup adoption and receipt import. Reopening should
   retain a majority for each phase under the stated assumptions. Old Apply
   work must not change the receipt after startup captures it.
-- Exercise multi-entry log differences and retained history once the
-  outlier repair mechanism is selected. Continue rejecting startup when
-  the selected comparison has no majority or receipt validation fails.
+- Delay one Proc's initial reads; no database may be repaired until all
+  three have captured their original views. Duplicate phase requests must
+  return the cached selection rather than reread repaired data.
+- Copy multi-entry differences and retained ranges with committed donor
+  data still in the WAL. Interrupt destination deletes and inserts and
+  verify that the whole repair commits or rolls back together.
+- Verify peer DB1 and DB2 read access cannot write through those read
+  interfaces. Continue rejecting startup when the selected comparison
+  has no majority or receipt validation fails.

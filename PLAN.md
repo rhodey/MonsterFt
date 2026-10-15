@@ -2,49 +2,49 @@
 ## Plan for v2
 
 At a high level v2 is a system where there are still clusters of 3 or more
-nodes but every node is sort of running 90% of the library as 2 copies and
-they are only allowed to communicate with the rest of the cluster through a
-"Gate". The Gate is responsible for sending synchronized clock tick messages
-to "ProcA" and to "ProcB" and Gate also forwards RPC comms from the cluster
-to both ProcA and ProcB. Also outbound RPC from ProcA and ProcB must pass
-thru the Gate to the cluster.
+nodes but every node runs most of the library as ProcA, ProcB, and ProcC.
+They communicate with the rest of the cluster through a "Gate". Gate sends
+synchronized clock tick messages and forwards incoming cluster RPCs to all
+three Procs. Their outbound RPCs also pass through Gate. The transaction
+and reconciliation direction is developed in [DIRECTION.md](DIRECTION.md).
 
 At a high level we are aiming for MonsterFt to become a "Single Fault Tolerant"
 system or as close as possible to SFT in the sense that aerospace and defense
 understand and think about SFT. I believe one of many things needed to achieve
 this will be to add a checksum scheme to all RPC and to have ProcA send RPC
-messages without checksum and to have ProcB send its messages as checksums
+messages without checksum and to have ProcB and ProcC send checksums
 only and in this way Gate, which is a non-double process, can combine msg plus
 checksum and send together, and then the Gate that receives this passes full
-msgs onto the destination ProcA and ProcB who both test the msgs plus
-checksums and this is being protected by their double proc nature.
+msgs onto the destination ProcA, ProcB, and ProcC who independently test
+the messages and checksums.
 
 Gate starts with tickCount = 0n and increments tickCount by 1 as time moves
-forward and passes tick intervals as defined by configs. tickCount is also
-incremented every time an incoming RPC is to be fwd to ProcA and ProcB. Gate
-also has Gate.append, appendBatch, and drainCmd and each of these calls also 
-increments tickCount. tickCount may need to be incremented in other cases
-as we move thru planning, we will find out, its a shared clock.
+forward and passes tick intervals as defined by configs. Incoming RPCs,
+Apply replies, and calls to Gate.append, appendBatch, and drainCmd also
+become ordered inputs identified by tickCount. Gate may queue inputs, but
+waits for all three Procs to finish and commit the current input before
+delivering the next one. Further tick and retry details remain to be planned.
 
-We have introduced Gate, ProcA, and ProcB and now it is time to also say
+We have introduced Gate, ProcA, ProcB, and ProcC and now it is time to also say
 there is another component named "Apply". Apply is in charge of running the
 user defined apply function on the SQLite DB. Previously we have had DB1 and
 DB2 and user application state lives in DB2. Now we will say we have DB1A
-(ProcA) DB1B (ProcB) and DB2 (Apply). Apply is driven by comms from ProcA and
-ProcB and all node-local comms including these go thru Gate. Gate will accept
-a "send" function like before and it now will also accept a "localSend"
+(ProcA), DB1B (ProcB), DB1C (ProcC), and DB2 (Apply). Apply is driven by
+requests from the Procs. Runtime requests and replies go through Gate.
+Gate will accept a "send" function like before and also a "localSend"
 function. Send is for comms between Gates in the cluster and localSend is for
-local comms between Gate, ProcA, ProcB, and Apply.
+local comms between Gate, ProcA, ProcB, ProcC, and Apply. Startup also uses
+direct read-only database access, as described below.
 
 In-process comms for both send and localSend should remain a valid option
-because this makes writing tests way easier. Even tho ProcA and ProcB are named
+because this makes writing tests way easier. Even tho the Procs are named
 as such they should not in themselves spawn themselves in a child process
 this should be left up to a higher level. And so it should still be possible
 to write examples like example3 and example4 where all is contained in a single
-JS file. Production users will be steered to writing files such as procA.js and
-procB.js which simply import ProcA or ProcB and supply send and localSend and
-then call start() or run() or something like this (and they already live in
-a distinct nodejs proc).
+JS file. Production users will be steered to writing files such as procA.js,
+procB.js, and procC.js which import their Proc implementation and supply
+localSend and then call start() or run() or something like this (and they
+already live in a distinct nodejs proc).
 
 For production I think by convention we can say Gate and Apply live in the same
 nodejs process and the user will again give send and localSend and it should
@@ -53,16 +53,14 @@ given to the Apply component/class somehow. As written before the JS instance
 of Gate will be the location of append, appendBatch, and drainCmd. Also certify
 will maybe live on Gate too.
 
-It is envisioned that ProcA and ProcB will mostly be instances of MonsterNode
-with changes made around the clock being driven by ticks over localSend coming 
-from Gate. Also ProcA and ProcB will probably need to do something like include
-the latest tickCount in their outbound RPC and maybe also in their local RPCs
-to Apply.
+It is envisioned that the three Procs will mostly be instances of MonsterNode
+with changes made around the clock being driven by ticks over localSend coming
+from Gate. Proc outputs will identify the input being processed, including
+requests sent locally to Apply.
 
-The send function is to be called with node member ID like it is now and the
-localSend function I think can be called with: "procA", "procB", "apply", and
-maybe "gate" is also a valid destination but I'm not certain there is a need
-for "gate" as dest we will find out.
+The send function is to be called with node member ID like it is now.
+LocalSend destinations include "procA", "procB", "procC", "apply", and
+"gate" for Proc outputs and completion reports.
 
 This work is to include no migration path or backwards compat. This work should
 include no protocol versioning or plans for that. tickCount is to help keep
@@ -71,36 +69,58 @@ Gate or Apply can wait in milliseconds before a message for tickCount Z times
 out because it did not see the other message of the pair in time. Also any uses
 of random numbers must be replaced with a seeded random number generator.
 
-I think components that see a tickCount lower than what they have seen before
-should probably just ignore it because the transports are agreed to support
-lossy sends. Also ProcA and ProcB I think will never read DB2, instead I
-think it should be comms thru Gate.
+The transports are agreed to support lossy sends. Retries must not execute
+an input twice or let a Proc skip an input. Old completion reports must not
+satisfy a new input's barrier. The exact delivery and retry protocol still
+needs to be planned.
 
-Also maybe the ticks sent from Gate to ProcA and ProcB require ACK and are
-timed so that the ticks become a liveliness guard. Also when ProcA and ProcB
+Every input requires completion from all three Procs, even when it produces
+no outbound RPC. These completions also provide a liveness guard. When Procs
 are sending comms to Apply there should maybe also be an ACK needed and a
 timeout guard here too.
 
+## Shared database access
+
+Gate, Apply, and the three Procs run on the same OS and have access to the
+same local filesystem. Each Proc writes only its own DB1. Apply is the
+only component that writes DB2. Other local components may open these
+databases read-only through SQLite.
+
+Startup uses this access to let each Proc independently read all three
+DB1s and DB2's apply receipt. Runtime protocol processing still follows
+ordered Gate inputs. In particular, an Apply reply supplies the fixed
+receipt and results for that input; a Proc must not substitute a fresh
+DB2 read that could observe a later Apply execution.
+
+Keep `:memory:` available where it can be supported without substantial
+extra machinery. For example, components running in one process can use
+a read interface to an existing database instead of reopening its path.
+Opening `:memory:` again does not access another component's database.
+Tests may use temporary files. A complete in-memory deployment design is
+not required at this stage, and this plan does not prohibit that option.
+
 ## Reconciliation
 
-On boot ProcA and ProcB may have different DB1 contents and to resolve this I
-have decided that we must introduce ProcC. The introduction of ProcC should
-have some obvious consequences, such as: it acts just list ProcA and ProcB
-except we will say it is more like ProcB in that it will send checksums instead
-of messages when its a thing where a message plus a checksum are needed. And
-components which we said earlier were waiting for basically a matching pair of
-messages they can continue to wait for a pair since a pair signifies 2 of 3 in
-agreement which is a majority and they dont need to wait for the 3rd. If the
-first 2 that arive disagree there can be fast fail and there is no need to see
-if the 3rd forms a majority.
+ProcC provides a third DB1 state for startup majority selection and uses
+the same checksum role as ProcB. An agreed output can be released once
+Gate has matching committed message/checksum evidence and the actual
+message bytes. Gate still waits for all three Procs to finish the input
+before delivering the next one. If the first two outputs disagree, it can
+fail immediately without waiting for the third.
 
-To resolve DB1 table raft_election each of ProcA, ProcB, and ProcC should read
-DB1A, DB1B, DB1C and learn which state has a majority and adopt that and if
-there is no majority agreement they must throw. And the same is true for table
-monsterft_meta: there will be a majority or there must be some error thrown.
-Use hashes/digests when comparing the multi-column values for these singleton
-rows. And for table raft_log we can say that a majority needs to agree on a
-hash/digest of the latest entry row.
+Each input's DB1 writes belong to one transaction. This includes any
+immediately enabled protocol work; it stops before waiting for Apply or
+another external response. DIRECTION.md describes a Proc executor for
+these boundaries. Starting from a common state, an interrupted input
+then leaves each DB1 in either the old or new state, so a majority exists
+under the stated assumptions.
+
+Startup compares a digest of the combined raft_election singleton,
+monsterft_meta singleton, and latest raft_log row, including its sequence,
+term, and payload, or an explicit empty-log value. Select one combined
+majority, not separate winners for each table. No exact majority means
+stop and require repair. Comparing only the latest log row does not
+detect differences hidden in earlier history; this limitation is accepted.
 
 ## More about localSend and send
 
@@ -110,11 +130,11 @@ this library in to Rust sooner or later and we want the rust to target micro
 controllers where a stateful transport may not be easy. So we must do
 something else. The idea will be for Gate to on start send a "hello" RPC to all
 (ProcA, ProcB, ProcC, Apply) and this hello needs an ACK and a timeout and Gate
-will continue to send hello to all until all have ACKd. For ProcA, ProcB,
-ProcC, and Apply they must always start by waiting for hello and any other RPC 
-that arrive before that will cause a fast error/close. And also if any of these
-receive a hello after they have already started seeing other RPC types then
-they must also fast error/close as this is a sign that the gate has restarted.
+will continue to send hello to all until all have ACKd. The components must
+complete the handshake before normal processing. A genuinely new Gate run
+must be distinguished from a delayed hello retry for the current run;
+retries must be harmless, while a restart requires coordinated shutdown
+and startup. The exact startup identity and message rules remain to be planned.
 This hello scheme combined with Gate sending tick events/messages should be
 enough to cause local errors to shutdown things pretty fast and to also give a
 good pattern for things being able to come back online in a coordinated way. Do
@@ -165,39 +185,45 @@ Also if at any point in the implementation you encounter uncertainty about
 some detail the plan did not spell out you can pause impl to ask me for
 guidance.
 
-Also updates made to certify should come last in the impl. And we can say that
-the donor DB1A, DB1B, DB1C, and DB2 are to be copied over to the target instead
-of for example DB1A being copied over to the target and put in place as 1A, 1B,
-and 1C.
+Also updates made to certify should come last in the impl. For manual repair
+from another cluster node, copy the donor's DB1A, DB1B, DB1C, and DB2 to the
+target, rather than placing DB1A into all three target DB1 locations. This
+is separate from majority reconciliation among Procs within one node.
 
-## Reconciliation (more)
+## Startup reconciliation
 
-As part of reconciliation I think its important that A, B, C each get the state
-of DB1 A, B, C before agreeing on what is the majority and thus updating their
-DB to match as needed. For example we dont want A seeing A, B, C and deciding
-to make a change to its A and then B and C seeing A after that change. To make
-this work I think we just need a small protocol that runs on boot after the
-first tick event/msg is received (after the hello from gate).
+Gate coordinates phases using small completion messages. Database state
+and repair rows are read directly through SQLite, without snapshot or
+log-transfer RPCs between Procs.
 
-A first idea is that all procs after first tick will send RPC type "reconcile"
-to every other proc and wait for ACK. And they will keep sending reconcile
-until all have ACKd. And reconcile should contain the latest row from SQLite
-for each table: raft_election, raft_log, and monsterft_meta. And I think this
-should be a winner takes all situation where a majority is chosen over all 3
-tables instead of trying to choose a majority for each table individually.
+1. Open the databases and keep their contents stable. Normal processing,
+   receipt import, and pruning remain blocked. Apply must have finished
+   or stopped any previous work before this phase can complete.
+2. Each Proc reads all three original DB1 comparison states and DB2's
+   receipt, then independently chooses the majority. Cache those reads
+   and the selection for retries. Gate waits for all three reports to
+   agree on the selected state and captured receipt before allowing any
+   repair. Receipt checks involving DB1 wait until adoption, so they use
+   the selected state rather than an outlier's original state.
+3. The outlier copies the winning donor's entire retained raft_log and
+   both singleton rows into its own DB1 in one transaction. Select the
+   first winning Proc in fixed A, B, C order as donor. The winning DB1s
+   stay unchanged until all three confirm adoption.
+4. Each Proc validates the captured receipt against its adopted DB1 and
+   performs any required receipt import in one transaction. Gate waits
+   for all three to finish before starting normal operation.
 
-And the rule for ACK should be that a proc is not allowed to ack reconcile
-until it has seen RPC reconcile for every other proc and has also chosen a
-winner. And then as each node gets these ACKs they are then cleared to continue
-with startup/boot.
+Keep adoption and receipt import separate: starting from X/X/Y, importing
+a receipt too early can produce Z/X/Y. Adopt X everywhere first, then
+perform the X-to-Z import. Completed Apply work must never be rerun to
+make the files agree.
 
-This plan overrides some things previously said about reconciliation and
-importantly the direction now is to try to avoid A, B, C needing to read each
-others DB thru the FS and instead using RPC to do comms.
-
-This plan about reconciliation needs to be analyzed with care, and especially
-with care given to the question: will any proc raft_log be at most 1 row/entry
-ahead such that this idea to compare the latest entry is valid?
+Copy logical rows through SQLite rather than copying only a database
+file, since committed data may still be in its WAL. This repair handles
+arbitrary page or suffix differences without assuming a one-row gap.
+Copying all retained rows does not add a full-history digest to the
+selected comparison. DIRECTION.md describes the phases and validation
+in more detail.
 
 ## Total
 
