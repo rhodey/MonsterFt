@@ -52,14 +52,10 @@ access must not introduce independently timed observations into those
 decisions. Apply replies continue to carry the receipt and results for
 the particular execution; direct reads do not replace those replies.
 
-Keep `:memory:` available when it can be supported without substantial
-extra machinery. An in-process read interface to the owner's existing
-database is one possible way to provide the needed access while retaining
-write ownership. Reopening the path `:memory:` creates a different
-database and cannot provide cross-process access to the original one.
-Tests may use temporary files. A complete in-memory deployment design is
-not a prerequisite for this work, and the shared-filesystem direction
-does not impose a blanket prohibition on in-memory databases.
+V2 requires file-backed SQLite databases for DB1A, DB1B, DB1C, and DB2.
+Drop support for `:memory:` and reject it in database configuration.
+Tests and single-process examples can use temporary database files;
+peer reads use read-only SQLite connections to those files.
 
 ## RPCs and transport
 
@@ -408,13 +404,11 @@ pages to arrive over RPC.
   the same request/timeout path and catches timeout rejections to retry.
   The hello phase rule and cid/ACK/ERR convention are settled. No startup
   identity field, migration, or protocol-version negotiation is proposed.
-- **In-memory access:** choose a simple read interface if needed to keep
-  `:memory:` usable. It must preserve ownership and startup barriers; this
-  does not require making a private in-memory database visible across OS
-  processes.
 
 ## Validation targets
 
+- Reject `:memory:` database configuration. Exercise startup and peer
+  reads using temporary database files, including in a single process.
 - Interrupt election updates, suffix replacement, and batched insertion
   at each write boundary; observe only complete old or new DB1 states.
 - Interrupt an input that advances several checkpoints or finishes SYNC

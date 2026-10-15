@@ -117,12 +117,9 @@ ordered Gate inputs. In particular, an Apply reply supplies the fixed
 receipt and results for that input; a Proc must not substitute a fresh
 DB2 read that could observe a later Apply execution.
 
-Keep `:memory:` available where it can be supported without substantial
-extra machinery. For example, components running in one process can use
-a read interface to an existing database instead of reopening its path.
-Opening `:memory:` again does not access another component's database.
-Tests may use temporary files. A complete in-memory deployment design is
-not required at this stage, and this plan does not prohibit that option.
+V2 requires file-backed SQLite databases for DB1A, DB1B, DB1C, and DB2.
+Drop support for `:memory:` and reject it in database configuration.
+Tests and single-process examples can use temporary database files.
 
 ## Reconciliation
 
