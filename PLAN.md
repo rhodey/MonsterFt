@@ -23,7 +23,7 @@ forward and passes tick intervals as defined by configs. Incoming RPCs,
 Apply replies, and calls to Gate.append, appendBatch, and drainCmd also
 become ordered inputs identified by tickCount. Gate may queue inputs, but
 waits for all three Procs to finish and commit the current input before
-delivering the next one. Further tick and retry details remain to be planned.
+delivering the next one. Further clock details remain to be planned.
 
 We have introduced Gate, ProcA, ProcB, and ProcC and now it is time to also say
 there is another component named "Apply". Apply is in charge of running the
@@ -69,15 +69,25 @@ Gate or Apply can wait in milliseconds before a message for tickCount Z times
 out because it did not see the other message of the pair in time. Also any uses
 of random numbers must be replaced with a seeded random number generator.
 
-The transports are agreed to support lossy sends. Retries must not execute
-an input twice or let a Proc skip an input. Old completion reports must not
-satisfy a new input's barrier. The exact delivery and retry protocol still
-needs to be planned.
+The inter-node send transport may lose messages; Raft and Monster retain
+their existing handling of loss and timeouts. LocalSend is expected to
+deliver messages without loss. A missing required local reply or
+completion is a fatal timeout for the local node. Do not retry local
+requests or build a local retransmission protocol.
 
 Every input requires completion from all three Procs, even when it produces
-no outbound RPC. These completions also provide a liveness guard. When Procs
-are sending comms to Apply there should maybe also be an ACK needed and a
-timeout guard here too.
+no outbound RPC. Each Proc replies with an ACK only after finishing and
+committing the input. Requests to Apply also require a reply within their
+configured timeout. An Apply timeout does not establish whether DB2
+committed; startup reconciliation recovers completed work without rerunning
+it.
+
+RPCs follow the existing RaftNode convention: messages have a type,
+requests have a cid, and ACK or ERR replies carry the request's cid.
+Match replies to the expected sender and outstanding request; replies
+need no ACK of their own. A local completion ACK covers that processing
+step, not necessarily the whole public append operation. Ordinary apply
+rejections remain command outcomes.
 
 ## Shared database access
 
@@ -128,13 +138,13 @@ Having a stateful transport like TCP or unix domain socket streams would be
 nice because open is explicit and close is also explicit. But we want to copy
 this library in to Rust sooner or later and we want the rust to target micro
 controllers where a stateful transport may not be easy. So we must do
-something else. The idea will be for Gate to on start send a "hello" RPC to all
-(ProcA, ProcB, ProcC, Apply) and this hello needs an ACK and a timeout and Gate
-will continue to send hello to all until all have ACKd. The components must
-complete the handshake before normal processing. A genuinely new Gate run
-must be distinguished from a delayed hello retry for the current run;
-retries must be harmless, while a restart requires coordinated shutdown
-and startup. The exact startup identity and message rules remain to be planned.
+something else. On start Gate sends one "hello" RPC to each of ProcA,
+ProcB, ProcC, and Apply. Each must return an ACK with the request's cid
+within the configured timeout; a missing reply is fatal, with no hello
+retries. The components must complete the handshake before normal
+processing. A new Gate run requires coordinated shutdown and startup.
+Late replies from a stopped run must not satisfy requests in the new run.
+The exact startup identity and message fields remain to be planned.
 This hello scheme combined with Gate sending tick events/messages should be
 enough to cause local errors to shutdown things pretty fast and to also give a
 good pattern for things being able to come back online in a coordinated way. Do
@@ -148,7 +158,7 @@ will send a msgpackr encoded msg something like:
 
 And ProcB and ProcC will send a msgpackr encoded msg something like:
 
-{ tickCount, type: 'checksum', checksum: val }
+{ tickCount, type: 'checksum', cid, checksum: val }
 
 And checksum I think should be calculated over the first message in its buffer
 encoded form.
@@ -192,19 +202,20 @@ is separate from majority reconciliation among Procs within one node.
 
 ## Startup reconciliation
 
-Gate coordinates phases using small completion messages. Database state
-and repair rows are read directly through SQLite, without snapshot or
-log-transfer RPCs between Procs.
+Gate coordinates phases using local RPCs and ACK/ERR replies. A phase
+ACK confirms completion of that phase; missing required replies cause a
+fatal timeout. Database state and repair rows are read directly through
+SQLite, without snapshot or log-transfer RPCs between Procs.
 
 1. Open the databases and keep their contents stable. Normal processing,
    receipt import, and pruning remain blocked. Apply must have finished
    or stopped any previous work before this phase can complete.
 2. Each Proc reads all three original DB1 comparison states and DB2's
-   receipt, then independently chooses the majority. Cache those reads
-   and the selection for retries. Gate waits for all three reports to
-   agree on the selected state and captured receipt before allowing any
-   repair. Receipt checks involving DB1 wait until adoption, so they use
-   the selected state rather than an outlier's original state.
+   receipt, then independently chooses the majority. Retain those reads
+   and the selection throughout reconciliation. Gate waits for all three
+   reports to agree on the selected state and captured receipt before
+   allowing any repair. Receipt checks involving DB1 wait until adoption,
+   so they use the selected state rather than an outlier's original state.
 3. The outlier copies the winning donor's entire retained raft_log and
    both singleton rows into its own DB1 in one transaction. Select the
    first winning Proc in fixed A, B, C order as donor. The winning DB1s
