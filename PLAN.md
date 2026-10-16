@@ -11,19 +11,27 @@ and reconciliation direction is developed in [DIRECTION.md](DIRECTION.md).
 At a high level we are aiming for MonsterFt to become a "Single Fault Tolerant"
 system or as close as possible to SFT in the sense that aerospace and defense
 understand and think about SFT. I believe one of many things needed to achieve
-this will be to add a checksum scheme to all RPC and to have ProcA send RPC
-messages without checksum and to have ProcB and ProcC send checksums
-only and in this way Gate, which is a non-double process, can combine msg plus
-checksum and send together, and then the Gate that receives this passes full
-msgs onto the destination ProcA, ProcB, and ProcC who independently test
-the messages and checksums.
+this will be to add a checksum scheme to all RPC. For agreed outputs,
+ProcA supplies encoded message bytes and ProcB and ProcC supply checksums.
+Gate combines matching bytes and checksum and sends them together. The
+receiving Gate passes the full frame to its ProcA, ProcB, and ProcC, who
+independently verify the checksum before decoding the message.
 
-Gate starts with tickCount = 0n and increments tickCount by 1 as time moves
-forward and passes tick intervals as defined by configs. Incoming RPCs,
-Apply replies, and calls to Gate.append, appendBatch, and drainCmd also
-become ordered inputs identified by tickCount. Gate may queue inputs, but
-waits for all three Procs to finish and commit the current input before
-delivering the next one. Further clock details remain to be planned.
+Gate starts with `tickCount = 0n` and increments it for every ordered
+input: clock ticks, incoming RPCs, Apply replies, and calls to append,
+appendBatch, and drainCmd. Immediately before fanout, Gate assigns
+`timems = Math.max(previousTimems, Date.now())`. All three Procs receive
+the same timestamp; equal timestamps are valid. Gate waits for all three
+to finish and commit the current input before delivering the next one.
+
+The configurable `tickInterval` defaults to 10 ms. Keep at most one clock
+tick queued and timestamp it when dispatched. Proc protocol timers use
+only the supplied `timems`, including elections, heartbeats, peer RPC
+timeouts, retries, and quorum waits. These run through the executor, with
+no native `setTimeout` or `setInterval` driving protocol work. Process the
+input and its ready continuations first, then remaining due timers in
+deadline and registration order. Overdue repeating timers fire once and
+reschedule from current `timems`, without catch-up bursts.
 
 We have introduced Gate, ProcA, ProcB, and ProcC and now it is time to also say
 there is another component named "Apply". Apply is in charge of running the
@@ -67,16 +75,29 @@ with changes made around the clock being driven by ticks over localSend coming
 from Gate. Proc outputs will identify the input being processed, including
 requests sent locally to Apply.
 
+Both send and localSend carry Buffers, including in-process transports.
 The send function is to be called with node member ID like it is now.
 LocalSend destinations include "procA", "procB", "procC", "apply", and
 "gate" for Proc outputs and completion reports.
 
-This work is to include no migration path or backwards compat. This work should
-include no protocol versioning or plans for that. tickCount is to help keep
-messages in lock step and we can say there will be a config that says how long
-Gate or Apply can wait in milliseconds before a message for tickCount Z times
-out because it did not see the other message of the pair in time. Also any uses
-of random numbers must be replaced with a seeded random number generator.
+This work includes no migration path, backwards compatibility, or protocol
+versioning. Gate owns native timers for scheduling clock inputs and
+guarding its local requests. These watchdogs run independently of the
+ordered-input barrier, so they can expire while Gate waits for completion.
+The configurable `localTimeout` defaults to 5_000 ms for ordinary local
+RPCs, including hello, startup phases, and Proc completion. Gate also owns
+`applyTimeout`, defaulting to 30_000 ms, for an Apply execution request,
+not the entire public append operation. Both use the same timeout machinery.
+
+Each Proc has one native `setTimeout` watchdog for loss of contact with
+Gate. Start it when normal runtime begins after coordinated startup, and
+rearm it on each valid Gate input using `localTimeout`. If it expires,
+report the error and fatal-close the Proc. It never advances protocol
+time or runs elections, retries, or other protocol work. This guard must
+work without further Gate inputs, so it cannot depend on supplied `timems`.
+
+The Apply component needs no library-owned native timer; Gate times its
+execution requests. User-supplied apply callbacks may use timers normally.
 
 The inter-node send transport may lose messages; Raft and Monster retain
 their existing handling of loss and timeouts. LocalSend is expected to
@@ -91,10 +112,11 @@ retry those requests or build a general local retransmission protocol.
 
 Every input requires completion from all three Procs, even when it produces
 no outbound RPC. Each Proc replies with an ACK only after finishing and
-committing the input. Requests to Apply also require a reply within their
-configured timeout. An Apply timeout does not establish whether DB2
-committed; startup reconciliation recovers completed work without rerunning
-it.
+committing the input. The ACK contains its ordered output list: message
+bytes from A and corresponding checksums from B/C. Empty lists are valid.
+Requests to Apply also require a reply within their configured timeout.
+An Apply timeout does not establish whether DB2 committed; startup
+reconciliation recovers completed work without rerunning it.
 
 RPCs follow the existing RaftNode convention: messages have a type,
 requests have a cid, and ACK or ERR replies carry the request's cid.
@@ -132,10 +154,14 @@ fail immediately without waiting for the third.
 
 Each input's DB1 writes belong to one transaction. This includes any
 immediately enabled protocol work; it stops before waiting for Apply or
-another external response. DIRECTION.md describes a Proc executor for
-these boundaries. Starting from a common state, an interrupted input
-then leaves each DB1 in either the old or new state, so a majority exists
-under the stated assumptions.
+another external response. Each Proc uses a synchronous FIFO executor
+with explicit pending operations and continuations. Register a wait
+before buffering its request; a later input resumes the continuation.
+Drain runnable work, commit DB1, then publish outputs and completion.
+Pending external work does not hold a transaction open. DIRECTION.md
+develops these boundaries. Starting from a common state, an interrupted
+input then leaves each DB1 in either the old or new state, so a majority
+exists under the stated assumptions.
 
 Startup compares a digest of the combined raft_election singleton,
 monsterft_meta singleton, and latest raft_log row, including its sequence,
@@ -143,6 +169,10 @@ term, and payload, or an explicit empty-log value. Select one combined
 majority, not separate winners for each table. No exact majority means
 stop and require repair. Comparing only the latest log row does not
 detect differences hidden in earlier history; this limitation is accepted.
+
+A missing, unreadable, or invalid established DB1 stops startup, even if
+the other two agree. Automatic majority adoption handles structurally
+valid outliers; it does not recreate an invalid or missing database.
 
 ## More about localSend and send
 
@@ -159,15 +189,22 @@ or too slow to reply within the timeout, keeps Gate waiting and retrying.
 An explicit startup error still fails startup.
 
 A hello ACK means the component is ready to participate in coordinated
-startup. Components that ACK early wait for the others; their runtime
-tick timeout does not start during this wait. Gate begins reconciliation
-only after all four have ACKed, and normal processing only after
-reconciliation completes.
+startup. Components that ACK early wait for the others. Proc watchdogs
+remain inactive throughout hello and coordinated startup. Gate begins
+reconciliation only after all four have ACKed, and normal processing only
+after reconciliation completes.
 
-Hello uses `{ type: 'hello', cid }` and its ACK uses
-`{ type: 'ack', cid }` with the request's cid. Each component starts with
-`pastHello = false` and ACKs every hello while still in that phase. Set
-`pastHello = true` before processing the first subsequent startup request.
+Hello to A/B/C uses `{ type: 'hello', cid, seed }`, where `seed` is the
+16-byte Buffer Gate generates once before sending hello. Retries carry
+the same seed and a fresh cid generated with ordinary cryptographic
+randomness. Apply does not need the seed; its hello remains
+`{ type: 'hello', cid }`. Every hello ACK uses `{ type: 'ack', cid }`.
+
+Each component starts with `pastHello = false` and ACKs every hello while
+still in that phase. A Proc stores the seed during hello and initializes
+its RNG once when leaving that phase, before the first subsequent startup
+request is processed. Repeated hellos do not advance or reset an active
+generator. Set `pastHello = true` before processing that startup request.
 From then on, any hello causes fatal shutdown without an ACK, regardless
 of its cid. A replacement component starts in hello again and can ACK
 Gate's next retry. Do not reset an active component in place on hello.
@@ -179,32 +216,32 @@ reject ordinary protocol work before hello and reconciliation complete.
 Fresh CIDs and matching to outstanding requests keep old replies from
 satisfying new requests.
 
-Also I think we can say that to give RPCs a checksum scheme we can say ProcA
-will send a msgpackr encoded msg something like:
+Frames contain a 32-byte SHA-256 checksum followed by the MessagePack
+payload. Hash the exact encoded payload bytes and forward them unchanged.
+Use independently decodable msgpackr messages with shared-record encoding
+disabled, so losing a cluster message does not affect decoding the next.
+See the [msgpackr options](https://github.com/kriszyp/msgpackr#options).
+Recipients verify checksums before decoding; each receiving Proc verifies
+incoming cluster frames independently. Checksum or decoding failures
+cause fatal shutdown.
 
-{ tickCount, type, cid .... }
-
-And ProcB and ProcC will send a msgpackr encoded msg something like:
-
-{ tickCount, type: 'checksum', cid, checksum: val }
-
-And checksum I think should be calculated over the first message in its buffer
-encoded form.
-
-And then for non-local RPC that need checksum also maybe send is passed a buf
-but the first 8 bytes of the buf are always a checksum and the remaining bytes
-are to be decoded by msgpackr. This is another idea which needs analysis and
-to have some back and forth between us maybe.
+Independently generated Proc error stacks stay in local diagnostics and
+are omitted from agreed protocol error messages, since their call sites
+can differ. Preserve message and code fields, and preserve shared Apply
+or incoming error stacks unchanged.
 
 ## More miscellaneous notes
 
-For random number generators that need a seed the seed should be shared by the
-local components/procs but different nodes in the cluster should use different
-seeds. Choose a fresh random seed each time Gate starts, so restarting
-does not repeat the generated CIDs. ProcA, ProcB, and ProcC use the shared
-seed to make identical protocol choices and generate matching CIDs.
+Use [pure-rand](https://github.com/dubzzz/pure-rand)'s `xoroshiro128plus`
+for deterministic Proc randomness, including timer jitter and CIDs.
+Each time Gate starts, generate a fresh 128-bit state with
+`crypto.randomBytes(16)`, redrawing an all-zero state before sending it
+to ProcA, ProcB, and ProcC in hello. Each Proc initializes through the
+full-state API when leaving hello. Different cluster nodes use independent
+states; the three local Procs make identical choices and generate matching
+CIDs.
 Also I think ProcA, ProcB, ProcC, Gate, Apply should expose
-.onReceive(from, msg) and also .tickCount which can be read to get the latest
+.onReceive(from, buf) and also .tickCount which can be read to get the latest
 tickCount value as seen by that local component.
 
 Also I no longer desire to maintain the library in a way which encourages that
@@ -215,12 +252,6 @@ end with .v2.js so that we keep the original sources around for awhile so that
 we can look at v2 and agree that everything needed from v1 is copied over. Also
 there is no need to rewrite/update the doc/ dir at the start of this work, I
 will ask for this to be updated later when the time is right.
-
-For the purposes of keeping things simple we can say we are locked in on the
-decision to use msgpackr as part of RPC and we want to make this change
-supporting checksums but we also need to work in the direction which allows
-being transport agnostic. It may be the case that the send function changes
-to accept a buf instead of an obj.
 
 Also if at any point in the implementation you encounter uncertainty about
 some detail the plan did not spell out you can pause impl to ask me for
@@ -268,10 +299,8 @@ Copying all retained rows does not add a full-history digest to the
 selected comparison. DIRECTION.md describes the phases and validation
 in more detail.
 
-## Total
+## Implementation details
 
-This total plan is not 100% ready to go just yet. We are going to enter into
-planning more to search for any clarifications needed and they will be appended
-to the plan. The first step tho is to analyze/investigate the idea for the
-reconciliation scheme before we analyze too closely other parts of the total
-plan because reconciliation I am right now least confident about.
+The runtime rules above are settled. Helper names and routine implementation
+details can be chosen during coding. DIRECTION.md records the validation
+targets for this design.
