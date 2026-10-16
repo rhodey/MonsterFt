@@ -4,7 +4,7 @@ import os from 'node:os'
 import path from 'node:path'
 import { fork } from 'node:child_process'
 import { DatabaseSync } from 'node:sqlite'
-import { MonsterFt } from '../src/monsterft.v2.js'
+import { Gate } from '../src/gate.v2.js'
 import { MonsterApply } from '../src/apply.v2.js'
 import { decodeFrame } from '../src/wire.v2.js'
 import { readMeta, readApply } from '../src/utils.v2.js'
@@ -52,9 +52,9 @@ test('v2 runs nine independent protocol processes against shared files with dela
         }
         node.children.get(to).send({ type: 'frame', frame })
       }
-      node.gate = new MonsterFt(id, ids, (to, frame) => {
+      node.gate = new Gate(id, ids, (to, frame) => {
         if (!stopped) { members.get(to).gate.onReceive(id, frame) }
-      }, base, { ...opts, localSend })
+      }, localSend, opts)
       node.apply = new MonsterApply(id, (to, frame) => node.gate.onReceive('apply', frame), base, {
         async apply(db, data, term, seq) {
           calls.push({ id, seq, data })

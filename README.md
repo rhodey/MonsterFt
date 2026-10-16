@@ -10,19 +10,19 @@ MonsterFt is built on top of standard, unmodified Raft. Raft orders commands;
 MonsterFt adds SQLite agreement above it. Why? [Cosmic Ray Bit-flips](https://en.wikipedia.org/wiki/Single-event_upset)
 plus faulty hard drives.
 
-## Minimal example
+## In-process example
 
 Create at least three nodes with the same membership IDs:
 
 ```js
-import { MonsterFt } from 'monsterft'
+import { Gate, MonsterProc, MonsterApply } from 'monsterft'
 
 const nodeIds = ['1', '2', '3']
 const nodesById = new Map()
 
 function createNode(id) {
-  const send = (to, message) => {
-    return nodesById.get(to).onReceive(id, message)
+  const send = (to, frame) => {
+    return nodesById.get(to).onReceive(id, frame)
   }
 
   const apply = (db, data, term, seq, index) => {
@@ -51,15 +51,26 @@ function createNode(id) {
     ).get(command.name).value
   }
 
-  const node = new MonsterFt(
-    id,
-    nodeIds,
-    send,
-    `/tmp/node${id}.db`,
-    { apply },
-  )
-  nodesById.set(id, node)
-  return node
+  const databasePath = `/tmp/node${id}.db`
+  const opts = {}
+  const components = new Map()
+  const sendFrom = (from) => (to, frame) => {
+    return components.get(to).onReceive(from, frame)
+  }
+
+  const gate = new Gate(id, nodeIds, send, sendFrom('gate'), opts)
+  components.set('gate', gate)
+  for (const role of ['procA', 'procB', 'procC']) {
+    components.set(role, new MonsterProc(
+      role, id, nodeIds, sendFrom(role), databasePath, opts,
+    ))
+  }
+  components.set('apply', new MonsterApply(
+    id, sendFrom('apply'), databasePath, { apply },
+  ))
+
+  nodesById.set(id, gate)
+  return gate
 }
 
 const nodes = nodeIds.map(createNode)
@@ -77,12 +88,14 @@ await Promise.all(nodes.map((node) => node.close()))
 
 `send(to, frame)` carries Buffer frames and may be synchronous or async. A real
 deployment delivers each frame to `target.onReceive(senderId, frame)`. Await
-`open()` and `close()`; shutdown waits for outstanding Apply work. Reopening
-uses fresh component instances.
+`open()` and `close()` on Gate, which coordinates the other components;
+shutdown waits for outstanding Apply work. Reopening uses fresh component
+instances.
 
-By default `MonsterFt` wires Gate, ProcA/B/C, and Apply together in one process.
-Each Proc has its own protocol database; Apply alone writes the application
-database. The files are `${databasePath}.a`, `.b`, `.c`, and `${databasePath}2`.
+The example constructs Gate, ProcA/B/C, and Apply in one process and connects
+them through `sendFrom`. Each Proc has its own protocol database; Apply alone
+writes the application database. The files are `${databasePath}.a`, `.b`, `.c`,
+and `${databasePath}2`.
 V2 requires file-backed databases and a fresh layout; there is no migration
 from earlier releases.
 
@@ -130,12 +143,13 @@ Raft log to target limits. Each MonsterFt command adds two log entries: one
 `CMD` and one `SYNC`. Raft also comes with post-election no-op entries but
 in general `keepTarget` of 1,000 will retain 500 commands.
 
+Pass the same retention options to each `MonsterProc` through `opts` above:
+
 ```js
-const node = new MonsterFt(id, nodeIds, send, databasePath, {
-  apply,
+const opts = {
   keepTarget: 1_000,
   keepTrigger: 1_500,
-})
+}
 ```
 
 Supply both options or neither. The author chose to not implement Raft "Log
@@ -171,14 +185,16 @@ outputs, and passes agreed requests to the cluster or the single Apply owner.
 Frames carry SHA-256 checksums. Startup reconciles the local protocol copies
 by majority before recovering completed Apply work.
 
-For separate processes, construct `MonsterFt` with `localSend`, plus
-`MonsterProc(role, id, nodeIds, localSend, databasePath, opts)` for each Proc
-and `MonsterApply(id, localSend, databasePath, { apply })`. Use the same
-node ID, membership, base database path, and protocol options. Local transports
-deliver Buffers to `.onReceive(from, frame)` using destinations `gate`, `procA`,
-`procB`, `procC`, and `apply`. They must preserve send order and deliver without
-loss once ready. Gate retries startup hello; later local timeouts stop the node.
-Gate and Apply can share a process while each Proc runs separately.
+For separate processes, construct each component in its intended process and
+replace the in-process `sendFrom` routing with a `localSend(to, frame)` transport,
+such as Unix-domain sockets. Gate takes both cluster `send` and `localSend`;
+the Procs and Apply take only `localSend`. Use the same node ID, membership,
+base database path, and protocol options for the corresponding components.
+Local transports deliver Buffers to `.onReceive(from, frame)` using destinations
+`gate`, `procA`, `procB`, `procC`, and `apply`. They must preserve send order and
+deliver without loss once ready. Gate retries startup hello; later local
+timeouts stop the node. Gate and Apply can share a process while each Proc
+runs separately.
 
 The library does not spawn OS processes. For production, use a supervisor and
 wait for old database owners to exit before replacing them. All components

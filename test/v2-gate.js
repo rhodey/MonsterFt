@@ -38,9 +38,9 @@ function harness(options = {}) {
   gate = new Gate('a', ['a', 'b', 'c'], (to, frame) => {
     sent.push({ to, frame })
     return options.send?.(to, frame)
-  }, '/tmp/monsterft-gate-test', {
+  }, localSend, {
     tickInterval: 10_000, localTimeout: 250, applyTimeout: 250,
-    ...options.opts, localSend,
+    ...options.opts,
   })
   gate.on('error', (err) => errors.push(err))
   gate.on('warn', (err) => warnings.push(err))

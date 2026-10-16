@@ -1,7 +1,7 @@
 import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
-import { MonsterFt } from '../src/monsterft.v2.js'
+import { Gate } from '../src/gate.v2.js'
 import { MonsterProc } from '../src/proc.v2.js'
 import { MonsterApply } from '../src/apply.v2.js'
 import { decodeFrame } from '../src/wire.v2.js'
@@ -69,7 +69,7 @@ function cluster(options = {}) {
       if (options.transport?.({ from: id, to, frame, message: decoded.message, deliver }) === false) { return }
       return schedule(deliver, options.delay ?? 0)
     }
-    members.gate = new MonsterFt(id, ids, send, base, { ...settings, localSend: localSend('gate') })
+    members.gate = new Gate(id, ids, send, localSend('gate'), settings)
     for (const role of roles) {
       members[role] = new MonsterProc(role, id, ids, localSend(role), base, settings)
     }

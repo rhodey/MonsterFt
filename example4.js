@@ -2,7 +2,7 @@ import http from 'node:http'
 import { createHash, randomUUID } from 'node:crypto'
 import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { MonsterFt } from './src/index.v2.js'
+import { Gate, MonsterProc, MonsterApply } from './src/index.v2.js'
 
 const directory = mkdtempSync(`${tmpdir()}/monsterft-example4-`)
 
@@ -161,8 +161,8 @@ async function requestJson(url, options) {
 let serverUrl = null
 
 function node(id, ids) {
-  const send = (to, msg) => {
-    return nodesById.get(to).onReceive(id, msg)
+  const send = (to, frame) => {
+    return nodesById.get(to).onReceive(id, frame)
   }
   const apply = async (db, buf, term, seq) => {
     if (seq === 0n) { return }
@@ -189,9 +189,25 @@ function node(id, ids) {
     throw new Error(`unknown method: ${command.method}`)
   }
   const databasePath = `${directory}/node-${id}.db`
-  const node = new MonsterFt(id, ids, send, databasePath, { apply, quorum })
-  nodesById.set(id, node)
-  return node
+  const opts = { quorum }
+  const components = new Map()
+  const sendFrom = (from) => (to, frame) => {
+    return components.get(to).onReceive(from, frame)
+  }
+
+  const gate = new Gate(id, ids, send, sendFrom('gate'), opts)
+  components.set('gate', gate)
+  for (const role of ['procA', 'procB', 'procC']) {
+    components.set(role, new MonsterProc(
+      role, id, ids, sendFrom(role), databasePath, opts,
+    ))
+  }
+  components.set('apply', new MonsterApply(
+    id, sendFrom('apply'), databasePath, { apply },
+  ))
+
+  nodesById.set(id, gate)
+  return gate
 }
 
 async function main() {

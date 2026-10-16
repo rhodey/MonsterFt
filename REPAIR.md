@@ -14,14 +14,16 @@ three belong to ProcA/B/C; the last belongs to Apply.
 2. Certify the donor's base path:
 
    ```js
-   MonsterFt.certify(databasePath)
+   import { certify } from 'monsterft'
+
+   certify(databasePath)
    ```
 
    Certification rejects an undrained state by default. If an operator
    determines that this needs to be bypassed, it may be:
 
    ```js
-   MonsterFt.certify(databasePath, true)
+   certify(databasePath, true)
    ```
 3. Stop every component of each node to be repaired and await shutdown.
 4. Copy all four donor databases and their SQLite sidecars to the corresponding

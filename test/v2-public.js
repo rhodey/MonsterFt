@@ -4,11 +4,10 @@ import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
 import * as api from '../src/index.v2.js'
-import { databasePaths } from '../src/storage.v2.js'
 import { decodeFrame } from '../src/wire.v2.js'
 import { cluster, until } from './v2-helper.js'
 
-test('v2 public MonsterFt constructs local components and preserves command APIs', async (t) => {
+test('v2 public components are explicitly wired and preserve command APIs', async (t) => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'monsterft-v2-public-'))
   const nodes = new Map()
   const ids = ['a', 'b', 'c']
@@ -16,77 +15,96 @@ test('v2 public MonsterFt constructs local components and preserves command APIs
   const calls = []
   try {
     for (const id of ids) {
-      const node = new api.MonsterFt(id, ids, (to, frame) => nodes.get(to)?.onReceive(id, frame),
-        path.join(directory, id), () => ({
-          electionTimeout: 150, appendTimeout: 1_000, tickInterval: 2,
-          apply(db, buffer, term, seq, index, matchIndex) {
-            calls.push({ id, seq, term, index, matchIndex })
-            if (seq === 0n) {
-              db.exec('CREATE TABLE items (id INTEGER PRIMARY KEY, value TEXT) STRICT')
-              return null
-            }
-            db.prepare('INSERT INTO items (value) VALUES (?)').run(buffer.toString())
-            return { item: buffer.toString(), seq }
-          },
-        }))
-      node.on('error', (err) => errors.push(err))
-      nodes.set(id, node)
-      t.equal(node.components.size, 4, 'default wiring creates three Procs and one Apply')
+      const components = new Map()
+      const localSend = (from) => (to, frame) => components.get(to).onReceive(from, frame)
+      const base = path.join(directory, id)
+      const opts = { electionTimeout: 150, appendTimeout: 1_000, tickInterval: 2 }
+      const gate = new api.Gate(id, ids,
+        (to, frame) => nodes.get(to)?.gate.onReceive(id, frame), localSend('gate'), () => opts)
+      components.set('gate', gate)
+      for (const role of ['procA', 'procB', 'procC']) {
+        components.set(role, new api.MonsterProc(role, id, ids, localSend(role), base, opts))
+      }
+      components.set('apply', new api.MonsterApply(id, localSend('apply'), base, {
+        apply(db, buffer, term, seq, index, matchIndex) {
+          calls.push({ id, seq, term, index, matchIndex })
+          if (seq === 0n) {
+            db.exec('CREATE TABLE items (id INTEGER PRIMARY KEY, value TEXT) STRICT')
+            return null
+          }
+          db.prepare('INSERT INTO items (value) VALUES (?)').run(buffer.toString())
+          return { item: buffer.toString(), seq }
+        },
+      }))
+      for (const component of components.values()) { component.on('error', (err) => errors.push(err)) }
+      nodes.set(id, { gate, components })
     }
+    t.equal(api.MonsterFt, undefined, 'automatic component wrapper is not exported')
     t.equal(api.RaftNode, undefined, 'standalone RaftNode is not exported')
-    await Promise.all([...nodes.values()].map((node) => node.open()))
-    await Promise.all([...nodes.values()].map((node) => node.awaitLeader(true)))
-    const node = nodes.get('a')
+    await Promise.all([...nodes.values()].map(({ gate }) => gate.open()))
+    await Promise.all([...nodes.values()].map(({ gate }) => gate.awaitLeader(true)))
+    const node = nodes.get('a').gate
     const commit = node.awaitEvent('commit', (seq) => seq > 0n)
     const [seq, result] = await node.append(Buffer.from('one'))
     t.deepEqual(result, { item: 'one', seq })
     t.equal(typeof await commit, 'bigint', 'commit event preserves its bigint argument')
-    const [batchSeq, outcomes] = await nodes.get('b').appendBatch([Buffer.from('two'), Buffer.from('three')])
+    const [batchSeq, outcomes] = await nodes.get('b').gate.appendBatch([Buffer.from('two'), Buffer.from('three')])
     t.deepEqual(outcomes, [
       { status: 'fulfilled', value: { item: 'two', seq: batchSeq } },
       { status: 'fulfilled', value: { item: 'three', seq: batchSeq } },
     ])
     await until(() => [...nodes.values()].every((member) =>
       member.components.get('apply').db.prepare('SELECT count(*) AS n FROM items').get().n === 3n),
-    'default components apply each item')
+    'explicit components apply each item')
     t.equal(calls.filter((call) => call.seq === 0n).length, 3)
     t.equal(calls.filter((call) => call.seq > 0n).length, 9)
     t.ok(calls.filter((call) => call.seq > 0n).every((call) =>
       call.matchIndex.length === 3 && typeof call.term === 'bigint'), 'apply callback retains protocol arguments')
-    t.throws(() => node.del(), { code: api.ErrorCodes.LOG_OPEN }, 'cannot delete open files')
-    await Promise.all([...nodes.values()].map((member) => member.close()))
+    await Promise.all([...nodes.values()].map(({ gate }) => gate.close()))
     await assert.rejects(node.open(), { code: api.ErrorCodes.NODE_NOT_OPEN })
     t.notOk(node.isOpen, 'a closed instance cannot pretend that its old open promise reopened it')
-    for (const member of nodes.values()) {
-      member.del()
-      t.ok(Object.values(databasePaths(member.databasePath)).every((file) => !fs.existsSync(file)),
-        'del removes all four closed files')
-    }
+    t.ok([...nodes.values()].every(({ components }) => [...components]
+      .filter(([role]) => role !== 'gate').every(([, component]) => component.db === null)),
+    'Gate close waits for all explicitly wired database owners')
     t.equal(errors.length, 0)
   } finally {
-    await Promise.all([...nodes.values()].map((node) => node.close().catch(() => {})))
+    await Promise.all([...nodes.values()].map(({ gate }) => gate.close().catch(() => {})))
+    for (const { components } of nodes.values()) {
+      for (const [role, component] of components) {
+        if (role !== 'gate') { await component.close() }
+      }
+    }
     fs.rmSync(directory, { recursive: true, force: true })
   }
   t.end()
 })
 
 test('v2 public constructor rejects malformed component configuration', (t) => {
-  const make = (opts = {}, file = '/tmp/not-opened-v2') =>
-    new api.MonsterFt('a', ['a', 'b', 'c'], () => {}, file, { apply: () => null, ...opts })
+  const make = (opts = {}, localSend = () => {}) =>
+    new api.Gate('a', ['a', 'b', 'c'], () => {}, localSend, opts)
   for (const opts of [
-    { localSend: null }, { localSend: 1 }, { apply: null },
+    null, 1, () => null,
     { tickInterval: 0 }, { localTimeout: 0 }, { applyTimeout: 0 },
   ]) {
     t.throws(() => make(opts), { code: api.ErrorCodes.ARGUMENT_ILLEGAL })
   }
-  t.throws(() => make({}, ':memory:'), { code: api.ErrorCodes.ARGUMENT_ILLEGAL })
-  t.throws(() => new api.MonsterFt('a', ['a', 'a', 'b'], () => {}, '/tmp/not-opened-v2', {
-    apply: () => null,
-  }), { code: api.ErrorCodes.ARGUMENT_ILLEGAL })
+  for (const localSend of [null, 1]) {
+    t.throws(() => make({}, localSend), { code: api.ErrorCodes.ARGUMENT_ILLEGAL })
+  }
+  t.throws(() => new api.Gate('a', ['a', 'b', 'c'], () => {}),
+    { code: api.ErrorCodes.ARGUMENT_ILLEGAL }, 'local transport is required')
+  t.throws(() => new api.Gate('a', ['a', 'a', 'b'], () => {}, () => {}),
+    { code: api.ErrorCodes.ARGUMENT_ILLEGAL })
+  t.throws(() => new api.MonsterApply('a', () => {}, '/tmp/not-opened-v2', { apply: null }),
+    { code: api.ErrorCodes.ARGUMENT_ILLEGAL })
+  t.throws(() => new api.MonsterApply('a', () => {}, ':memory:', { apply: () => null }),
+    { code: api.ErrorCodes.ARGUMENT_ILLEGAL })
+  t.throws(() => new api.MonsterProc('procA', 'a', ['a', 'b', 'c'], () => {}, ':memory:'),
+    { code: api.ErrorCodes.ARGUMENT_ILLEGAL })
   t.end()
 })
 
-test('v2 public del waits for externally wired Apply to acknowledge shutdown', async (t) => {
+test('v2 public close waits for explicitly wired Apply to acknowledge shutdown', async (t) => {
   let hold = false
   let release
   const c = cluster({
@@ -99,15 +117,16 @@ test('v2 public del waits for externally wired Apply to acknowledge shutdown', a
     await c.open()
     hold = true
     const node = c.nodes.get('a').gate
-    const closing = node.close()
+    let closed = false
+    const closing = node.close().then(() => { closed = true })
     await until(() => release, 'held Apply close')
-    t.throws(() => node.del(), { code: api.ErrorCodes.LOG_OPEN },
-      'cannot unlink files until every owner has stopped')
+    t.notOk(closed, 'close remains pending until every owner has stopped')
+    t.ok(c.nodes.get('a').apply.isOpen, 'Apply still owns its database while close delivery is held')
     hold = false
     release()
     await closing
-    node.del()
-    t.ok(Object.values(databasePaths(node.databasePath)).every((file) => !fs.existsSync(file)))
+    t.ok(closed)
+    t.equal(c.nodes.get('a').apply.db, null, 'Apply closed before Gate close resolves')
   } finally { hold = false; release?.(); await c.close() }
   t.end()
 })

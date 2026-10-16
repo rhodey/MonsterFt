@@ -11,9 +11,12 @@ const illegal = (message) => new Err.ErrorWithCode(message, Err.ARGUMENT_ILLEGAL
 const rpcIllegal = (message) => new Err.ErrorWithCode(message, Err.RPC_ILLEGAL)
 
 class Gate extends EventEmitter {
-  constructor(id, nodes, send, databasePath, opts = {}) {
+  constructor(id, nodes, send, localSend, opts = {}) {
     super()
     opts = typeof opts === 'function' ? opts() : opts
+    if (!opts || typeof opts !== 'object') {
+      throw illegal('options must be an object')
+    }
     if (typeof id !== 'string' || id.length === 0) {
       throw illegal('id must be non-empty string')
     }
@@ -28,15 +31,10 @@ class Gate extends EventEmitter {
     if (this.nodes.some((node) => [...COMPONENTS, 'gate'].includes(node))) {
       throw illegal('node ids must not name local components')
     }
-    if (typeof send !== 'function' || typeof opts?.localSend !== 'function') {
+    if (typeof send !== 'function' || typeof localSend !== 'function') {
       throw illegal('send and localSend must be functions')
     }
-    if (typeof databasePath !== 'string' || databasePath.length === 0 ||
-        databasePath === ':memory:') {
-      throw illegal('database path must name a file')
-    }
     this.id = id
-    this.databasePath = databasePath
     this.tickInterval = opts.tickInterval ?? 10
     this.localTimeout = opts.localTimeout ?? 5_000
     this.applyTimeout = opts.applyTimeout ?? 30_000
@@ -56,13 +54,12 @@ class Gate extends EventEmitter {
     this.appliedSeq = -1n
     this.followers = []
     this._send = send
-    this._localSend = opts.localSend
+    this._localSend = localSend
     this._open = false
     this._opening = false
     this._closing = false
     this._openWork = null
     this._closeWork = null
-    this._closeComplete = false
     this._drainWork = null
     this._shutdownError = null
     this._requests = new Map()
@@ -503,7 +500,6 @@ class Gate extends EventEmitter {
         this._request(to, { type: 'close' }, this.localTimeout, true)))
       const rejected = results.find((result) => result.status === 'rejected')
       if (rejected) { throw rejected.reason }
-      this._closeComplete = true
       this._emitSafe('close')
     })()
     return this._closeWork

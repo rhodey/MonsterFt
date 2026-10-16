@@ -1,6 +1,6 @@
 import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { MonsterFt } from './src/index.v2.js'
+import { Gate, MonsterProc, MonsterApply } from './src/index.v2.js'
 
 const directory = mkdtempSync(`${tmpdir()}/monsterft-example3-`)
 
@@ -8,8 +8,8 @@ const nodeIds = ['1', '2', '3']
 const nodesById = new Map()
 
 function createNode(id) {
-  const send = (to, message) => {
-    return nodesById.get(to).onReceive(id, message)
+  const send = (to, frame) => {
+    return nodesById.get(to).onReceive(id, frame)
   }
 
   const apply = (db, data, term, seq, index) => {
@@ -38,15 +38,25 @@ function createNode(id) {
     ).get(command.name).value
   }
 
-  const node = new MonsterFt(
-    id,
-    nodeIds,
-    send,
-    `${directory}/node-${id}.db`,
-    { apply },
-  )
-  nodesById.set(id, node)
-  return node
+  const databasePath = `${directory}/node-${id}.db`
+  const components = new Map()
+  const sendFrom = (from) => (to, frame) => {
+    return components.get(to).onReceive(from, frame)
+  }
+
+  const gate = new Gate(id, nodeIds, send, sendFrom('gate'))
+  components.set('gate', gate)
+  for (const role of ['procA', 'procB', 'procC']) {
+    components.set(role, new MonsterProc(
+      role, id, nodeIds, sendFrom(role), databasePath,
+    ))
+  }
+  components.set('apply', new MonsterApply(
+    id, sendFrom('apply'), databasePath, { apply },
+  ))
+
+  nodesById.set(id, gate)
+  return gate
 }
 
 const nodes = nodeIds.map(createNode)

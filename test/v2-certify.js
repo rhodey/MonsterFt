@@ -3,7 +3,7 @@ import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
-import { MonsterFt } from '../src/monsterft.v2.js'
+import { certify } from '../src/index.v2.js'
 import { ProtocolStore, databasePaths, openApplyDatabase, readDatabase, readState, stateDigest } from '../src/storage.v2.js'
 import { digestEntry } from '../src/utilm.v2.js'
 import { readMeta, readApply } from '../src/utils.v2.js'
@@ -79,13 +79,13 @@ test('v2 certify clears fences on all DB1 copies and leaves DB2 unchanged', (t) 
       const before = readDatabase(f.paths.apply, (db) => ({
         receipt: readApply(db), items: db.prepare('SELECT * FROM items').all(),
       }))
-      t.equal(MonsterFt.certify(f.base), 2n, 'returns resulting protocol checkpoint')
+      t.equal(certify(f.base), 2n, 'returns resulting protocol checkpoint')
       t.ok(f.snapshot().every(({ state }) => state.meta.repair_state === 0n),
         `clears repair ${repair} everywhere`)
       t.deepEqual(readDatabase(f.paths.apply, (db) => ({
         receipt: readApply(db), items: db.prepare('SELECT * FROM items').all(),
       })), before, 'receipt and apply state remain unchanged')
-      t.equal(MonsterFt.certify(f.base), 2n, 'certification can be repeated')
+      t.equal(certify(f.base), 2n, 'certification can be repeated')
     } finally { f.cleanup() }
   }
   t.end()
@@ -97,14 +97,14 @@ test('v2 certify rejects pending receipt imports before changing any copy', (t) 
     f.stores[2].log.append({ term: 2n, entry: Buffer.from('outlier') })
     f.close()
     const before = f.snapshot()
-    t.throws(() => MonsterFt.certify(f.base), /requires every CMD output to have an applied SYNC/)
+    t.throws(() => certify(f.base), /requires every CMD output to have an applied SYNC/)
     t.deepEqual(f.snapshot(), before, 'rejected tentative import and adoption leave all DB1s unchanged')
-    t.equal(MonsterFt.certify(f.base, true), 1n, 'explicit override accepts unresolved CMD')
+    t.equal(certify(f.base, true), 1n, 'explicit override accepts unresolved CMD')
     const states = f.snapshot()
     t.ok(states.every(({ state }) => state.meta.pending_cmd_seq === 1n && state.meta.applied_seq === 1n),
       'completed receipt copied without rerunning Apply')
     t.ok(states.every(({ log }) => log.length === 2), 'outlier suffix replaced before importing receipt')
-    t.throws(() => MonsterFt.certify(f.base), /requires every CMD output to have an applied SYNC/,
+    t.throws(() => certify(f.base), /requires every CMD output to have an applied SYNC/,
       'default also rejects an already imported pending CMD')
     t.deepEqual(f.snapshot(), states)
     t.equal(readDatabase(f.paths.apply, (db) => db.prepare('SELECT count(*) AS n FROM items').get().n),
@@ -126,7 +126,7 @@ test('v2 certify validates corruption despite the unresolved-command override', 
         f.stores.forEach((store, i) => store.log.election(BigInt(i + 2), null))
       }
       f.close()
-      t.throws(() => MonsterFt.certify(f.base, true),
+      t.throws(() => certify(f.base, true),
         (err) => err.code === Err.MONSTER_CORRUPT, `${kind} cannot be bypassed`)
     } finally { f.cleanup() }
   }
@@ -138,7 +138,7 @@ test('v2 certify rejects missing files and held database locks', (t) => {
   try {
     missing.close()
     fs.rmSync(missing.paths.procC)
-    t.throws(() => MonsterFt.certify(missing.base), (err) => err.code === Err.FS_ERROR)
+    t.throws(() => certify(missing.base), (err) => err.code === Err.FS_ERROR)
     t.notOk(fs.existsSync(missing.paths.procC), 'missing DB1 is not recreated')
   } finally { missing.cleanup() }
   for (const role of [...roles, 'apply']) {
@@ -149,15 +149,15 @@ test('v2 certify rejects missing files and held database locks', (t) => {
       const before = f.snapshot()
       lock = new DatabaseSync(f.paths[role])
       lock.exec('BEGIN IMMEDIATE')
-      t.throws(() => MonsterFt.certify(f.base), /locked/, `${role} must be offline`)
+      t.throws(() => certify(f.base), /locked/, `${role} must be offline`)
       lock.close()
       lock = null
       t.deepEqual(f.snapshot(), before, 'lock failure changes no DB1')
-      t.equal(MonsterFt.certify(f.base), 2n, 'released lock permits certification')
+      t.equal(certify(f.base), 2n, 'released lock permits certification')
     } finally { lock?.close(); f.cleanup() }
   }
-  t.throws(() => MonsterFt.certify(':memory:'), /file path/)
-  t.throws(() => MonsterFt.certify('a', 'yes'), /must be a boolean/)
+  t.throws(() => certify(':memory:'), /file path/)
+  t.throws(() => certify('a', 'yes'), /must be a boolean/)
   t.end()
 })
 
@@ -178,13 +178,13 @@ test('v2 interrupted certification retains a majority after each durable phase',
           }
           return originalExec.call(this, sql)
         }
-        t.throws(() => MonsterFt.certify(f.base), /injected certification commit/,
+        t.throws(() => certify(f.base), /injected certification commit/,
           `interrupted ${after ? 'after' : 'before'} commit ${boundary}`)
         DatabaseSync.prototype.exec = originalExec
         const digests = f.snapshot().map(({ state }) => stateDigest(state))
         t.ok(digests.some((digest) => digests.filter((other) => digest.equals(other)).length >= 2),
           'interruption leaves a combined majority')
-        t.equal(MonsterFt.certify(f.base), 2n, 'repeated certification finishes')
+        t.equal(certify(f.base), 2n, 'repeated certification finishes')
         t.ok(f.snapshot().every(({ state }) => state.meta.repair_state === 0n && state.head.seq === 2n),
           'all copies converge to certified history')
       } finally { DatabaseSync.prototype.exec = originalExec; f.cleanup() }
@@ -201,7 +201,7 @@ test('v2 certify imports completed setup without introducing pending CMD state',
         applied_entry_hash = NULL, applied_local_digest = NULL`)
     }
     f.close()
-    t.equal(MonsterFt.certify(f.base), 0n)
+    t.equal(certify(f.base), 0n)
     t.ok(roles.every((role) => readDatabase(f.paths[role], readMeta).pending_cmd_seq === null))
     t.equal(readDatabase(f.paths.apply, readApply).seq, 0n)
   } finally { f.cleanup() }
