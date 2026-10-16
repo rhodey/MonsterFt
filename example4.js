@@ -1,6 +1,10 @@
 import http from 'node:http'
 import { createHash, randomUUID } from 'node:crypto'
-import { MonsterFt } from './src/index.js'
+import { mkdtempSync, rmSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { MonsterFt } from './src/index.v2.js'
+
+const directory = mkdtempSync(`${tmpdir()}/monsterft-example4-`)
 
 const toBuf = (value) => Buffer.from(JSON.stringify(value), 'utf8')
 const toObj = (buf) => JSON.parse(buf.toString('utf8'))
@@ -184,7 +188,7 @@ function node(id, ids) {
     }
     throw new Error(`unknown method: ${command.method}`)
   }
-  const databasePath = `/tmp/node-${id}.db`
+  const databasePath = `${directory}/node-${id}.db`
   const node = new MonsterFt(id, ids, send, databasePath, { apply, quorum })
   nodesById.set(id, node)
   return node
@@ -195,9 +199,8 @@ async function main() {
   let nodes = []
   try {
     nodes = nodeIds.map((id) => node(id, nodeIds))
-    for (const node of nodes) { node.del() }
     serverUrl = await listen(server)
-    for (const node of nodes) { node.open() }
+    await Promise.all(nodes.map((node) => node.open()))
     await Promise.all(nodes.map((node) => node.awaitLeader(true)))
 
     // Queue the fact to be recorded
@@ -219,7 +222,8 @@ async function main() {
       throw new Error('the remote service did not confirm the fact')
     }
   } finally {
-    for (const node of nodes) { node.close() }
+    await Promise.all(nodes.map((node) => node.close()))
+    rmSync(directory, { recursive: true, force: true })
     await closeServer(server)
   }
 }

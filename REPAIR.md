@@ -2,8 +2,9 @@
 
 Use this procedure when a node reports `REPAIR_QUORUM_IMPOSSIBLE` or
 `REPAIR_OUTSIDE_AGREEMENT`, or when history can no longer catch it up due
-to retention. Each node owns a DB pair: the constructor `databasePath`
-and the literal `${databasePath}2`.
+to retention. Each node owns four databases: `${databasePath}.a`,
+`${databasePath}.b`, `${databasePath}.c`, and `${databasePath}2`. The first
+three belong to ProcA/B/C; the last belongs to Apply.
 
 1. Choose the donor whose state you accept. A successful drain closes the donor:
 
@@ -22,11 +23,13 @@ and the literal `${databasePath}2`.
    ```js
    MonsterFt.certify(databasePath, true)
    ```
-4. Stop every node to be repaired.
-5. For each target: remove `-wal` and `-shm` and SQLite db files. Then copy
-   all from the donor to the target.
-7. Construct fresh `MonsterFt` instances with their original constructor
-   arguments, then call `open()` normally.
+3. Stop every component of each node to be repaired and await shutdown.
+4. Copy all four donor databases and their SQLite sidecars to the corresponding
+   target paths, replacing the stopped target's files and stale sidecars. Copy
+   DB1A, DB1B, and DB1C individually; do not duplicate DB1A into all three paths.
+5. Construct fresh components with their original node IDs and configuration,
+   then await `open()` on each Gate. Startup reconciles its local copies and
+   imports any committed Apply receipt without executing that work again.
 
 
 ## Copyright

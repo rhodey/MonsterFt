@@ -1,4 +1,8 @@
-import { MonsterFt } from './src/index.js'
+import { mkdtempSync, rmSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { MonsterFt } from './src/index.v2.js'
+
+const directory = mkdtempSync(`${tmpdir()}/monsterft-example3-`)
 
 const nodeIds = ['1', '2', '3']
 const nodesById = new Map()
@@ -38,7 +42,7 @@ function createNode(id) {
     id,
     nodeIds,
     send,
-    `/tmp/node-${id}.db`,
+    `${directory}/node-${id}.db`,
     { apply },
   )
   nodesById.set(id, node)
@@ -46,15 +50,17 @@ function createNode(id) {
 }
 
 const nodes = nodeIds.map(createNode)
-nodes.forEach((node) => node.del())
-nodes.forEach((node) => node.open())
-await Promise.all(nodes.map((node) => node.awaitLeader(true)))
+try {
+  await Promise.all(nodes.map((node) => node.open()))
+  await Promise.all(nodes.map((node) => node.awaitLeader(true)))
 
-const command = Buffer.from(JSON.stringify({
-  type: 'increment',
-  name: 'count',
-}))
-const [cmdSeq, value] = await nodes[0].append(command)
-console.log('count =', value)
-
-nodes.forEach((node) => node.close())
+  const command = Buffer.from(JSON.stringify({
+    type: 'increment',
+    name: 'count',
+  }))
+  const [cmdSeq, value] = await nodes[0].append(command)
+  console.log('count =', value)
+} finally {
+  await Promise.all(nodes.map((node) => node.close()))
+  rmSync(directory, { recursive: true, force: true })
+}

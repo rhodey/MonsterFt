@@ -1,7 +1,7 @@
 # MonsterFt
 
 MonsterFt is a fixed-membership replicated SQLite state machine. For each
-command (request), every available node executes the application and
+command (request), every available node executes the apply callback once and
 captures its database change as an [SQLite Session Extension](https://sqlite.org/sessionintro.html)
 patchset. The command succeeds when a configured quorum agrees on the database
 change and the return value.
@@ -63,7 +63,7 @@ function createNode(id) {
 }
 
 const nodes = nodeIds.map(createNode)
-nodes.forEach((node) => node.open())
+await Promise.all(nodes.map((node) => node.open()))
 await Promise.all(nodes.map((node) => node.awaitLeader()))
 
 const command = Buffer.from(JSON.stringify({
@@ -72,11 +72,19 @@ const command = Buffer.from(JSON.stringify({
 }))
 const [cmdSeq, value] = await nodes[0].append(command)
 console.log('count =', value)
+await Promise.all(nodes.map((node) => node.close()))
 ```
 
-`send(to, message)` may be synchronous or async. A real deployment uses
-its transport to deliver the message to `target.onReceive(senderId, message)`.
-`open()` and `close()` are synchronous.
+`send(to, frame)` carries Buffer frames and may be synchronous or async. A real
+deployment delivers each frame to `target.onReceive(senderId, frame)`. Await
+`open()` and `close()`; shutdown waits for outstanding Apply work. Reopening
+uses fresh component instances.
+
+By default `MonsterFt` wires Gate, ProcA/B/C, and Apply together in one process.
+Each Proc has its own protocol database; Apply alone writes the application
+database. The files are `${databasePath}.a`, `.b`, `.c`, and `${databasePath}2`.
+V2 requires file-backed databases and a fresh layout; there is no migration
+from earlier releases.
 
 ### Application and patchset rules
 
@@ -152,37 +160,38 @@ node/nodes.
 
 ### Examples
 
-- [example1.js](example1.js): in-process Raft cluster.
-- [example2.js](example2.js): Raft over encrypted TCP.
 - [example3.js](example3.js): in-process MonsterFt cluster.
 - [example4.js](example4.js): MonsterFt with HTTP side effects.
 
+### Protocol copies and deployment
+
+Each cluster node runs three protocol copies with separate SQLite logs. Gate
+supplies identical ordered inputs and logical time, compares their committed
+outputs, and passes agreed requests to the cluster or the single Apply owner.
+Frames carry SHA-256 checksums. Startup reconciles the local protocol copies
+by majority before recovering completed Apply work.
+
+For separate processes, construct `MonsterFt` with `localSend`, plus
+`MonsterProc(role, id, nodeIds, localSend, databasePath, opts)` for each Proc
+and `MonsterApply(id, localSend, databasePath, { apply })`. Use the same
+node ID, membership, base database path, and protocol options. Local transports
+deliver Buffers to `.onReceive(from, frame)` using destinations `gate`, `procA`,
+`procB`, `procC`, and `apply`. They must preserve send order and deliver without
+loss once ready. Gate retries startup hello; later local timeouts stop the node.
+Gate and Apply can share a process while each Proc runs separately.
+
+The library does not spawn OS processes. For production, use a supervisor and
+wait for old database owners to exit before replacing them. All components
+share a local filesystem. The in-process arrangement remains useful for tests
+and examples; standalone RaftNode is no longer a supported public API.
+
 ### Roadmap
 
-Without MonsterFt your application uses maybe 2GB of RAM and maybe 100GB of
-HDD. This is the surface area in which things can go wrong even if you are
-using Raft. With MonsterFt: the surface area vulnerable to bad things is on
-the order of 100 bytes. I'm using approximate language here because this
-repo is not MonsterFt in its final form and what is planned is looking
-like it can be truly fault tolerant in the sense that aerospace and the
-defense industry understand.
-
-Raft is a "strong leader" protocol and this means that if the leader node
-tells a follower to truncate log to X and append Y the follower is going to
-do this. Raft needs faultless HDD and we know how to do this with things
-like RAID but we do not have faultless CPU and RAM see: ECC RAM stats on
-[lock.host](https://lock.host/) and understand also that bit-flips increase
-with altitude and orbit and beyond.
-
-The planned work keeps Raft and SQLite and all MonsterFt protocol messages
-while borrowing an architecture from SpaceX: a minimum 3 node cluster
-remains but every node is running two copies of the app stack and
-these copies are forced to agree before they can RPC with the cluster.
-
-Actually you could ditch MonsterFt and do Raft core with this architecture
-and do pretty well but you would not see some benefits and you would need
-6X compute and 6X storage while MonsterFt I'm pretty sure can deliver on
-approx 3X compute and approx 3X storage.
+The v2 architecture moves toward tolerating faults in protocol execution while
+running user apply work only once per cluster node. It is not a claim of full
+single-fault tolerance: Gate and Apply remain individual components, and startup
+majority comparison does not authenticate every older log row. [PLAN.md](PLAN.md)
+and [DIRECTION.md](DIRECTION.md) describe the design and its boundaries.
 
 ### Collaborations
 

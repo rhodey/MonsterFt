@@ -1,7 +1,8 @@
 # External HTTP side effects
 
-MonsterFt runs `apply` on multiple nodes and requires agreement on results. An
-HTTP Server must therefore give every member node the same stable response.
+MonsterFt runs `apply` once on each cluster node and requires agreement on
+results. An HTTP Server must therefore give every member node the same stable
+response.
 The minimal pattern uses two commands:
 
 1. POST the same fact from every member under one `requestId`.
