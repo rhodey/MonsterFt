@@ -145,10 +145,10 @@ command for which no quorum can agree (most likely your app failed to use
 SQLite deterministically) and a command in which only a minority of nodes
 disagree. A node also requires repair if it falls behind retention.
 
-The MonsterFt repair protocol is an "offline" procedure to be carried out by
-an operator. [REPAIR.md](REPAIR.md) documents the procedure, in summary its
-an SQLite database copy from a designated healthy donor to an unhealthy
-node/nodes.
+The MonsterFt repair protocol is an "offline" procedure (likely to change) to
+be carried out by an operator. [REPAIR.md](REPAIR.md) documents the procedure,
+in summary its an SQLite database copy from a designated healthy donor to an
+unhealthy node/nodes.
 
 ### Examples
 
