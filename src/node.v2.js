@@ -278,7 +278,7 @@ class RaftEngine {
       this.executor.enqueue(() => this.replicate(state))
     }, (response) => response.type === 'err' ||
       (util.isSeq(response.seq) && response.seq >= 0n && response.term >= term),
-    failure('ping timeout', Err.PING_TIMEOUT))
+    failure('heartbeat timeout', Err.HEARTBEAT_TIMEOUT))
     state.heartbeatCids.add(cid)
   }
 

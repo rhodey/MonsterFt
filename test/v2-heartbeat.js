@@ -103,10 +103,10 @@ for (const delay of [0, 2]) {
       t.ok(c.gates().every((gate) => gate.term === term), 'the cluster keeps its term')
       t.equal(leader.state, 'leader', 'the leader stays ready')
       const timeouts = c.warnings.filter(({ id, error }) =>
-        id === leaderId && error.code === Err.PING_TIMEOUT)
+        id === leaderId && error.code === Err.HEARTBEAT_TIMEOUT)
       t.deepEqual(timeouts.map(({ role }) => role).sort(), roles,
         'each Proc reports the lost heartbeat ACK locally')
-      t.equal(timeouts[0]?.error.message, 'ping timeout', 'the warning identifies the heartbeat')
+      t.equal(timeouts[0]?.error.message, 'heartbeat timeout', 'the warning identifies the heartbeat')
       t.notOk(c.warnings.some(({ error }) => error.code === Err.APPEND_TIMEOUT),
         'heartbeat loss is not reported as an append timeout')
       if (leader.state === 'leader' && leader.term === term) {
