@@ -108,6 +108,42 @@ test('v2 Gate opens database owners one at a time before capture', async (t) => 
   t.end()
 })
 
+test('v2 Gate repeated open waits for the same startup result', async (t) => {
+  for (const finish of ['complete', 'timeout', 'close']) {
+    let releaseC
+    const h = harness({
+      local({ to, message, complete }) {
+        if (to !== 'procC' || message.kind !== 'start') { return false }
+        releaseC = () => complete(to, message)
+        return true
+      },
+    })
+    try {
+      const opening = h.gate.open().then(() => null, (err) => err)
+      await immediate()
+      t.equal(typeof releaseC, 'function', `${finish}: final startup completion is held`)
+      let settled = false
+      const repeated = h.gate.open().then(() => null, (err) => err)
+        .then((result) => { settled = true; return result })
+      await immediate()
+      t.notOk(settled, `${finish}: repeated open remains pending`)
+      if (finish === 'complete') { releaseC() }
+      if (finish === 'close') { await h.gate.close() }
+      const [first, second] = await Promise.all([opening, repeated])
+      if (finish === 'complete') {
+        t.equal(first, null, 'startup succeeds after all three complete')
+        await h.gate.open()
+      } else {
+        t.equal(first.code, finish === 'timeout' ? Err.LOCAL_TIMEOUT : Err.NODE_NOT_OPEN)
+      }
+      t.equal(second, first, `${finish}: both callers receive the same result`)
+      t.equal(h.requests.filter((r) => r.message.type === 'open').length, 4,
+        `${finish}: owners are opened only once`)
+    } finally { await h.gate.close() }
+  }
+  t.end()
+})
+
 test('v2 Gate releases agreed outputs but waits for all three before next input', async (t) => {
   let releaseC
   const h = harness({

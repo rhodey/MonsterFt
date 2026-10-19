@@ -176,7 +176,6 @@ class Gate extends EventEmitter {
   }
 
   open() {
-    if (this.isOpen) { return Promise.resolve() }
     if (this._closing) { return Promise.reject(this._shutdownError ?? nodeClosed()) }
     if (this._openWork !== null) { return this._openWork }
     this._opening = true
