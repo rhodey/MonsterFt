@@ -43,10 +43,14 @@ function fixture(id = 'a', nodes = ['a', 'b', 'c']) {
   })
   const outputs = (reply) => (reply.outputs ?? []).map(wire.decodePayload)
   const page = (reply, to = 'b') => outputs(reply)
-    .find((output) => output.to === to && output.message.type === 'append')?.message
+    .find((output) => output.to === to && output.message.type === 'append' &&
+      output.message.data !== undefined)?.message
+  const heartbeat = (reply, to = 'b') => outputs(reply)
+    .find((output) => output.to === to && output.message.type === 'append' &&
+      output.message.data === undefined)?.message
   input('start')
   return {
-    proc, input, rpc, outputs, page,
+    proc, input, rpc, outputs, page, heartbeat,
     elect() {
       input('tick', { timems: 10_000 })
       let reply
@@ -78,7 +82,7 @@ test('v2 heartbeat ACK commits an acknowledged CMD when it restores a live quoru
     const ready = f.rpc({ type: 'ack', cid: f.page(election, 'c').cid, term: 1n, seq: 0n }, 'c')
     f.setup(ready)
     for (const to of ['b', 'c']) {
-      const heartbeat = f.page(ready, to)
+      const heartbeat = f.heartbeat(ready, to)
       if (heartbeat) { f.rpc({ type: 'ack', cid: heartbeat.cid, term: 1n, seq: 1n }, to) }
     }
     const command = f.input('append', {
@@ -87,7 +91,7 @@ test('v2 heartbeat ACK commits an acknowledged CMD when it restores a live quoru
     const b = f.page(command, 'b')
     const c = f.page(command, 'c')
     f.rpc({ type: 'ack', cid: b.cid, term: 1n, seq: 1n }, 'b', 10_002)
-    const heartbeat = f.page(f.input('tick', { timems: 10_045 }), 'b')
+    const heartbeat = f.heartbeat(f.input('tick', { timems: 10_045 }), 'b')
     t.equal(heartbeat.data, undefined, 'B now receives a heartbeat without entries')
     f.input('tick', { timems: 10_090 })
     f.input('tick', { timems: 10_135 })
@@ -174,6 +178,120 @@ test('v2 stale-term backtracking replies cannot keep a follower live', (t) => {
     f.input('tick', { timems: 10_200 })
     t.equal(f.proc.engine.state, 'follower', 'only stale responses cannot prevent quorum loss')
     t.equal(f.proc.engine.commitSeq, -1n, 'stale responses cannot commit entries')
+  } finally { f.close() }
+  t.end()
+})
+
+test('v2 heartbeats continue while data and earlier heartbeat ACKs are missing', (t) => {
+  const f = fixture()
+  try {
+    const page = f.page(f.elect())
+    const first = f.heartbeat(f.input('tick', { timems: 10_045 }))
+    t.ok(first, 'heartbeat is sent while the election data page awaits its ACK')
+    const second = f.heartbeat(f.input('tick', { timems: 10_090 }))
+    t.ok(second, 'missing heartbeat ACK does not prevent the next heartbeat')
+    t.notEqual(second.cid, first.cid, 'each heartbeat has its own request')
+    t.equal(second.seqP, f.proc.engine.seq, 'heartbeat identifies the current leader head')
+    t.equal(second.termP, f.proc.log.term, 'heartbeat carries the current head term')
+    t.equal(second.commitSeq, f.proc.engine.commitSeq, 'heartbeat carries the current commit boundary')
+    t.equal(f.proc.engine.replication.get('b').cid, page.cid, 'data request remains independently pending')
+    f.rpc({ type: 'ack', cid: second.cid, term: 1n, seq: 1n }, 'b', 10_091)
+    t.ok(f.proc.engine.requests.has(first.cid), 'newer ACK does not discard the earlier heartbeat request')
+    for (const time of [10_135, 10_180, 10_225]) {
+      const heartbeat = f.heartbeat(f.input('tick', { timems: time }))
+      f.rpc({ type: 'ack', cid: heartbeat.cid, term: 1n, seq: 1n }, 'b', time + 1)
+    }
+    t.equal(f.proc.engine.state, 'leader', 'independent heartbeat replies preserve leadership')
+    t.equal(f.proc.engine.term, 1n, 'no election is needed while the data ACK remains missing')
+    t.equal(f.proc.engine.replication.get('b').matchIndex, -1n, 'heartbeats never acknowledge the data page')
+    t.equal(f.proc.engine.commitSeq, -1n, 'heartbeat replies alone cannot commit the election entry')
+    t.equal(f.proc.engine.replication.get('b').cid, page.cid, 'periodic heartbeats do not replace the data request')
+    t.notOk(f.proc.engine.requests.has(first.cid), 'the lost heartbeat request expires independently')
+  } finally { f.close() }
+  t.end()
+})
+
+test('v2 heartbeat proceeds during a data retry delay without changing the retry', (t) => {
+  const f = fixture()
+  try {
+    const page = f.page(f.elect())
+    f.rpc({ type: 'err', cid: page.cid, term: 1n,
+      code: Err.RPC_ILLEGAL, message: 'temporary rejection',
+    }, 'b', 10_040)
+    const state = f.proc.engine.replication.get('b')
+    const retryTimer = state.retryTimer
+    t.notEqual(retryTimer, null, 'data retry is delayed')
+    const reply = f.input('tick', { timems: 10_045 })
+    const heartbeat = f.heartbeat(reply)
+    t.ok(heartbeat, 'heartbeat is sent before the data retry becomes due')
+    t.equal(f.page(reply), undefined, 'data page respects its retry delay')
+    f.rpc({ type: 'ack', cid: heartbeat.cid, term: 1n, seq: 1n }, 'b', 10_046)
+    t.equal(state.retryTimer, retryTimer, 'heartbeat success preserves the existing retry timer')
+    t.equal(state.matchIndex, -1n, 'heartbeat success does not advance matching history')
+    const retried = f.page(f.input('tick', { timems: 10_055 }))
+    t.ok(retried, 'data retry still runs at its original deadline')
+    t.notEqual(retried.cid, page.cid, 'retry uses a fresh request')
+    t.deepEqual(retried.data, page.data, 'retry sends the same unacknowledged entries')
+  } finally { f.close() }
+  t.end()
+})
+
+test('v2 heartbeat errors and invalid ACKs cannot advance liveness or replication', (t) => {
+  for (const response of [
+    { type: 'err', term: 1n, code: Err.REPL_BACKTRACK, message: 'heartbeat rejected', logSeq: -1n },
+    { type: 'err', term: 0n, code: Err.REPL_BACKTRACK, message: 'old heartbeat rejection', logSeq: -1n },
+    { type: 'ack', term: 0n, seq: 1n },
+    { type: 'ack', term: 1n },
+    { type: 'ack', term: 1n, seq: -1n },
+  ]) {
+    const f = fixture()
+    try {
+      const page = f.page(f.elect())
+      const heartbeat = f.heartbeat(f.input('tick', { timems: 10_045 }))
+      f.rpc({ cid: heartbeat.cid, ...response }, 'b', 10_050)
+      const state = f.proc.engine.replication.get('b')
+      t.equal(f.proc.engine.pongs.get('b'), 10_000, 'unsuccessful heartbeat does not refresh liveness')
+      t.equal(state.nextIndex, 0n, 'unsuccessful heartbeat does not change the retry position')
+      t.equal(state.matchIndex, -1n, 'unsuccessful heartbeat does not establish matching history')
+      t.equal(state.cid, page.cid, 'unsuccessful heartbeat leaves the data request intact')
+    } finally { f.close() }
+  }
+  t.end()
+})
+
+test('v2 higher-term heartbeat response cancels old leadership requests', (t) => {
+  const f = fixture()
+  try {
+    const page = f.page(f.elect())
+    const heartbeat = f.heartbeat(f.input('tick', { timems: 10_045 }))
+    f.input('tick', { timems: 10_090 })
+    t.ok(f.proc.engine.requests.size > 4, 'multiple heartbeats and data requests are outstanding')
+    f.rpc({ type: 'ack', cid: heartbeat.cid, term: 2n, seq: 1n }, 'b', 10_091)
+    t.equal(f.proc.engine.state, 'follower', 'higher-term response ends leadership')
+    t.equal(f.proc.engine.term, 2n, 'higher term is adopted')
+    t.equal(f.proc.log.elec.term, 2n, 'higher term is durable')
+    t.equal(f.proc.engine.requests.size, 0, 'all old heartbeat and data requests are cancelled')
+    t.equal(f.proc.engine.replication.size, 0, 'old replication state is discarded')
+    const reply = f.rpc({ type: 'ack', cid: page.cid, term: 1n, seq: 0n }, 'b', 10_092)
+    t.equal(f.proc.engine.commitSeq, -1n, 'late old data ACK cannot commit')
+    t.equal(f.proc.engine.pongs.size, 0, 'late old data ACK cannot restore old liveness')
+    t.equal(f.outputs(reply).filter(({ message }) => message.type === 'append').length, 0,
+      'late old data ACK does not resume replication')
+  } finally { f.close() }
+  t.end()
+})
+
+test('v2 closing a Proc removes outstanding heartbeat and data requests', (t) => {
+  const f = fixture()
+  try {
+    f.elect()
+    f.input('tick', { timems: 10_045 })
+    f.input('tick', { timems: 10_090 })
+    t.ok(f.proc.engine.requests.size > 4, 'multiple independent requests are outstanding')
+    f.proc.close()
+    t.equal(f.proc.engine.requests.size, 0, 'closing removes all requests')
+    t.equal(f.proc.engine.replication.size, 0, 'closing removes all replication state')
+    t.equal(f.proc.executor.timers.size, 0, 'closing cancels request and periodic timers')
   } finally { f.close() }
   t.end()
 })

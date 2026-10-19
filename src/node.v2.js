@@ -142,11 +142,12 @@ class RaftEngine {
     for (const state of this.replication.values()) {
       state.cancelled = true
       this.executor.cancel(state.retryTimer)
-      if (state.cid) {
-        const waiting = this.requests.get(state.cid)
+      for (const cid of [state.cid, ...state.heartbeatCids]) {
+        const waiting = this.requests.get(cid)
         if (waiting) { this.executor.cancel(waiting.timer) }
-        this.requests.delete(state.cid)
+        this.requests.delete(cid)
       }
+      state.heartbeatCids.clear()
     }
     this.replication.clear()
     for (const waiter of [...this.appendWaiters]) { this.finishAppend(waiter, err) }
@@ -223,7 +224,7 @@ class RaftEngine {
       if (to !== this.id) {
         this.replication.set(to, {
           to, term: this.term, nextIndex: this.seq + 1n, matchIndex: -1n,
-          cid: null, retryTimer: null, cancelled: false,
+          cid: null, retryTimer: null, cancelled: false, heartbeatCids: new Set(),
         })
       }
     }
@@ -253,7 +254,32 @@ class RaftEngine {
       this.follower()
       return
     }
-    for (const state of this.replication.values()) { this.replicate(state, true) }
+    for (const state of this.replication.values()) { this.heartbeatFollower(state) }
+  }
+
+  heartbeatFollower(state) {
+    if (this.state !== 'leader' || state.term !== this.term) { return }
+    const term = this.term
+    const msg = {
+      type: 'append', term, seqP: this.seq, termP: this.log.term, commitSeq: this.commitSeq,
+    }
+    // Heartbeats continue while data replication waits, retries, or is cancelled.
+    const cid = this.request(state.to, msg, this.opts.electionTimeout, (err, response) => {
+      state.heartbeatCids.delete(cid)
+      if (this.state !== 'leader' || this.term !== term) { return }
+      if (response && response.term !== term) { err = failure('node term different', Err.TERM_DIFF) }
+      if (err) {
+        this.warn(err, typeof response?.stack === 'string')
+        return
+      }
+      this.pongs.set(state.to, this.now)
+      if (state.matchIndex < this.seq) { state.nextIndex = min(state.nextIndex, this.seq) }
+      this.checkCommit()
+      this.change()
+      this.executor.enqueue(() => this.replicate(state))
+    }, (response) => response.type === 'err' ||
+      (util.isSeq(response.seq) && response.seq >= 0n && response.term >= term))
+    state.heartbeatCids.add(cid)
   }
 
   appendEntry(entry, callback) {
@@ -274,12 +300,12 @@ class RaftEngine {
     this.executor.enqueue(() => waiter.callback(err, waiter.seq))
   }
 
-  replicate(state, heartbeat = false) {
+  replicate(state) {
     if (this.state !== 'leader' || state.term !== this.term || state.cancelled || state.cid) { return }
     if (state.retryTimer !== null) { return }
     const begin = state.nextIndex
-    if (begin > this.seq && !heartbeat) { return }
-    const seqP = begin > this.seq ? this.seq : begin - 1n
+    if (begin > this.seq) { return }
+    const seqP = begin - 1n
     const requiredSeq = max(seqP, 0n)
     if (requiredSeq < this.log.begin) {
       state.cancelled = true
@@ -288,29 +314,22 @@ class RaftEngine {
     }
     const previous = seqP < 0n ? null : this.entry(seqP)
     if (seqP >= 0n && !previous) { throw failure(`replication predecessor ${seqP} not found`, Err.RAFT_ILLEGAL) }
-    const msg = {
-      type: 'append', term: this.term, seqP,
-      termP: previous?.term ?? -1n, commitSeq: this.commitSeq,
+    const data = []
+    let bytes = 0
+    let rows = 0
+    // Choose the page before reading payloads, allowing one oversized entry.
+    for (const size of this.log.sizes(begin, this.opts.rpcMax)) {
+      if (rows > 0 && bytes + size > this.opts.rpcMaxBytes) { break }
+      bytes += size
+      rows++
     }
-    let data = null
-    if (begin <= this.seq) {
-      data = []
-      let bytes = 0
-      let rows = 0
-      // Choose the page before reading payloads, allowing one oversized entry.
-      for (const size of this.log.sizes(begin, this.opts.rpcMax)) {
-        if (rows > 0 && bytes + size > this.opts.rpcMaxBytes) { break }
-        bytes += size
-        rows++
-      }
-      for (const record of this.log.iter(begin, { iterStepSize: rows })) {
-        data.push(record)
-        if (data.length >= rows) { break }
-      }
-      msg.data = data
+    for (const record of this.log.iter(begin, { iterStepSize: rows })) {
+      data.push(record)
+      if (data.length >= rows) { break }
     }
     const term = this.term
-    const matched = seqP + BigInt(data?.length ?? 0)
+    const msg = { type: 'append', term, seqP, termP: previous?.term ?? -1n, commitSeq: this.commitSeq, data }
+    const matched = seqP + BigInt(data.length)
     state.cid = this.request(state.to, msg, this.opts.appendTimeout, (err, response) => {
       state.cid = null
       if (this.state !== 'leader' || this.term !== term || state.cancelled) { return }
@@ -334,18 +353,14 @@ class RaftEngine {
         } else {
           state.retryTimer = this.executor.after(this.retryms, () => {
             state.retryTimer = null
-            this.replicate(state, true)
+            this.replicate(state)
           })
         }
         return
       }
       this.pongs.set(state.to, this.now)
-      if (data !== null) {
-        state.matchIndex = max(state.matchIndex, matched)
-        state.nextIndex = max(state.nextIndex, matched + 1n)
-      } else if (state.matchIndex < this.seq) {
-        state.nextIndex = min(state.nextIndex, this.seq)
-      }
+      state.matchIndex = max(state.matchIndex, matched)
+      state.nextIndex = max(state.nextIndex, matched + 1n)
       this.checkCommit()
       this.change()
       this.executor.enqueue(() => this.replicate(state))
@@ -370,7 +385,7 @@ class RaftEngine {
     for (const waiter of [...this.appendWaiters]) {
       if (waiter.seq <= seq) { this.finishAppend(waiter) }
     }
-    for (const state of this.replication.values()) { this.replicate(state, true) }
+    for (const state of this.replication.values()) { this.heartbeatFollower(state) }
     this.leaderChanged()
   }
 

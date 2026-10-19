@@ -152,7 +152,16 @@ no findings
 
 ## `heartbeat`
 
-Checks leader liveness and sends periodic replication or heartbeat requests.
+Checks leader liveness and sends periodic heartbeats.
+
+### findings
+
+no findings
+
+## `heartbeatFollower`
+
+Sends a follower a heartbeat independently of data replication. Uses its reply
+to update liveness, check commitment, and resume eligible replication.
 
 ### findings
 
@@ -176,7 +185,7 @@ no findings
 
 ## `replicate`
 
-Replicates a bounded log page or heartbeat to a follower and handles progress,
+Replicates a bounded log page to a follower and handles progress,
 backtracking, and retries.
 
 ### findings
