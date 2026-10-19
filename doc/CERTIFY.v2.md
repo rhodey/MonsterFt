@@ -22,9 +22,9 @@ no findings
 
 ## `certify`
 
-Certifies an offline database family by adopting its majority protocol state,
-reconciling the Apply receipt, and clearing repair fences. Returns the agreed
-applied sequence.
+Certifies an offline database family by validating the matching copies, adopting
+its majority protocol state, reconciling the Apply receipt, and clearing repair
+fences. Returns the agreed applied sequence.
 
 ### findings
 

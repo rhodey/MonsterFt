@@ -113,6 +113,61 @@ test('v2 certify rejects pending receipt imports before changing any copy', (t) 
   t.end()
 })
 
+test('v2 certify validates every matching copy before committing any changes', (t) => {
+  for (const kind of ['checkpoint', 'receipt']) {
+    for (const [corrupt, outlier] of [[1, null], [2, null], [2, 0]]) {
+      const f = fixture().setup()
+      try {
+        if (kind === 'checkpoint') { f.finish() } else { f.command(false) }
+        // Keep the damaged entry below a matching head so the existing hash
+        // checks, rather than majority selection, detect the corruption.
+        f.stores.forEach((store) => store.log.append(zero))
+        if (outlier !== null) {
+          f.stores[outlier].log.append({ term: 2n, entry: Buffer.from('outlier') })
+        }
+        f.stores[corrupt].db.prepare('UPDATE raft_log SET entry = ? WHERE seq = ?')
+          .run(Buffer.from('corrupt'), kind === 'checkpoint' ? 2n : 1n)
+        f.close()
+        const before = f.snapshot()
+        const applyBefore = readDatabase(f.paths.apply, (db) => ({
+          receipt: readApply(db), items: db.prepare('SELECT * FROM items').all(),
+        }))
+        const label = `${kind} on ${roles[corrupt]}${outlier !== null ? ' with outlier' : ''}`
+        const donor = outlier === 0 ? 1 : 0
+        t.ok(stateDigest(before[corrupt].state).equals(stateDigest(before[donor].state)),
+          `${label}: damaged copy matches selected state`)
+        const message = kind === 'checkpoint'
+          ? 'applied entry hash does not match' : 'apply entry hash does not match'
+        t.throws(() => certify(f.base, kind === 'receipt'),
+          (err) => err.code === Err.MONSTER_CORRUPT && err.message.includes(message),
+          `${label}: corruption rejects certification`)
+        t.deepEqual(f.snapshot(), before,
+          `${label}: no fence clearance, receipt import, or outlier adoption commits`)
+        t.deepEqual(readDatabase(f.paths.apply, (db) => ({
+          receipt: readApply(db), items: db.prepare('SELECT * FROM items').all(),
+        })), applyBefore, `${label}: DB2 remains unchanged`)
+      } finally { f.cleanup() }
+    }
+  }
+  t.end()
+})
+
+test('v2 certify replaces a corrupt checkpoint entry in an outlier', (t) => {
+  const f = fixture().setup().finish()
+  try {
+    f.stores[0].log.append({ term: 2n, entry: Buffer.from('outlier') })
+    f.stores[0].db.prepare('UPDATE raft_log SET entry = ? WHERE seq = 2')
+      .run(Buffer.from('corrupt'))
+    f.close()
+    t.equal(certify(f.base), 2n, 'discarded outlier does not need to match its checkpoint hash')
+    const after = f.snapshot()
+    t.deepEqual(after[0], after[1], 'outlier is replaced with the certified majority state')
+    t.deepEqual(after[1], after[2], 'all copies agree')
+    t.ok(after.every(({ state }) => state.meta.repair_state === 0n), 'all fences are cleared')
+  } finally { f.cleanup() }
+  t.end()
+})
+
 test('v2 certify validates corruption despite the unresolved-command override', (t) => {
   for (const kind of ['receipt', 'meta', 'no majority']) {
     const f = fixture().setup().finish()

@@ -59,11 +59,15 @@ function certify(databasePath, allowUnresolved=false) {
     const selected = digests[winner]
     const donor = procs[winner]
 
-    // Validate the selected state and override before changing an outlier.
-    // A rejected certification leaves even a pending receipt import untouched.
-    donor.exec('SAVEPOINT monsterft_certify')
-    result = clearFence(donor, receipt, allowUnresolved)
-    donor.exec('ROLLBACK TO monsterft_certify; RELEASE monsterft_certify')
+    // Matching heads can hide a corrupt checkpoint or receipt entry. Validate
+    // every matching copy before committing adoption, imports, or fence changes.
+    for (let i = 0; i < procs.length; i++) {
+      if (!digests[i].equals(selected)) { continue }
+      const db1 = procs[i]
+      db1.exec('SAVEPOINT monsterft_certify')
+      result = clearFence(db1, receipt, allowUnresolved)
+      db1.exec('ROLLBACK TO monsterft_certify; RELEASE monsterft_certify')
+    }
 
     // Adoption is its own durable phase: X/X/Y -> X/X/X, before any X -> Z
     // receipt import or fence clearance. Exclusive locking survives COMMIT.

@@ -153,7 +153,7 @@ Use this checklist for progress; keep status notes out of the function guides.
 - [x] 1. Deterministic runtime and shared checks
 - [x] 2. Frames and transport
 - [x] 3. SQLite log operations
-- [ ] 4. Metadata, reconciliation, and certification
+- [x] 4. Metadata, reconciliation, and certification
 - [ ] 5. Proc execution and Gate coordination
 - [ ] 6. Raft elections and request handling
 - [ ] 7. Raft replication and commitment
