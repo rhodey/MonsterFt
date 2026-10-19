@@ -1,0 +1,83 @@
+# MonsterApply v2
+
+Function notes for [src/apply.v2.js](../src/apply.v2.js), in source order.
+Trivial getters, guards, and delegation helpers are omitted, and nested
+callbacks are covered with their enclosing function. Findings start empty for
+future review; `no findings` does not mean the function has already been reviewed.
+
+## `constructor`
+
+Validates Apply configuration and prepares the DB2 owner and user callback for
+startup through Gate.
+
+### findings
+
+no findings
+
+## `_emitSafe`
+
+Delivers events while containing listener failures and reporting them as errors
+where possible.
+
+### findings
+
+no findings
+
+## `_fatal`
+
+Begins closing Apply after an unrecoverable failure and reports its error and
+fatal events.
+
+### findings
+
+no findings
+
+## `_send`
+
+Sends a reply to Gate and treats transport failure as fatal.
+
+### findings
+
+no findings
+
+## `_validateExecute`
+
+Validates the identity and contents of setup or command execution requests.
+
+### findings
+
+no findings
+
+## `onReceive`
+
+Handles Gate's startup, execution, and shutdown requests, permitting only one
+execution at a time and returning its receipt, outcomes, and warnings.
+
+### findings
+
+no findings
+
+## `_writeReceipt`
+
+Advances DB2's durable apply receipt and rejects a missing or nonadvancing update.
+
+### findings
+
+no findings
+
+## `_execute`
+
+Runs setup or a command batch and commits its apply receipt with the resulting
+DB2 changes, preserving individual command failures as outcomes and warnings.
+
+### findings
+
+no findings
+
+## `close`
+
+Stops accepting work, waits for any active execution to settle, and closes DB2.
+
+### findings
+
+no findings
