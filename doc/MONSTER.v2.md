@@ -206,7 +206,15 @@ Handles forwarded commands and command-outcome requests and reports.
 
 ### findings
 
-no findings
+- **Deferred: duplicate forwarded requests execute twice.**
+  The `fwd_cmd` branch in `src/monster.v2.js:352` creates a new queued request
+  for every delivery, including the same sender and CID. Delivering one genuine
+  forwarded frame twice in a three-node cluster made a single public `append()`
+  execute at sequences 1 and 3 on every node; the caller received only the first
+  result. Duplicate outcome reports are handled separately and do not have this
+  problem. V1 has the same behavior. By decision, addressing this is deferred.
+  A later change can clarify that cluster transports must deliver each request
+  at most once or introduce request deduplication.
 
 ## `drain`
 
