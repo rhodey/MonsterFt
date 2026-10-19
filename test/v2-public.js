@@ -139,7 +139,7 @@ test('v2 public close waits for explicitly wired Apply to acknowledge shutdown',
 })
 
 for (const localDelay of [0, 2]) {
-  test(`v2 public close preserves Apply database failure (${localDelay}ms local transport)`, async (t) => {
+  test(`v2 public close retries after Apply database failure (${localDelay}ms local transport)`, async (t) => {
     const c = cluster({ localDelay })
     let db
     let closeDatabase
@@ -154,21 +154,31 @@ for (const localDelay of [0, 2]) {
       })
       const stack = failure.stack
       db.close = () => { throw failure }
-      let closed = false
-      gate.on('close', () => { closed = true })
+      let closeEvents = 0
+      gate.on('close', () => { closeEvents++ })
 
-      await assert.rejects(gate.close(), {
+      const failedClose = gate.close()
+      t.equal(gate.close(), failedClose, 'concurrent close calls share the attempt')
+      await assert.rejects(failedClose, {
         message: 'DB2 close injected database close failure',
         code: api.ErrorCodes.SQLITE_ERROR, sqlCode: 5, stack,
       })
       t.pass('Gate receives the correlated SQLite error, including its original stack')
-      t.notOk(closed, 'Gate does not emit a successful close')
+      t.equal(closeEvents, 0, 'Gate does not emit a successful close')
       t.equal(apply.db, db, 'Apply retains the database after close fails')
       t.equal(db.prepare('SELECT 1 AS n').get().n, 1n, 'the failed close leaves the database open')
 
       db.close = closeDatabase
-      await apply.close()
-      t.equal(apply.db, null, 'Apply can finish closing after the failure is removed')
+      const retriedClose = gate.close()
+      t.notEqual(retriedClose, failedClose, 'an explicit retry starts a new attempt')
+      t.equal(gate.close(), retriedClose, 'concurrent retries share the new attempt')
+      await retriedClose
+      t.equal(apply.db, null, 'Gate waits for Apply to close after the failure is removed')
+      t.ok(['procA', 'procB', 'procC'].every((role) => c.nodes.get('a')[role].db === null),
+        'all Proc databases are closed')
+      t.equal(closeEvents, 1, 'Gate emits close once after successful shutdown')
+      t.equal(gate.close(), retriedClose, 'successful close remains idempotent')
+      t.equal(closeEvents, 1, 'repeated successful close does not emit again')
     } finally {
       if (db) { db.close = closeDatabase }
       await c.close()
@@ -176,3 +186,50 @@ for (const localDelay of [0, 2]) {
     t.end()
   })
 }
+
+test('v2 public close retries after a busy Apply exceeds the close timeout', async (t) => {
+  let holdId
+  let release
+  const c = cluster({
+    opts: { localTimeout: 250, applyTimeout: 2_000 },
+    apply(id, db, buffer, term, seq) {
+      if (seq === 0n) {
+        db.exec('CREATE TABLE items (value TEXT) STRICT')
+        return null
+      }
+      db.prepare('INSERT INTO items VALUES (?)').run(buffer.toString())
+      if (id === holdId) {
+        return new Promise((resolve) => { release = () => resolve(buffer.toString()) })
+      }
+      return buffer.toString()
+    },
+  })
+  try {
+    await c.open()
+    await c.settled()
+    const gate = c.leader()
+    const node = c.nodes.get(gate.id)
+    holdId = gate.id
+    const appendFailure = assert.rejects(gate.append(Buffer.from('held')), {
+      code: api.ErrorCodes.NODE_NOT_OPEN,
+    })
+    await until(() => release, 'Apply callback to start')
+    let closeEvents = 0
+    gate.on('close', () => { closeEvents++ })
+    await assert.rejects(gate.close(), { code: api.ErrorCodes.LOCAL_TIMEOUT })
+    await appendFailure
+    t.equal(closeEvents, 0, 'timeout does not report successful owner shutdown')
+    t.notEqual(node.apply.db, null, 'Apply still owns its database while the callback is pending')
+
+    release()
+    await until(() => node.apply.db === null, 'Apply to finish closing')
+    await gate.close()
+    t.ok(['procA', 'procB', 'procC', 'apply'].every((role) => node[role].db === null),
+      'a later explicit close confirms all owners have stopped')
+    t.equal(closeEvents, 1, 'the successful retry emits close')
+  } finally {
+    release?.()
+    await c.close()
+  }
+  t.end()
+})

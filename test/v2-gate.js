@@ -367,6 +367,73 @@ test('v2 Gate transport failures warn and close cancels awaiting leader', async 
   t.end()
 })
 
+test('v2 Gate awaitEvent preserves every thrown value', async (t) => {
+  const h = harness({
+    outputs: (input) => input.kind === 'append' ? [wire.encodePayload({
+      to: 'event', message: { type: 'cmd', cmdSeq: 3n, cmdCount: 1 },
+    }), client(input)] : [],
+  })
+  const error = new Error('condition failed')
+  const stack = error.stack
+  const coded = new Err.ErrorWithCode('coded condition failure', Err.ARGUMENT_ILLEGAL)
+  try {
+    await h.gate.open()
+    for (const reason of [undefined, null, false, 0, 0n, '', NaN, error, coded]) {
+      const label = `${typeof reason}: ${String(reason)}`
+      const waiting = h.gate.awaitEvent('cmd', () => { throw reason }).then(
+        (value) => ({ status: 'fulfilled', value }),
+        (error) => ({ status: 'rejected', error }),
+      )
+      await h.gate.append(Buffer.from('work'))
+      const result = await waiting
+      t.equal(result.status, 'rejected', `${label}: rejects`)
+      t.ok(Object.is(result.error, reason), `${label}: preserves the exact thrown value`)
+      t.equal(h.gate.listenerCount('cmd'), 0, `${label}: removes the listener`)
+      t.equal(h.gate._shutdownWaiters.size, 0, `${label}: removes the shutdown wait`)
+    }
+    t.equal(error.stack, stack, 'original stack is unchanged')
+    t.equal(h.errors.length, 0, 'condition failures belong to the waiting caller')
+  } finally { await h.gate.close() }
+  t.end()
+})
+
+test('v2 Gate awaitEvent filters events and rejects if its condition closes Gate', async (t) => {
+  const h = harness({
+    outputs: (input) => input.kind === 'append' ? [wire.encodePayload({
+      to: 'event', message: { type: 'cmd', cmdSeq: 3n, cmdCount: 1 },
+    }), client(input)] : [],
+  })
+  try {
+    await h.gate.open()
+    let calls = 0
+    let matched
+    const waiting = h.gate.awaitEvent('cmd', (event) => {
+      calls++
+      if (calls === 1) { return false }
+      matched = event
+      return true
+    })
+    await h.gate.append(Buffer.from('skip'))
+    t.equal(h.gate.listenerCount('cmd'), 1, 'unmatched event keeps waiting')
+    await h.gate.append(Buffer.from('match'))
+    t.equal(await waiting, matched, 'returns the exact matching event')
+    await h.gate.append(Buffer.from('later'))
+    t.equal(calls, 2, 'completed condition is not called again')
+    t.equal(h.gate._shutdownWaiters.size, 0)
+
+    const closing = h.gate.awaitEvent('cmd', () => {
+      h.gate.close()
+      return true
+    })
+    const rejected = assert.rejects(closing, { code: Err.NODE_NOT_OPEN })
+    await assert.rejects(h.gate.append(Buffer.from('close')), { code: Err.NODE_NOT_OPEN })
+    await rejected
+    t.equal(h.gate.listenerCount('cmd'), 0, 'shutdown removes the listener')
+    t.equal(h.gate._shutdownWaiters.size, 0, 'shutdown removes the wait')
+  } finally { await h.gate.close() }
+  t.end()
+})
+
 test('v2 Gate rejects differing startup selections before adoption', async (t) => {
   const h = harness({
     local({ to, message, reply }) {

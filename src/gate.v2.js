@@ -428,16 +428,19 @@ class Gate extends EventEmitter {
   awaitEvent(type, matches = () => true) {
     if (!this.isOpen) { return Promise.reject(this._shutdownError ?? nodeClosed()) }
     return new Promise((resolve, reject) => {
-      const finish = (err, value) => {
+      let settled = false
+      const finish = (settle, value) => {
+        if (settled) { return }
+        settled = true
         this.removeListener(type, listener)
         this._shutdownWaiters.delete(fail)
-        err ? reject(err) : resolve(value)
+        settle(value)
       }
-      const fail = (err) => finish(err)
+      const fail = (err) => finish(reject, err)
       const listener = (value) => {
         try {
-          if (matches(value)) { finish(null, value) }
-        } catch (err) { finish(err) }
+          if (matches(value)) { finish(resolve, value) }
+        } catch (err) { fail(err) }
       }
       this._shutdownWaiters.add(fail)
       this.on(type, listener)
@@ -484,7 +487,10 @@ class Gate extends EventEmitter {
       const rejected = results.find((result) => result.status === 'rejected')
       if (rejected) { throw rejected.reason }
       this._emitSafe('close')
-    })()
+    })().catch((err) => {
+      this._closeWork = null
+      throw err
+    })
     return this._closeWork
   }
 

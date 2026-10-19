@@ -184,7 +184,7 @@ no findings
 ## `_closeComponents`
 
 Requests shutdown of components that completed hello and reports completion
-after all close replies succeed.
+after all close replies succeed. Failed attempts can be retried explicitly.
 
 ### findings
 
