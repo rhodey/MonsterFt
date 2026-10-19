@@ -139,7 +139,7 @@ full output sequence before accepting it as complete. It need not mean
 that a public append awaiting external responses has finished.
 
 Gate owns native timers for scheduling clock inputs and guarding local
-requests. Its configurable `localTimeout` defaults to `5_000` ms for hello,
+requests. Its configurable `localTimeout` defaults to `1_000` ms for hello,
 startup phases, and Proc completion; `applyTimeout` defaults to `5_000`
 ms for an Apply execution request, not the entire public append. These
 watchdogs run independently of the input barrier and can expire while
@@ -147,8 +147,9 @@ Gate waits for completion. Hello retains its timeout-and-retry exception.
 
 Each Proc uses a native `setTimeout` only as a watchdog for loss of Gate
 communication. Start it when normal runtime begins after coordinated
-startup, and rearm it on each valid Gate input using `localTimeout`. Its
-expiry reports an error and fatal-closes the Proc; it never advances
+startup, and rearm it on each valid Gate input using the Proc's `localTimeout`,
+which defaults to `1_000` ms. Its expiry reports an error and fatal-closes
+the Proc; it never advances
 protocol time or runs protocol work. It must work when Gate inputs stop,
 so it cannot depend on supplied `timems`.
 

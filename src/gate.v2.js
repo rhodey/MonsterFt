@@ -36,7 +36,7 @@ class Gate extends EventEmitter {
     }
     this.id = id
     this.tickInterval = opts.tickInterval ?? 10
-    this.localTimeout = opts.localTimeout ?? 5_000
+    this.localTimeout = opts.localTimeout ?? 1_000
     this.applyTimeout = opts.applyTimeout ?? 5_000
     for (const name of ['tickInterval', 'localTimeout', 'applyTimeout']) {
       if (!Number.isSafeInteger(this[name]) || this[name] < 1) {

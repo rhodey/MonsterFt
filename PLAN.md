@@ -84,15 +84,16 @@ This work includes no migration path, backwards compatibility, or protocol
 versioning. Gate owns native timers for scheduling clock inputs and
 guarding its local requests. These watchdogs run independently of the
 ordered-input barrier, so they can expire while Gate waits for completion.
-The configurable `localTimeout` defaults to 5_000 ms for ordinary local
+Gate's configurable `localTimeout` defaults to 1_000 ms for ordinary local
 RPCs, including hello, startup phases, and Proc completion. Gate also owns
 `applyTimeout`, defaulting to 5_000 ms, for an Apply execution request,
 not the entire public append operation. Both use the same timeout machinery.
 
 Each Proc has one native `setTimeout` watchdog for loss of contact with
 Gate. Start it when normal runtime begins after coordinated startup, and
-rearm it on each valid Gate input using `localTimeout`. If it expires,
-report the error and fatal-close the Proc. It never advances protocol
+rearm it on each valid Gate input using the Proc's `localTimeout`, which
+defaults to 1_000 ms. If it expires, report the error and fatal-close the
+Proc. It never advances protocol
 time or runs elections, retries, or other protocol work. This guard must
 work without further Gate inputs, so it cannot depend on supplied `timems`.
 

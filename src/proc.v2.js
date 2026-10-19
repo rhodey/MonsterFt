@@ -18,7 +18,7 @@ class MonsterProc extends EventEmitter {
         !nodes.includes(id) || new Set(nodes).size < 3 || typeof localSend !== 'function') {
       throw new Err.ErrorWithCode('Proc arguments are illegal', Err.ARGUMENT_ILLEGAL)
     }
-    this.localTimeout = opts.localTimeout ?? 5_000
+    this.localTimeout = opts.localTimeout ?? 1_000
     if (!Number.isSafeInteger(this.localTimeout) || this.localTimeout < 1) {
       throw new Err.ErrorWithCode('localTimeout must be a positive safe integer', Err.ARGUMENT_ILLEGAL)
     }
