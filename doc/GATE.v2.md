@@ -94,7 +94,7 @@ no findings
 
 ## `_event`
 
-Updates Gate's public node status and exposes supported agreed protocol events
+Updates Gate's public node status before delivering each agreed protocol event
 to listeners.
 
 ### findings

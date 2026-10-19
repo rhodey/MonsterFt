@@ -138,6 +138,98 @@ test('v2 public close waits for explicitly wired Apply to acknowledge shutdown',
   t.end()
 })
 
+test('v2 public close shares its attempt with synchronous Proc close listeners', async (t) => {
+  const requests = []
+  const c = cluster({
+    local({ id, from, to, frame }) {
+      if (id === 'a' && from === 'gate' && decodeFrame(frame).type === 'close') {
+        requests.push(to)
+      }
+    },
+  })
+  try {
+    await c.open()
+    await c.settled()
+    const { gate, procA } = c.nodes.get('a')
+    let reentrantClose
+    let closeEvents = 0
+    procA.once('close', () => { reentrantClose = gate.close() })
+    gate.on('close', () => { closeEvents++ })
+
+    const closing = gate.close()
+    await closing
+    t.equal(reentrantClose, closing, 'the Proc listener receives the existing close promise')
+    t.deepEqual(requests.sort(), ['apply', 'procA', 'procB', 'procC'],
+      'each owner receives exactly one close request')
+    t.equal(closeEvents, 1, 'Gate emits close only once')
+    t.equal(gate.close(), closing, 'successful close remains shared')
+    t.equal(requests.length, 4, 'repeated close sends no more requests')
+  } finally { await c.close() }
+  t.end()
+})
+
+test('v2 public close shares a failed attempt with synchronous Proc error listeners', async (t) => {
+  const requests = []
+  const c = cluster({
+    local({ id, from, to, frame }) {
+      if (id === 'a' && from === 'gate' && decodeFrame(frame).type === 'close') {
+        requests.push(to)
+      }
+    },
+  })
+  let db
+  let closeDatabase
+  try {
+    await c.open()
+    await c.settled()
+    const { gate, procA } = c.nodes.get('a')
+    db = procA.db
+    closeDatabase = db.close
+    const failure = Object.assign(new Error('injected DB1 close failure'), {
+      code: 'ERR_SQLITE_ERROR', errcode: 5,
+    })
+    const stack = failure.stack
+    let closeCalls = 0
+    db.close = () => {
+      if (++closeCalls === 1) { throw failure }
+      return closeDatabase.call(db)
+    }
+    let reentrantClose
+    let closeEvents = 0
+    procA.once('error', () => {
+      reentrantClose = gate.close()
+      reentrantClose.catch(() => {})
+    })
+    gate.on('close', () => { closeEvents++ })
+
+    const failedClose = gate.close()
+    await assert.rejects(failedClose, {
+      message: '(log close) injected DB1 close failure',
+      code: api.ErrorCodes.SQLITE_ERROR, sqlCode: 5, stack,
+    })
+    t.equal(reentrantClose, failedClose, 'the Proc error listener shares the failing attempt')
+    t.equal(closeCalls, 1, 'the error listener does not retry the database close')
+    t.equal(procA.db, db, 'the failed database remains open for an explicit retry')
+    t.deepEqual(requests.sort(), ['apply', 'procA', 'procB', 'procC'],
+      'the failing attempt sends one request to each owner')
+    t.equal(closeEvents, 0, 'Gate reports no successful close during the failed attempt')
+
+    const retry = gate.close()
+    t.notEqual(retry, failedClose, 'a later explicit close starts a fresh attempt')
+    t.equal(gate.close(), retry, 'concurrent retries share the new attempt')
+    await retry
+    t.equal(closeCalls, 2, 'the later explicit retry closes the database once')
+    t.equal(procA.db, null, 'the retry releases the database')
+    t.equal(requests.length, 8, 'only the explicit retry sends another set of requests')
+    t.equal(closeEvents, 1, 'Gate emits close once after the successful retry')
+    t.equal(gate.close(), retry, 'successful retry remains idempotent')
+  } finally {
+    if (db) { db.close = closeDatabase }
+    await c.close()
+  }
+  t.end()
+})
+
 for (const localDelay of [0, 2]) {
   test(`v2 public close retries after Apply database failure (${localDelay}ms local transport)`, async (t) => {
     const c = cluster({ localDelay })

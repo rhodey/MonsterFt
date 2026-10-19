@@ -128,6 +128,43 @@ test('v2 Raft same-term valid APPEND steps down a leader; lower term cannot', (t
   t.end()
 })
 
+test('v2 Raft progress events capture status before later work in the same input', (t) => {
+  const f = fixture().leader()
+  try {
+    const oldTerm = f.proc.engine.term
+    const term = oldTerm + 1n
+    const reply = f.rpc(append({
+      term, seqP: 0n, termP: oldTerm, commitSeq: 1n,
+      data: [record(oldTerm, ''), record(term, '')],
+    }))
+    const events = f.outputs(reply).filter(({ to }) => to === 'event').map(({ message }) => message)
+    t.deepEqual(events.map(({ type }) => type), ['change', 'commit', 'change', 'change'],
+      'the existing event order is preserved')
+    t.deepEqual(events[0].status, {
+      state: 'follower', leaderId: 'b', term, seq: 0n,
+      commitSeq: 0n, commitTerm: oldTerm, appliedSeq: 0n, followers: [],
+    }, 'the role change describes the state before the replication page is appended')
+    t.equal(events[1].seq, 1n, 'the commit event still identifies the committed sequence')
+    t.deepEqual(events[1].status, {
+      state: 'follower', leaderId: 'b', term, seq: 2n,
+      commitSeq: 1n, commitTerm: oldTerm, appliedSeq: 0n, followers: [],
+    }, 'commit reports its actual older term and includes the unapplied tail')
+    t.equal(events[2].status.appliedSeq, 0n, 'commit precedes application')
+    t.equal(events[3].status.appliedSeq, 1n, 'later application has a separate status snapshot')
+    t.equal(f.proc.engine.appliedSeq, 1n, 'all snapshots are released after the input finishes')
+
+    const later = f.rpc(append({ term, seqP: 2n, termP: term, commitSeq: 2n }))
+    const laterEvents = f.outputs(later).filter(({ to }) => to === 'event').map(({ message }) => message)
+    t.deepEqual(laterEvents.map(({ type }) => type), ['commit', 'change', 'change'])
+    t.equal(laterEvents[0].status.commitTerm, term, 'the next commit uses its own entry term')
+    t.equal(laterEvents[0].status.appliedSeq, 1n, 'the next commit keeps the preceding applied boundary')
+    t.equal(laterEvents[2].status.appliedSeq, 2n, 'the later no-op applies normally')
+    t.equal(events[1].status.commitTerm, oldTerm, 'earlier outputs retain their captured term')
+    t.equal(events[1].status.appliedSeq, 0n, 'earlier outputs do not read the latest applied state')
+  } finally { f.close() }
+  t.end()
+})
+
 test('v2 Raft reconciliation compares both terms and payload bytes', (t) => {
   for (const changed of [record(2n, 'same'), record(1n, 'different')]) {
     const f = fixture()

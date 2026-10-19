@@ -370,7 +370,7 @@ test('v2 Gate transport failures warn and close cancels awaiting leader', async 
 test('v2 Gate awaitEvent preserves every thrown value', async (t) => {
   const h = harness({
     outputs: (input) => input.kind === 'append' ? [wire.encodePayload({
-      to: 'event', message: { type: 'cmd', cmdSeq: 3n, cmdCount: 1 },
+      to: 'event', message: { type: 'cmd', cmdSeq: 3n, cmdCount: 1, status: { appliedSeq: 3n } },
     }), client(input)] : [],
   })
   const error = new Error('condition failed')
@@ -400,7 +400,7 @@ test('v2 Gate awaitEvent preserves every thrown value', async (t) => {
 test('v2 Gate awaitEvent filters events and rejects if its condition closes Gate', async (t) => {
   const h = harness({
     outputs: (input) => input.kind === 'append' ? [wire.encodePayload({
-      to: 'event', message: { type: 'cmd', cmdSeq: 3n, cmdCount: 1 },
+      to: 'event', message: { type: 'cmd', cmdSeq: 3n, cmdCount: 1, status: { appliedSeq: 3n } },
     }), client(input)] : [],
   })
   try {
@@ -528,7 +528,7 @@ test('v2 Gate listener failures reach later error listeners even when an earlier
   for (const type of ['change', 'warn']) {
     const h = harness({
       outputs: (input) => input.kind === 'append' ? [wire.encodePayload({
-        to: type === 'warn' ? 'b' : 'event', message: { type: type === 'warn' ? 'append' : 'change' },
+        to: type === 'warn' ? 'b' : 'event', message: { type: type === 'warn' ? 'append' : 'change', status: {} },
       }), client(input)] : [],
       send() { throw new Error('transport warning') },
     })
@@ -573,15 +573,18 @@ test('v2 Gate rejects diagnostic and unknown event outputs instead of forwarding
 })
 
 test('v2 Gate preserves supported protocol events', async (t) => {
+  const status = { state: 'leader', leaderId: 'a', term: 1n }
   const messages = [
-    { type: 'change', state: 'leader', leaderId: 'a', term: 1n },
+    { type: 'change' },
     { type: 'commit', seq: 3n },
     { type: 'cmd', cmdSeq: 3n, cmdCount: 1 },
     { type: 'sync', cmdSeq: 3n, syncSeq: 4n, quorum: true, agree: ['a', 'b'], disagree: [] },
   ]
   const h = harness({
     outputs: (input) => input.kind === 'append'
-      ? [...messages.map((message) => wire.encodePayload({ to: 'event', message })), client(input)] : [],
+      ? [...messages.map((message) => wire.encodePayload({
+        to: 'event', message: { ...message, status },
+      })), client(input)] : [],
   })
   const events = []
   for (const { type } of messages) { h.gate.on(type, (value) => events.push([type, value])) }

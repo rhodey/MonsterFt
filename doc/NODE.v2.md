@@ -39,6 +39,14 @@ unavailable.
 
 no findings
 
+## `event`
+
+Publishes a protocol event with the node status at the point it occurred.
+
+### findings
+
+no findings
+
 ## `warn`
 
 Reports a warning to the owning Proc's local listeners.

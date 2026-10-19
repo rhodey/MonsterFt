@@ -5,7 +5,7 @@ utilities and durable-state rules, then follow them into coordinated execution
 and the protocols. Finish with the public API and shutdown paths, where the
 components' guarantees come together.
 
-The scopes below assign all 184 documented function sections and the public
+The scopes below assign all 185 documented function sections and the public
 exports module. Ranges are inclusive and follow each guide's section order.
 Follow dependencies as needed, including helpers omitted from the guides,
 while keeping each pass centered on its assigned sections.

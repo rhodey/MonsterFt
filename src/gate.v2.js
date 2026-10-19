@@ -346,22 +346,26 @@ class Gate extends EventEmitter {
     }
   }
 
-  _event(message) {
+  _event({ status, ...message }) {
+    if (!['change', 'commit', 'cmd', 'sync'].includes(message.type)) {
+      throw rpcIllegal('output has invalid event type')
+    }
+    if (status === null || typeof status !== 'object') {
+      throw rpcIllegal('output has invalid event status')
+    }
+    for (const key of ['state', 'term', 'seq', 'commitSeq', 'commitTerm', 'appliedSeq', 'followers']) {
+      if (Object.hasOwn(status, key)) { this[key] = status[key] }
+    }
+    if (Object.hasOwn(status, 'leaderId')) { this.leader = status.leaderId }
     if (message.type === 'change') {
-      for (const key of ['state', 'term', 'seq', 'commitSeq', 'commitTerm', 'appliedSeq', 'followers']) {
-        if (Object.hasOwn(message, key)) { this[key] = message[key] }
-      }
-      if (Object.hasOwn(message, 'leaderId')) { this.leader = message.leaderId }
       this._emitSafe('change', {
-        ...message, id: this.id, nodes: [...this.nodes], leader: this.leader,
+        ...message, ...status, id: this.id, nodes: [...this.nodes], leader: this.leader,
         open: this.isOpen,
       })
     } else if (message.type === 'commit') {
       this._emitSafe('commit', message.seq)
-    } else if (message.type === 'cmd' || message.type === 'sync') {
-      this._emitSafe(message.type, message)
     } else {
-      throw rpcIllegal('output has invalid event type')
+      this._emitSafe(message.type, message)
     }
   }
 
@@ -481,13 +485,14 @@ class Gate extends EventEmitter {
 
   _closeComponents() {
     if (this._closeWork !== null) { return this._closeWork }
-    this._closeWork = (async () => {
+    // Publish the promise before synchronous owner listeners can call close again.
+    this._closeWork = Promise.resolve().then(async () => {
       const results = await Promise.allSettled([...this._helloDone].map((to) =>
         this._request(to, { type: 'close' }, this.localTimeout, true)))
       const rejected = results.find((result) => result.status === 'rejected')
       if (rejected) { throw rejected.reason }
       this._emitSafe('close')
-    })().catch((err) => {
+    }).catch((err) => {
       this._closeWork = null
       throw err
     })

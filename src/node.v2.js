@@ -66,15 +66,17 @@ class RaftEngine {
     return this.log.iter(seq, { iterStepSize: 1 }).next().value ?? null
   }
 
-  event(type, fields = {}) { this.output('event', { type, ...fields }) }
-  warn(err) { this.diagnostic?.('warn', err) }
-  change() {
-    this.event('change', {
+  event(type, fields = {}) {
+    // Capture status before later work in this input advances it.
+    const status = {
       state: this.state, leaderId: this.leader, term: this.term,
       seq: this.seq, commitSeq: this.commitSeq, commitTerm: this.commitTerm,
       appliedSeq: this.appliedSeq, followers: this.followers,
-    })
+    }
+    this.output('event', { type, ...fields, status })
   }
+  warn(err) { this.diagnostic?.('warn', err) }
+  change() { this.event('change') }
 
   send(to, message) { this.output(to, { ...message, from: this.id }) }
   rpcError(to, cid, err, extra = {}) {
