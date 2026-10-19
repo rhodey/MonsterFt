@@ -280,9 +280,10 @@ class RaftEngine {
     const begin = state.nextIndex
     if (begin > this.seq && !heartbeat) { return }
     const seqP = begin > this.seq ? this.seq : begin - 1n
-    if (seqP >= 0n && seqP < this.log.begin) {
+    const requiredSeq = max(seqP, 0n)
+    if (requiredSeq < this.log.begin) {
       state.cancelled = true
-      this.warn(failure(`replication wants forgotten ${seqP} have ${this.log.begin}`, Err.REPL_FORGOT))
+      this.warn(failure(`replication wants forgotten ${requiredSeq} have ${this.log.begin}`, Err.REPL_FORGOT))
       return
     }
     const previous = seqP < 0n ? null : this.entry(seqP)
@@ -295,11 +296,16 @@ class RaftEngine {
     if (begin <= this.seq) {
       data = []
       let bytes = 0
-      for (const record of this.log.iter(begin, { iterStepSize: this.opts.rpcMax })) {
-        if (data.length > 0 && bytes + record.entry.length > this.opts.rpcMaxBytes) { break }
+      let rows = 0
+      // Choose the page before reading payloads, allowing one oversized entry.
+      for (const size of this.log.sizes(begin, this.opts.rpcMax)) {
+        if (rows > 0 && bytes + size > this.opts.rpcMaxBytes) { break }
+        bytes += size
+        rows++
+      }
+      for (const record of this.log.iter(begin, { iterStepSize: rows })) {
         data.push(record)
-        bytes += record.entry.length
-        if (data.length >= this.opts.rpcMax) { break }
+        if (data.length >= rows) { break }
       }
       msg.data = data
     }
@@ -318,6 +324,7 @@ class RaftEngine {
             this.warn(failure('genesis rejected', Err.RAFT_ILLEGAL))
             return
           }
+          this.pongs.set(state.to, this.now)
           let next = begin - 1n
           if (response?.term === term && util.isSeq(response.logSeq)) {
             next = min(next, response.logSeq + 1n)
@@ -336,10 +343,10 @@ class RaftEngine {
       if (data !== null) {
         state.matchIndex = max(state.matchIndex, matched)
         state.nextIndex = max(state.nextIndex, matched + 1n)
-        this.checkCommit()
       } else if (state.matchIndex < this.seq) {
         state.nextIndex = min(state.nextIndex, this.seq)
       }
+      this.checkCommit()
       this.change()
       this.executor.enqueue(() => this.replicate(state))
     }, (response) => response.type === 'err' ||
