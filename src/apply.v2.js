@@ -46,9 +46,7 @@ class MonsterApply extends EventEmitter {
       try {
         listener.call(this, value)
       } catch (err) {
-        if (type !== 'error') {
-          try { this.emit('error', err) } catch { }
-        }
+        if (type !== 'error') { this._emitSafe('error', err) }
       }
     }
   }
@@ -112,8 +110,12 @@ class MonsterApply extends EventEmitter {
       msg = decodeFrame(buffer)
       if (msg?.to === 'apply') { msg = msg.message }
       if (msg?.type === 'close' && isCid(msg.cid)) {
-        await this.close()
-        this._ack(msg)
+        try {
+          await this.close()
+          this._ack(msg)
+        } catch (err) {
+          this._send({ type: 'err', cid: msg.cid, ...errorToWire(err) })
+        }
         return
       }
       if (this._closing) { return }

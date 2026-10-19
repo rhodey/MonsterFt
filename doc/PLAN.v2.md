@@ -157,6 +157,6 @@ Use this checklist for progress; keep status notes out of the function guides.
 - [x] 5. Proc execution and Gate coordination
 - [x] 6. Raft elections and request handling
 - [x] 7. Raft replication and commitment
-- [ ] 8. Apply execution, receipts, and retention
+- [x] 8. Apply execution, receipts, and retention
 - [ ] 9. Monster agreement and command progress
 - [ ] 10. Public API, events, and shutdown

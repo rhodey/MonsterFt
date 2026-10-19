@@ -121,11 +121,13 @@ test('v2 Apply retains failed-item diagnostics, rolls back items, and preserves 
   try {
     await f.start()
     await f.execute(0n, null)
+    const listenerError = new Error('listener throw')
+    f.component.prependListener('error', () => { throw new Error('error listener throw') })
     f.component.on('warn', (warning) => {
       warning.message = 'listener mutation'
       warning.code = 999
       warning.stack = 'changed stack'
-      throw new Error('listener throw')
+      throw listenerError
     })
     let laterWarnings = 0
     f.component.on('warn', () => { laterWarnings++ })
@@ -134,8 +136,8 @@ test('v2 Apply retains failed-item diagnostics, rolls back items, and preserves 
     t.equal(result.warnings.length, 3)
     t.equal(laterWarnings, 3, 'throwing listeners cannot hide warnings from later listeners')
     t.equal(f.diagnostics.filter(({ type, err }) =>
-      type === 'error' && err.message === 'listener throw').length, 3,
-    'listener failures remain visible as local errors')
+      type === 'error' && err === listenerError).length, 3,
+    'later error listeners receive the original exception even if an earlier one throws')
     t.ok(result.warnings.every((warning) => warning.code === Err.APPLY_ERROR))
     t.deepEqual(result.outcomes[1], [1, 'rejected item', 123, 456, original.stack])
     t.equal(result.warnings[0].stack, original.stack)
@@ -241,6 +243,36 @@ test('v2 Apply close waits for callbacks and suppresses late completion', async 
       t.equal(readApply(db).seq, 0n)
     } finally { db.close() }
   } finally { await f.close() }
+  t.end()
+})
+
+test('v2 Apply replies with the close error and acknowledges only successful teardown', async (t) => {
+  const f = fixture(() => null)
+  let db
+  let close
+  try {
+    await f.start()
+    db = f.component.db
+    close = db.close.bind(db)
+    const original = new Err.ErrorWithCode('injected close failure', Err.SQLITE_ERROR, 10)
+    db.close = () => { throw original }
+    const reply = await f.request({ type: 'close', cid: 'failed-close' })
+    t.equal(reply?.type, 'err', 'failed teardown returns ERR instead of timing out')
+    t.equal(reply?.cid, 'failed-close', 'error refers to the close request')
+    t.equal(reply?.message, 'DB2 close injected close failure')
+    t.equal(reply?.code, Err.SQLITE_ERROR)
+    t.equal(reply?.sqlCode, 10)
+    t.equal(reply?.stack, original.stack, 'error keeps the original trace')
+    t.equal(f.component.db, db, 'failed close retains the connection for cleanup')
+    t.equal(f.diagnostics.filter(({ type }) => type === 'error').length, 1,
+      'close failure is also reported locally once')
+    db.close = close
+    t.equal((await f.request({ type: 'close' })).type, 'ack', 'retry confirms successful teardown')
+    t.equal(f.component.db, null)
+  } finally {
+    if (db && close) { db.close = close }
+    await f.close()
+  }
   t.end()
 })
 

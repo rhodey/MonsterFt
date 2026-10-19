@@ -137,3 +137,42 @@ test('v2 public close waits for explicitly wired Apply to acknowledge shutdown',
   } finally { hold = false; release?.(); await c.close() }
   t.end()
 })
+
+for (const localDelay of [0, 2]) {
+  test(`v2 public close preserves Apply database failure (${localDelay}ms local transport)`, async (t) => {
+    const c = cluster({ localDelay })
+    let db
+    let closeDatabase
+    try {
+      await c.open()
+      await c.settled()
+      const { gate, apply } = c.nodes.get('a')
+      db = apply.db
+      closeDatabase = db.close
+      const failure = Object.assign(new Error('injected database close failure'), {
+        code: 'ERR_SQLITE_ERROR', errcode: 5,
+      })
+      const stack = failure.stack
+      db.close = () => { throw failure }
+      let closed = false
+      gate.on('close', () => { closed = true })
+
+      await assert.rejects(gate.close(), {
+        message: 'DB2 close injected database close failure',
+        code: api.ErrorCodes.SQLITE_ERROR, sqlCode: 5, stack,
+      })
+      t.pass('Gate receives the correlated SQLite error, including its original stack')
+      t.notOk(closed, 'Gate does not emit a successful close')
+      t.equal(apply.db, db, 'Apply retains the database after close fails')
+      t.equal(db.prepare('SELECT 1 AS n').get().n, 1n, 'the failed close leaves the database open')
+
+      db.close = closeDatabase
+      await apply.close()
+      t.equal(apply.db, null, 'Apply can finish closing after the failure is removed')
+    } finally {
+      if (db) { db.close = closeDatabase }
+      await c.close()
+    }
+    t.end()
+  })
+}

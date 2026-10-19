@@ -54,7 +54,16 @@ execution at a time and returning its receipt, outcomes, and warnings.
 
 ### findings
 
-no findings
+- **Open: a synchronous failure sending ERR can hide the original fatal
+  error.** The catch sends its error reply before calling `_fatal(err)`.
+  If `localSend` throws, `_send` starts shutdown with `SEND_ERROR`, and the
+  subsequent `_fatal` call discards the original error because Apply is already
+  closing. A real cluster with a failing setup callback emitted only the
+  transport error locally and eventually `APPLY_TIMEOUT` at Gate; the setup
+  message and stack reached neither. An asynchronous send rejection preserves
+  the original. Establish and report the original fatal error before attempting
+  its fallible reply transmission. Source: `src/apply.v2.js`, `onReceive` catch
+  and `_send`.
 
 ## `_writeReceipt`
 
