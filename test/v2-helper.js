@@ -82,8 +82,8 @@ function cluster(options = {}) {
     })
     for (const [role, member] of Object.entries(members)) {
       member.on('error', (error) => errors.push({ id, role, error }))
+      member.on('warn', (error) => warnings.push({ id, role, error }))
       if (role === 'gate') {
-        member.on('warn', (error) => warnings.push({ id, error }))
         for (const type of ['cmd', 'sync', 'change']) {
           member.on(type, (event) => events.push({ id, type, event }))
         }

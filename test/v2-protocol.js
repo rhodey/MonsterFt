@@ -43,6 +43,9 @@ test('v2 impossible command agreement persists a nonfatal fence on every node', 
     }
     t.ok(c.errors.every(({ error }) => error.code === Err.REPAIR_QUORUM_IMPOSSIBLE),
       'repair errors surface without local divergence or fatal processing errors')
+    t.deepEqual(c.errors.map(({ id, role }) => `${id}/${role}`).sort(),
+      c.ids.flatMap((id) => roles.map((role) => `${id}/${role}`)).sort(),
+      'each Proc reports the nonfatal fence locally without Gate mirroring')
     t.equal(c.warnings.filter(({ error }) => error.code === Err.APPLY_ERROR).length, 0,
       'successful callbacks do not warn merely because their results disagree')
   } finally { await c.close() }
@@ -68,13 +71,17 @@ test('v2 dissenting leader reports its original apply warning then fences before
     dissenter = c.leader().id
     const original = c.nodes.get(dissenter)
     const events = []
-    original.gate.on('warn', (err) => events.push(['warn', err]))
-    original.gate.on('error', (err) => events.push(['error', err]))
+    original.apply.on('warn', (err) => events.push(['warn', err]))
+    original.procA.on('error', (err) => events.push(['error', err]))
     const caller = c.gates().find((gate) => gate.id !== dissenter)
     const rejection = await caller.append(buffer('first')).then(() => null, (err) => err)
     t.equal(rejection.code, Err.REPAIR_OUTSIDE_AGREEMENT,
       'forwarded caller receives the repair error before the leader shuts down')
     await until(() => !original.gate.isOpen, 'dissenting leader closes')
+    t.equal(c.errors.find(({ id, role }) => id === dissenter && role === 'gate')?.error.code,
+      Err.LOCAL_TIMEOUT, 'Gate detects stopped Procs through its own completion timeout')
+    t.equal(c.warnings.filter(({ role }) => role === 'gate').length, 0,
+      'Apply warning is not mirrored at Gate')
     await original.gate.close()
     const relevant = events.filter(([, err]) =>
       err.code === Err.APPLY_ERROR || err.code === Err.REPAIR_OUTSIDE_AGREEMENT)

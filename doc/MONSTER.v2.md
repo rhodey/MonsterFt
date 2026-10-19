@@ -99,7 +99,7 @@ no findings
 ## `applySync`
 
 Records a command’s agreement decision, clears its pending state, and reports
-any required repair.
+any required repair locally.
 
 ### findings
 

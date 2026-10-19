@@ -37,7 +37,7 @@ class Gate extends EventEmitter {
     this.id = id
     this.tickInterval = opts.tickInterval ?? 10
     this.localTimeout = opts.localTimeout ?? 5_000
-    this.applyTimeout = opts.applyTimeout ?? 30_000
+    this.applyTimeout = opts.applyTimeout ?? 5_000
     for (const name of ['tickInterval', 'localTimeout', 'applyTimeout']) {
       if (!Number.isSafeInteger(this[name]) || this[name] < 1) {
         throw illegal(`${name} must be a positive safe integer`)
@@ -138,12 +138,6 @@ class Gate extends EventEmitter {
         if (request.type === 'hello' && message.type === 'ack') { this._helloDone.add(from) }
         request.finish(message.type === 'err'
           ? wire.errorFromWire(message.error ?? message) : null, message)
-        if (from === 'apply' && !this._closing) {
-          for (const warning of message.warnings ?? []) {
-            this._emitSafe('warn', wire.errorFromWire(warning))
-            if (this._closing) { break }
-          }
-        }
       } else {
         if (this._closing) { return }
         if (!this.nodes.includes(from) || from === this.id) {
@@ -209,11 +203,8 @@ class Gate extends EventEmitter {
       if (this._closing) { throw this._shutdownError ?? nodeClosed() }
       this._opening = false
       this._scheduleTick()
-    })().catch(async (err) => {
+    })().catch((err) => {
       this._fatal(err)
-      // Opening fails only after owners have been asked to stop using their files.
-      // A close timeout still leaves replacement blocked on the owner's shutdown.
-      try { await this._closeWork } catch { }
       throw err
     })
     return this._openWork
@@ -356,9 +347,7 @@ class Gate extends EventEmitter {
   }
 
   _event(message) {
-    if (message.type === 'fatal') {
-      this._fatal(wire.errorFromWire(message.error ?? message))
-    } else if (message.type === 'change') {
+    if (message.type === 'change') {
       for (const key of ['state', 'term', 'seq', 'commitSeq', 'commitTerm', 'appliedSeq', 'followers']) {
         if (Object.hasOwn(message, key)) { this[key] = message[key] }
       }
@@ -367,12 +356,12 @@ class Gate extends EventEmitter {
         ...message, id: this.id, nodes: [...this.nodes], leader: this.leader,
         open: this.isOpen,
       })
-    } else if (message.type === 'warn' || message.type === 'error') {
-      this._emitSafe(message.type, wire.errorFromWire(message.error ?? message))
     } else if (message.type === 'commit') {
       this._emitSafe('commit', message.seq)
-    } else {
+    } else if (message.type === 'cmd' || message.type === 'sync') {
       this._emitSafe(message.type, message)
+    } else {
+      throw rpcIllegal('output has invalid event type')
     }
   }
 
@@ -485,9 +474,6 @@ class Gate extends EventEmitter {
     const err = Err.wrapError(error)
     this._stop(err)
     this._emitSafe('error', err)
-    this._closeComponents().catch((closeError) => {
-      this._emitSafe('error', closeError)
-    })
   }
 
   _closeComponents() {

@@ -33,7 +33,7 @@ no findings
 ## `onReceive`
 
 Accepts local component replies and cluster messages, resolving local requests
-or queuing cluster input and reporting Apply warnings.
+or queuing cluster input.
 
 ### findings
 
@@ -94,8 +94,8 @@ no findings
 
 ## `_event`
 
-Updates Gate's public node status and exposes agreed protocol events to
-listeners.
+Updates Gate's public node status and exposes supported agreed protocol events
+to listeners.
 
 ### findings
 
@@ -174,8 +174,8 @@ no findings
 
 ## `_fatal`
 
-Reports an unrecoverable error and begins shutting down Gate and its local
-components.
+Reports an unrecoverable error and stops Gate without requesting component
+shutdown.
 
 ### findings
 
@@ -192,7 +192,8 @@ no findings
 
 ## `close`
 
-Stops the node and waits for its local components to close.
+Stops Gate and waits for its local components to close, including after a
+fatal failure.
 
 ### findings
 

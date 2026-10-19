@@ -1,5 +1,5 @@
 import test from 'tape'
-import { cluster, until, pause } from './v2-helper.js'
+import { cluster, until, pause, roles } from './v2-helper.js'
 import * as Err from '../src/error.v2.js'
 
 for (const delay of [0, 2]) {
@@ -104,7 +104,8 @@ for (const delay of [0, 2]) {
       t.equal(leader.state, 'leader', 'the leader stays ready')
       const timeouts = c.warnings.filter(({ id, error }) =>
         id === leaderId && error.code === Err.PING_TIMEOUT)
-      t.equal(timeouts.length, 1, 'the lost heartbeat ACK produces one ping timeout')
+      t.deepEqual(timeouts.map(({ role }) => role).sort(), roles,
+        'each Proc reports the lost heartbeat ACK locally')
       t.equal(timeouts[0]?.error.message, 'ping timeout', 'the warning identifies the heartbeat')
       t.notOk(c.warnings.some(({ error }) => error.code === Err.APPEND_TIMEOUT),
         'heartbeat loss is not reported as an append timeout')

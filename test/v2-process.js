@@ -75,6 +75,7 @@ test('v2 runs nine independent protocol processes against shared files with dela
       node.gate.on('error', (error) => errors.push({ id, role: 'gate', error }))
       node.gate.on('warn', (error) => warnings.push({ id, error }))
       node.apply.on('error', (error) => errors.push({ id, role: 'apply', error }))
+      node.apply.on('warn', (error) => warnings.push({ id, role: 'apply', error }))
       for (const role of roles) {
         const child = fork(new URL('./fixtures/v2-proc-child.js', import.meta.url), [], {
           serialization: 'advanced', stdio: ['ignore', 'ignore', 'pipe', 'ipc'],
@@ -127,6 +128,8 @@ test('v2 runs nine independent protocol processes against shared files with dela
     }), 'completed SYNC across separate processes')
     await until(() => warnings.filter(({ error }) => error.code === Err.APPLY_ERROR).length === 3,
       'one local warning from each Apply')
+    t.ok(warnings.filter(({ error }) => error.code === Err.APPLY_ERROR)
+      .every(({ role }) => role === 'apply'), 'Gate does not mirror Apply warnings')
     await bounded(Promise.all([...members.values()].map((node) => node.gate.close())), 'component shutdown')
     for (const { child } of children) { child.send({ type: 'exit' }) }
     const exits = await bounded(Promise.all(children.map((record) => record.exited)), 'OS process exit')

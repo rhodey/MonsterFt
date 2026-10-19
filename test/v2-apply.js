@@ -122,8 +122,10 @@ test('v2 Apply retains failed-item diagnostics, rolls back items, and preserves 
     await f.start()
     await f.execute(0n, null)
     const listenerError = new Error('listener throw')
+    const warnings = []
     f.component.prependListener('error', () => { throw new Error('error listener throw') })
     f.component.on('warn', (warning) => {
+      warnings.push({ message: warning.message, code: warning.code, stack: warning.stack })
       warning.message = 'listener mutation'
       warning.code = 999
       warning.stack = 'changed stack'
@@ -133,15 +135,16 @@ test('v2 Apply retains failed-item diagnostics, rolls back items, and preserves 
     f.component.on('warn', () => { laterWarnings++ })
     const result = await f.execute(1n, [buf('ok'), buf('reject'), buf('sqlite'), buf('encoding')])
     t.equal(result.type, 'ack', 'ordinary failures are agreed outcomes')
-    t.equal(result.warnings.length, 3)
+    t.notOk(Object.hasOwn(result, 'warnings'), 'execution ACK carries no diagnostics')
+    t.equal(warnings.length, 3)
     t.equal(laterWarnings, 3, 'throwing listeners cannot hide warnings from later listeners')
     t.equal(f.diagnostics.filter(({ type, err }) =>
       type === 'error' && err === listenerError).length, 3,
     'later error listeners receive the original exception even if an earlier one throws')
-    t.ok(result.warnings.every((warning) => warning.code === Err.APPLY_ERROR))
+    t.ok(warnings.every((warning) => warning.code === Err.APPLY_ERROR))
     t.deepEqual(result.outcomes[1], [1, 'rejected item', 123, 456, original.stack])
-    t.equal(result.warnings[0].stack, original.stack)
-    t.equal(result.warnings[0].message, 'rejected item', 'listener mutation cannot alter forwarded diagnostic')
+    t.equal(warnings[0].stack, original.stack)
+    t.equal(warnings[0].message, 'rejected item')
     t.equal(result.outcomes[2][2], Err.SQLITE_ERROR)
     t.equal(result.outcomes[2][3], 1555)
     t.equal(result.outcomes[3][2], Err.APPLY_ERROR)
@@ -189,18 +192,19 @@ test('v2 Apply fatal transaction loss and rollback failures preserve the origina
       }
       const reply = await f.execute(1n, [buf('first'), buf('second')])
       await f.component.close()
-      t.equal(reply.type, 'err', `${mode} reports an RPC error`)
-      t.equal(reply.code, Err.APPLY_ERROR)
-      t.equal(reply.warnings.length, 1)
+      t.equal(reply, undefined, `${mode} sends no execution reply`)
+      const fatal = f.diagnostics.filter(({ type }) => type === 'error').at(-1).err
+      t.equal(fatal.code, Err.APPLY_ERROR)
+      t.equal(f.diagnostics.filter(({ type }) => type === 'warn').length, 1)
       const events = f.diagnostics.map((event) => event.type)
       t.equal(events[0], 'warn', 'item warning precedes fatal reporting')
-      t.ok(events.includes('fatal'))
+      t.notOk(events.includes('fatal'), 'error is the only public fatal diagnostic')
       if (mode === 'rollback failure') {
         t.ok(f.diagnostics.some(({ err }) => err.stack === original.stack),
           'rollback failure does not hide the original trace')
-        t.match(reply.message, /rollback failed/)
+        t.match(fatal.message, /rollback failed/)
       } else {
-        t.equal(reply.sqlCode, 1555)
+        t.equal(fatal.sqlCode, 1555)
       }
       const db = new DatabaseSync(`${f.base}2`, { readOnly: true, readBigInts: true })
       try {
@@ -313,12 +317,40 @@ test('v2 Apply setup errors stay fatal without per-item warnings and cannot comm
       await f.start()
       const reply = await f.execute(0n, null)
       await f.component.close()
-      t.equal(reply.type, 'err')
-      t.equal(reply.code, Err.APPLY_ERROR)
-      t.match(reply.message, mode === 'throw' ? /setup error/ : /DB2 seq0 transaction ended/)
+      t.equal(reply, undefined, 'fatal setup failure sends no reply')
+      const diagnostic = f.diagnostics.find(({ type }) => type === 'error').err
+      t.equal(diagnostic.code, Err.APPLY_ERROR)
+      t.match(diagnostic.message, mode === 'throw' ? /setup error/ : /DB2 seq0 transaction ended/)
       t.equal(f.diagnostics.filter((event) => event.type === 'warn').length, 0)
+      t.equal(f.diagnostics.filter((event) => event.type === 'fatal').length, 0)
       const db = new DatabaseSync(`${f.base}2`, { readOnly: true, readBigInts: true })
       try { t.equal(readApply(db).seq, -1n) } finally { db.close() }
+    } finally { await f.close() }
+  }
+  t.end()
+})
+
+test('v2 Apply reports setup failures locally without attempting error transmission', async (t) => {
+  for (const asynchronous of [false, true]) {
+    const original = new Error('original setup failure')
+    const f = fixture(() => {
+      if (asynchronous) { return Promise.reject(original) }
+      throw original
+    })
+    try {
+      await f.start()
+      let sends = 0
+      f.component._localSend = () => { sends++; throw new Error('transport is broken') }
+      t.equal(await f.execute(0n, null), undefined)
+      await f.component.close()
+      t.equal(sends, 0, 'fatal reporting does not depend on local transport')
+      t.equal(f.diagnostics.length, 1, 'the original error is reported once')
+      const { type, err } = f.diagnostics[0]
+      t.equal(type, 'error')
+      t.equal(err.message, '(apply) original setup failure')
+      t.equal(err.code, Err.APPLY_ERROR)
+      t.equal(err.stack, original.stack, 'the original trace survives fatal reporting')
+      t.equal(f.component.db, null, 'Apply closes its own database')
     } finally { await f.close() }
   }
   t.end()
@@ -336,7 +368,8 @@ test('v2 Apply rejects duplicate execution and hello after startup', async (t) =
     await f.request({ type: 'ready' })
     await f.execute(0n, null)
     const reply = await f.execute(0n, null)
-    t.equal(reply.code, Err.MONSTER_ILLEGAL)
+    t.equal(reply, undefined, 'invalid execution sends no ERR')
+    t.equal(f.diagnostics.find(({ type }) => type === 'error').err.code, Err.MONSTER_ILLEGAL)
     t.equal(calls, 1, 'completed setup is never reapplied')
   } finally { await f.close() }
   const second = fixture(() => {})
@@ -344,7 +377,8 @@ test('v2 Apply rejects duplicate execution and hello after startup', async (t) =
     await second.start()
     t.equal(await second.request({ type: 'hello' }), undefined, 'post-startup hello has no ACK')
     t.notOk(second.component.isOpen)
-    t.equal(second.diagnostics.filter((event) => event.type === 'fatal').length, 1)
+    t.equal(second.diagnostics.filter((event) => event.type === 'error').length, 1)
+    t.equal(second.diagnostics.filter((event) => event.type === 'fatal').length, 0)
   } finally { await second.close() }
   t.end()
 })
@@ -371,12 +405,15 @@ test('v2 Apply preserves the correct receipt on either side of COMMIT failure', 
       }
       const reply = await f.execute(1n, [buf('work')])
       await f.component.close()
-      t.equal(reply.type, 'err')
+      t.equal(reply, undefined, 'failed commit sends no execution reply')
+      t.match(f.diagnostics.find(({ type }) => type === 'error').err.message, /injected commit failure/)
       const closeReply = await f.request({ type: 'close' })
       t.equal(closeReply.type, 'ack', 'a fatally closed Apply still confirms completed teardown')
       const replies = []
+      const errors = []
       reopened = new MonsterApply('node', (to, frame) => replies.push(decodeFrame(frame)),
         f.base, { apply: () => { executions++ } })
+      reopened.on('error', (err) => errors.push(err))
       const receive = async (msg) => {
         await reopened.onReceive('gate', encodeFrame(msg))
         return replies.find((reply) => reply.cid === msg.cid)
@@ -393,7 +430,8 @@ test('v2 Apply preserves the correct receipt on either side of COMMIT failure', 
           type: 'execute', cid: 'duplicate', tickCount: 1n, term: 3n, seq: 1n,
           entryHash: digestEntry(3n, buf('1')), items: [buf('work')], matchIndex: [0n],
         })
-        t.equal(duplicate.code, Err.MONSTER_ILLEGAL)
+        t.equal(duplicate, undefined, 'duplicate execution cannot produce a reply')
+        t.equal(errors[0].code, Err.MONSTER_ILLEGAL)
         t.equal(executions, 1, 'committed execution cannot be repeated after a lost ACK')
       }
     } finally {
@@ -412,12 +450,13 @@ test('v2 Apply validates execution and frame checksums before invoking user code
       await f.start()
       if (kind === 'invalid items') {
         const reply = await f.execute(0n, [buf('not setup')])
-        t.equal(reply.code, Err.RPC_ILLEGAL)
+        t.equal(reply, undefined)
+        t.equal(f.diagnostics.find(({ type }) => type === 'error').err.code, Err.RPC_ILLEGAL)
       } else {
         const frame = encodeFrame({ type: 'execute', cid: 'corrupt' })
         frame[0] ^= 1
         await f.component.onReceive('gate', frame)
-        t.equal(f.diagnostics.find(({ type }) => type === 'fatal').err.code, Err.FRAME_CORRUPT)
+        t.equal(f.diagnostics.find(({ type }) => type === 'error').err.code, Err.FRAME_CORRUPT)
       }
       await f.component.close()
       t.equal(calls, 0)

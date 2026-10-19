@@ -74,6 +74,7 @@ test('v2 cluster agreed apply failures warn locally and preserve command stacks'
     for (const id of c.ids) {
       const warnings = c.warnings.filter((item) => item.id === id && item.error.code === Err.APPLY_ERROR)
       t.equal(warnings.length, 2)
+      t.ok(warnings.every((item) => item.role === 'apply'), 'only Apply emits its item warnings')
       t.ok(warnings.every((item) => item.error.stack === `trace from ${id}`))
       t.equal(c.nodes.get(id).apply.db.prepare('SELECT count(*) AS n FROM items').get().n, 1n)
     }
@@ -190,8 +191,8 @@ test('v2 cluster dissenting follower warns before its repair fence closes it', a
     await c.open()
     dissenter = c.ids.find((id) => id !== c.leader().id)
     const events = []
-    c.nodes.get(dissenter).gate.on('warn', (err) => events.push(['warn', err]))
-    c.nodes.get(dissenter).gate.on('error', (err) => events.push(['error', err]))
+    c.nodes.get(dissenter).apply.on('warn', (err) => events.push(['warn', err]))
+    c.nodes.get(dissenter).procA.on('error', (err) => events.push(['error', err]))
     t.equal((await c.leader().append(Buffer.from('item')))[1], 'accepted')
     await until(() => !c.nodes.get(dissenter).gate.isOpen, 'dissenting follower closes')
     const relevant = events.filter((item) => item[1].code === Err.APPLY_ERROR ||

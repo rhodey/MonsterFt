@@ -23,7 +23,6 @@ function fixture() {
     message = { cid: `local-${++cid}`, ...message }
     proc.onReceive('gate', wire.encodeFrame(message))
     const reply = replies.find((value) => value.cid === message.cid)
-    if (!reply) { throw new Error(`missing local reply ${message.type}`) }
     return reply
   }
   const seed = Buffer.from('10111213202122233031323340414243', 'hex')
@@ -151,8 +150,8 @@ test('v2 Raft cannot replace committed history even with identical payload bytes
   try {
     const before = f.state()
     const reply = f.rpc(append({ term: 2n, data: [{ term: 2n, entry: Buffer.alloc(0) }] }))
-    t.equal(reply.type, 'err')
-    t.equal(reply.code, Err.RAFT_ILLEGAL)
+    t.equal(reply, undefined, 'fatal replication failure sends no local reply')
+    t.equal(f.proc._fatalError.code, Err.RAFT_ILLEGAL)
     t.notOk(f.proc.isOpen)
     t.ok(stateDigest(f.state()).equals(stateDigest(before)),
       'fatal input rolls back its election change and leaves committed history intact')

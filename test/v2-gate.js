@@ -52,6 +52,13 @@ const client = (input, values = input.items.map((buf) => [0, buf.toString()])) =
     to: 'client', message: { type: 'ack', cid: input.requestId, cmdSeq: 3n, results: values },
   })
 
+test('v2 Gate defaults Apply timeout to five seconds and permits an override', (t) => {
+  const make = (opts) => new Gate('a', ['a', 'b', 'c'], () => {}, () => {}, opts)
+  t.equal(make().applyTimeout, 5_000)
+  t.equal(make({ applyTimeout: 12_000 }).applyTimeout, 12_000)
+  t.end()
+})
+
 test('v2 Gate hello retries use fresh CIDs and one seed before phased startup', async (t) => {
   let release
   let old
@@ -312,8 +319,7 @@ test('v2 Gate cancels Apply timeout when reply arrives before queued delivery', 
   const pending = h.gate.append(Buffer.from('work'))
   await delay(30)
   t.equal(h.errors.length, 0, 'reply arrival cancels timeout despite delayed delivery')
-  t.equal(h.warnings.length, 1, 'public warning is emitted once')
-  t.equal(h.warnings[0].stack, 'user trace')
+  t.equal(h.warnings.length, 0, 'Gate does not emit diagnostics bundled in an Apply reply')
   t.equal(h.requests.filter((r) => r.message.kind === 'apply').length, 0)
   releaseC()
   t.deepEqual(await pending, [3n, 'done'])
@@ -323,6 +329,10 @@ test('v2 Gate cancels Apply timeout when reply arrives before queued delivery', 
 
 test('v2 Gate rejects corrupt frames and closes pending public work', async (t) => {
   const h = harness()
+  let closed = false
+  let fatals = 0
+  h.gate.on('close', () => { closed = true })
+  h.gate.on('fatal', () => { fatals++ })
   await h.gate.open()
   const pending = h.gate.append(Buffer.from('pending')).catch((err) => err)
   const frame = wire.encodeFrame({ to: 'a', message: { type: 'append' } })
@@ -330,7 +340,13 @@ test('v2 Gate rejects corrupt frames and closes pending public work', async (t) 
   h.gate.onReceive('b', frame)
   t.equal((await pending).code, Err.FRAME_CORRUPT)
   t.equal(h.errors[0].code, Err.FRAME_CORRUPT)
+  t.notOk(h.gate.isOpen, 'fatal failure stops Gate')
+  t.notOk(closed, 'stopping Gate does not claim component shutdown')
+  t.equal(fatals, 0, 'fatal handling is internal')
+  t.notOk(h.requests.some((r) => r.message.type === 'close'), 'fatal path sends no close requests')
   await h.gate.close()
+  t.ok(closed, 'explicit close waits for owner completion')
+  t.equal(h.requests.filter((r) => r.message.type === 'close').length, 4)
   t.end()
 })
 
@@ -363,7 +379,11 @@ test('v2 Gate rejects differing startup selections before adoption', async (t) =
   })
   await assert.rejects(h.gate.open(), { code: Err.LOCAL_DIVERGENCE })
   t.notOk(h.requests.some((r) => r.message.type === 'adopt'), 'no DB is changed by adoption')
-  t.equal(h.requests.filter((r) => r.message.type === 'close').length, 4, 'all owners close before open rejects')
+  t.equal(h.requests.filter((r) => r.message.type === 'close').length, 0,
+    'failed open leaves owner cleanup to the caller')
+  await h.gate.close()
+  t.equal(h.requests.filter((r) => r.message.type === 'close').length, 4,
+    'explicit close still coordinates all owners after failed open')
   t.end()
 })
 
@@ -415,28 +435,25 @@ test('v2 Gate drain closes owners after agreed drain result and rejects new comm
 })
 
 test('v2 Gate warning listener may throw or close without dispatching later Apply work', async (t) => {
-  let requestId
   const h = harness({
     outputs(input) {
       if (input.kind !== 'append') { return [] }
-      requestId = input.requestId
-      return [wire.encodePayload({ to: 'apply', message: { type: 'execute', cid: 'warn-close' } })]
+      return [
+        wire.encodePayload({ to: 'b', message: { type: 'append' } }),
+        wire.encodePayload({ to: 'apply', message: { type: 'execute', cid: 'warn-close' } }),
+      ]
     },
-    local({ to, message, reply }) {
-      if (message.type !== 'execute') { return false }
-      reply(to, { type: 'ack', cid: message.cid, warnings: [{ message: 'apply warning', code: Err.APPLY_ERROR }] })
-      return true
-    },
+    send() { throw new Error('transport failed') },
   })
   h.gate.on('warn', () => { throw new Error('listener failed') })
   h.gate.on('warn', () => { h.gate.close().catch(() => {}) })
   await h.gate.open()
   await assert.rejects(h.gate.append(Buffer.from('work')), { code: Err.NODE_NOT_OPEN })
   await h.gate.close()
-  t.equal(typeof requestId, 'string')
   t.equal(h.warnings.length, 1)
+  t.equal(h.warnings[0].code, Err.SEND_ERROR, 'Gate reports its own transport warning')
   t.equal(h.errors[0].message, 'listener failed')
-  t.equal(h.requests.filter((r) => r.message.kind === 'apply').length, 0)
+  t.equal(h.requests.filter((r) => r.message.type === 'execute').length, 0)
   t.end()
 })
 
@@ -444,8 +461,9 @@ test('v2 Gate listener failures reach later error listeners even when an earlier
   for (const type of ['change', 'warn']) {
     const h = harness({
       outputs: (input) => input.kind === 'append' ? [wire.encodePayload({
-        to: 'event', message: { type, error: { message: 'transport warning', code: Err.SEND_ERROR } },
+        to: type === 'warn' ? 'b' : 'event', message: { type: type === 'warn' ? 'append' : 'change' },
       }), client(input)] : [],
+      send() { throw new Error('transport warning') },
     })
     const original = new Error(`${type} listener failed`)
     let delivered = 0
@@ -465,27 +483,51 @@ test('v2 Gate listener failures reach later error listeners even when an earlier
   t.end()
 })
 
-test('v2 Gate reports an agreed repair fence as fatal and ordinary errors as nonfatal', async (t) => {
-  let fatal = false
+test('v2 Gate rejects diagnostic and unknown event outputs instead of forwarding them', async (t) => {
+  for (const type of ['warn', 'error', 'fatal', 'unknown']) {
+    const h = harness({
+      outputs: (input) => input.kind === 'append' ? [wire.encodePayload({
+        to: 'event', message: { type, error: { message: 'Proc diagnostic', code: Err.REPAIR_OUTSIDE_AGREEMENT } },
+      }), client(input)] : [],
+    })
+    let forwarded = 0
+    h.gate.on('fatal', () => { forwarded++ })
+    h.gate.on('unknown', () => { forwarded++ })
+    try {
+      await h.gate.open()
+      await assert.rejects(h.gate.append(Buffer.from(type)), { code: Err.RPC_ILLEGAL })
+      t.equal(h.errors.length, 1, `${type}: Gate reports only its invalid-output error`)
+      t.equal(h.errors[0].code, Err.RPC_ILLEGAL)
+      t.equal(h.warnings.length, 0)
+      t.equal(forwarded, 0, 'no generic event forwarding')
+    } finally { await h.gate.close() }
+  }
+  t.end()
+})
+
+test('v2 Gate preserves supported protocol events', async (t) => {
+  const messages = [
+    { type: 'change', state: 'leader', leaderId: 'a', term: 1n },
+    { type: 'commit', seq: 3n },
+    { type: 'cmd', cmdSeq: 3n, cmdCount: 1 },
+    { type: 'sync', cmdSeq: 3n, syncSeq: 4n, quorum: true, agree: ['a', 'b'], disagree: [] },
+  ]
   const h = harness({
-    outputs(input) {
-      if (input.kind !== 'append') { return [] }
-      return [wire.encodePayload({ to: 'event', message: {
-        type: fatal ? 'fatal' : 'error', error: {
-          message: 'repair required', code: fatal ? Err.REPAIR_OUTSIDE_AGREEMENT : Err.REPAIR_QUORUM_IMPOSSIBLE,
-        },
-      } }), client(input)]
-    },
+    outputs: (input) => input.kind === 'append'
+      ? [...messages.map((message) => wire.encodePayload({ to: 'event', message })), client(input)] : [],
   })
-  await h.gate.open()
-  t.deepEqual(await h.gate.append(Buffer.from('first')), [3n, 'first'])
-  t.ok(h.gate.isOpen, 'ordinary repair error does not close')
-  t.equal(h.errors[0].code, Err.REPAIR_QUORUM_IMPOSSIBLE)
-  fatal = true
-  await assert.rejects(h.gate.append(Buffer.from('second')), { code: Err.REPAIR_OUTSIDE_AGREEMENT })
-  await h.gate.close()
-  t.equal(h.errors[1].code, Err.REPAIR_OUTSIDE_AGREEMENT)
-  t.notOk(h.gate.isOpen)
+  const events = []
+  for (const { type } of messages) { h.gate.on(type, (value) => events.push([type, value])) }
+  try {
+    await h.gate.open()
+    t.deepEqual(await h.gate.append(Buffer.from('work')), [3n, 'work'])
+    t.deepEqual(events.map(([type]) => type), messages.map(({ type }) => type))
+    t.equal(events[0][1].leader, 'a')
+    t.equal(events[1][1], 3n)
+    t.deepEqual(events[2][1], messages[2])
+    t.deepEqual(events[3][1], messages[3])
+    t.equal(h.errors.length, 0)
+  } finally { await h.gate.close() }
   t.end()
 })
 

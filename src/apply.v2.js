@@ -63,7 +63,6 @@ class MonsterApply extends EventEmitter {
     this._fatalError = err
     const closing = this.close()
     this._emitSafe('error', err)
-    this._emitSafe('fatal', err)
     closing.catch(noop)
   }
 
@@ -104,10 +103,8 @@ class MonsterApply extends EventEmitter {
 
   async onReceive(from, buffer) {
     if (from !== 'gate') { return }
-    let msg = null
-    let warnings = []
     try {
-      msg = decodeFrame(buffer)
+      let msg = decodeFrame(buffer)
       if (msg?.to === 'apply') { msg = msg.message }
       if (msg?.type === 'close' && isCid(msg.cid)) {
         try {
@@ -159,24 +156,19 @@ class MonsterApply extends EventEmitter {
       if (msg.seq <= previous.seq || (previous.seq === -1n && msg.seq !== 0n)) {
         throw new Err.ErrorWithCode('Apply sequence is not advancing', Err.MONSTER_ILLEGAL)
       }
-      const work = Promise.resolve().then(() => this._execute(msg, warnings))
+      const work = Promise.resolve().then(() => this._execute(msg))
         .catch((err) => { throw Err.wrapError(err, Err.APPLY_ERROR, '(apply) ') })
       this._work = work
       try {
         const result = await work
         this._throwIfClosing()
         this._work = null
-        this._ack(msg, { ...result, warnings })
+        this._ack(msg, result)
       } finally {
         if (this._work === work) { this._work = null }
       }
     } catch (err) {
       if (this._closing) { return }
-      err = Err.wrapError(err)
-      // A new hello must not be mistaken for a successful restart handshake.
-      if (msg?.type !== 'hello' && isCid(msg?.cid)) {
-        this._send({ ...errorToWire(err), type: 'err', cid: msg.cid, warnings })
-      }
       this._fatal(err)
     }
   }
@@ -195,7 +187,7 @@ class MonsterApply extends EventEmitter {
     }
   }
 
-  async _execute(msg, warnings) {
+  async _execute(msg) {
     this._throwIfClosing()
     const db = this.db
     const receipt = {
@@ -232,7 +224,6 @@ class MonsterApply extends EventEmitter {
             const warning = Err.wrapError({
               message: err.message, sqlCode: err.sqlCode, stack: err.stack,
             }, Err.APPLY_ERROR)
-            warnings.push(errorToWire(warning))
             this._emitSafe('warn', warning)
             this._throwIfClosing()
             if (!db.isTransaction) { throw err }

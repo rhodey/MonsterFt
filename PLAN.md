@@ -86,7 +86,7 @@ guarding its local requests. These watchdogs run independently of the
 ordered-input barrier, so they can expire while Gate waits for completion.
 The configurable `localTimeout` defaults to 5_000 ms for ordinary local
 RPCs, including hello, startup phases, and Proc completion. Gate also owns
-`applyTimeout`, defaulting to 30_000 ms, for an Apply execution request,
+`applyTimeout`, defaulting to 5_000 ms, for an Apply execution request,
 not the entire public append operation. Both use the same timeout machinery.
 
 Each Proc has one native `setTimeout` watchdog for loss of contact with
@@ -125,6 +125,31 @@ Match replies to the expected sender and outstanding request; an unmatched
 reply cannot complete a request. Replies need no ACK of their own. A local
 completion ACK covers that processing step, not necessarily the whole
 public append operation. Ordinary apply rejections remain command outcomes.
+
+## Diagnostics and failure handling
+
+Apply and each Proc emit their own `warn` and `error` events; Gate reports
+only failures it detects itself. Attach listeners to each component.
+Diagnostics are not forwarded through Gate, and there is no public `fatal`
+event. Failed command items warn on Apply and remain ordinary rejected
+outcomes in its execution ACK, including their original error stacks.
+
+Unexpected Apply or Proc failures report locally and stop that component
+without sending a fatal ERR reply. Gate learns of missing progress through
+its existing timeouts. Raft replies and command results retain their ACK/ERR
+behavior, and `change`, `commit`, `cmd`, and `sync` remain agreed Gate events.
+An intentional repair fence commits before the Proc reports the error and
+stops; it then sends its captured final completion and buffered protocol
+results. Quorum-impossible repair reporting remains nonfatal and local.
+
+Gate's fatal path stops scheduling, rejects outstanding waits and callers,
+and emits its own error without requesting component shutdown. Failed
+`open()` likewise rejects without coordinating cleanup. Explicit `close()`
+and successful drain still coordinate shutdown. Explicit close remains usable
+after Gate fails; close requests retain ACK/ERR replies. Gate emits `close`
+only after every required close succeeds. The host must stop outstanding
+owners before replacement or reconciliation; a Gate failure alone does not
+establish that Apply or the Procs have stopped.
 
 ## Shared database access
 
@@ -186,7 +211,8 @@ local RPC timeout path. Hello catches timeout rejections and tries again
 for components that have not ACKed. A late ACK for an expired attempt
 does not complete a newer request. A component that is not yet online,
 or too slow to reply within the timeout, keeps Gate waiting and retrying.
-An explicit startup error still fails startup.
+Errors inside a component are reported locally; after hello, Gate detects
+its missing reply through the ordinary timeout.
 
 A hello ACK means the component is ready to participate in coordinated
 startup. Components that ACK early wait for the others. Proc watchdogs
@@ -264,7 +290,7 @@ is separate from majority reconciliation among Procs within one node.
 
 ## Startup reconciliation
 
-Gate coordinates phases using local RPCs and ACK/ERR replies. A phase
+Gate coordinates phases using local RPCs and completion ACKs. A phase
 ACK confirms completion of that phase; missing required replies cause a
 fatal timeout. These phases begin after the retrying hello handshake has
 completed. Database state and repair rows are read directly through

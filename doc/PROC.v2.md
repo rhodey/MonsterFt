@@ -24,8 +24,7 @@ no findings
 
 ## `_fatal`
 
-Closes the Proc after an unrecoverable failure and reports its error and fatal
-events.
+Closes the Proc after an unrecoverable failure and reports its error locally.
 
 ### findings
 
@@ -68,7 +67,8 @@ no findings
 ## `_input`
 
 Processes one ordered input and its runnable protocol work atomically in DB1,
-then publishes its completion and local diagnostics.
+producing a completion and local diagnostics. Intentional repair fences stop
+the Proc before its final completion is sent.
 
 ### findings
 

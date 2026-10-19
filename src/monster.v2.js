@@ -170,15 +170,13 @@ class MonsterEngine extends RaftEngine {
     this.repairState = repair
     this.reports.clear()
     this.event('sync', { cmdSeq: entry.cmdSeq, syncSeq: seq, quorum: entry.quorum, agree, disagree })
-    if (repair === 1) { this.event('error', { error: errorToWire(this.repairError(), false) }) }
+    if (repair === 1) { this.diagnostic?.('error', this.repairError()) }
     if (repair === 2) { this.fatal(this.repairError()) }
   }
 
   fatal(err) {
     if (this.fatalError) { return }
     this.fatalError = err
-    // The wrapper commits the intended repair fence before publishing this event.
-    this.event('fatal', { error: errorToWire(err, false) })
     this.executor.clear()
   }
 

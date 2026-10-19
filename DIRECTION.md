@@ -74,8 +74,11 @@ message, requests carry a `cid`, and replies use `type: 'ack'` or
 `type: 'err'` with the request's `cid`. Match replies to the expected
 sender and outstanding request. Use sufficiently random CIDs to make
 reuse across restarts negligible; an unmatched reply cannot complete a
-request. ERR replies follow the operation's error handling; ordinary
-apply rejections remain command outcomes. Replies need no ACK of their own.
+request. Raft replies, command results, and explicit close failures retain
+their ACK/ERR behavior. Ordinary apply rejections remain command outcomes
+inside a completed execution ACK. Unexpected component failures report
+locally and stop without sending a fatal ERR; missing progress is detected
+through timeouts. Replies need no ACK of their own.
 
 Where local RPCs carry cluster messages, keep local request correlation
 separate from the enclosed message's type and cid. Local envelope fields
@@ -100,7 +103,7 @@ fresh cid and the ordinary local RPC timeout path. Hello catches timeout
 rejections and retries only components that have not ACKed. ACKs for
 expired attempts cannot complete newer requests. A peer that is not yet
 online, or too slow to reply within the timeout, keeps Gate waiting and
-retrying. Explicit startup errors still fail startup. A hello ACK means
+retrying. A hello ACK means
 ready to participate in coordinated startup; it does not mean
 reconciliation has already completed.
 
@@ -137,7 +140,7 @@ that a public append awaiting external responses has finished.
 
 Gate owns native timers for scheduling clock inputs and guarding local
 requests. Its configurable `localTimeout` defaults to `5_000` ms for hello,
-startup phases, and Proc completion; `applyTimeout` defaults to `30_000`
+startup phases, and Proc completion; `applyTimeout` defaults to `5_000`
 ms for an Apply execution request, not the entire public append. These
 watchdogs run independently of the input barrier and can expire while
 Gate waits for completion. Hello retains its timeout-and-retry exception.
@@ -162,6 +165,20 @@ processes, waiting for an old OS process to exit before replacing it.
 The library does not require a particular supervisor or spawn its own
 processes. All components may run in a single Node.js process without a
 supervisor, including for examples and tests.
+
+Each component owns its diagnostics: attach `warn` and `error` listeners
+to Apply, each Proc, and Gate. Apply warnings and Proc warnings or repair
+errors are not forwarded through Gate. There is no public `fatal` event.
+Command results and the agreed `change`, `commit`, `cmd`, and `sync` events
+remain available through Gate.
+
+Gate's fatal path stops input scheduling, cancels waits, rejects callers,
+and emits its own error; it sends no close requests. Failed `open()` rejects
+without waiting for cleanup. The host must request shutdown explicitly or
+stop the processes. Explicit `Gate.close()` remains available after failure,
+and successful drain still coordinates close. Close ACK/ERR replies report
+that operation's result; Gate emits `close` only after coordinated shutdown
+succeeds. A stopped Gate alone does not establish that other owners stopped.
 
 The shutdown requirement is the same in either arrangement: old instances
 must stop issuing messages and changing their databases before replacement
@@ -268,15 +285,18 @@ through the full-state API when leaving hello. The Procs generate matching
 choices and CIDs without reusing the previous run's sequence.
 
 On an unexpected execution or SQL failure, discard buffered success
-outputs, report the original error, and stop the Proc and close its database.
+outputs, report the original error locally, and stop the Proc and close its
+database without a fatal ERR reply.
 Connection teardown or crash recovery discards uncommitted work; these
 fatal paths need no separate `ROLLBACK`. Report cleanup errors too, and
 never continue using the failed connection or report successful completion.
 
-For a repair fence that requires shutdown, commit the fence before reporting
-its error and closing. Both fatal paths report errors and stop; the fence
-is an intended durable change. Keep explicit rollback where processing
-continues, such as a failed CMD item's savepoint.
+For a repair fence that requires shutdown, commit the fence, report its error
+locally, and close before sending the captured final completion and buffered
+protocol results. A send failure must not hide the original repair error.
+The fence is an intended durable change; quorum-impossible repair reporting
+remains nonfatal and local. Keep explicit rollback where processing continues,
+such as a failed CMD item's savepoint.
 
 ## Gate waits for all three
 
@@ -487,7 +507,8 @@ pages to arrive over RPC.
   or ACKs. Gate must keep retrying only unacknowledged components, while
   early components wait without a runtime timeout. Repeated hellos during
   that phase must ACK again, and all four must ACK before reconciliation
-  begins. Explicit startup errors still fail.
+  begins. After hello, component failures report locally and Gate detects
+  missing phase replies through timeout.
 - Delay a hello ACK past its timeout and verify the retry has a fresh cid
   and the same seed. Verify each Proc initializes its RNG once when
   leaving hello.
@@ -503,9 +524,16 @@ pages to arrive over RPC.
   the single-process case.
 - Verify no output or successful completion escapes a failed DB1 commit,
   and no protocol write runs after completion outside another input.
-- Verify intentional repair fences commit before error reporting and
-  shutdown. Unexpected failures must also report and stop; close/reopen
-  or crash recovery must discard uncommitted work without explicit rollback.
+- Verify intentional repair fences commit before local reporting and shutdown,
+  followed by their final completion and protocol results. A failed final send
+  must not hide the repair error. Unexpected failures report locally and stop
+  without a fatal ERR; close/reopen or crash recovery discards uncommitted work.
+- Verify agreed CMD rejections retain results and stacks while warnings stay
+  on Apply. Gate must not emit Apply/Proc diagnostics, including unsupported
+  event messages. Listener exceptions must not hide errors from later listeners.
+- Verify Gate failure and failed startup send no automatic close requests.
+  Explicit close after failure must still wait for owners and preserve close
+  errors. Stop all old owners before reopening or reconciling their files.
 - Crash after DB2 commits with zero, one, two, or three receipt imports;
   completed Apply work must never execute again. Include slow Apply with
   intervening elections and no-ops.

@@ -68,22 +68,29 @@ function createNode(id) {
   components.set('apply', new MonsterApply(
     id, sendFrom('apply'), databasePath, { apply },
   ))
+  for (const [role, component] of components) {
+    component.on('warn', (err) => console.warn(`${id}/${role}`, err))
+    component.on('error', (err) => console.error(`${id}/${role}`, err))
+  }
 
   nodesById.set(id, gate)
   return gate
 }
 
 const nodes = nodeIds.map(createNode)
-await Promise.all(nodes.map((node) => node.open()))
-await Promise.all(nodes.map((node) => node.awaitLeader()))
+try {
+  await Promise.all(nodes.map((node) => node.open()))
+  await Promise.all(nodes.map((node) => node.awaitLeader()))
 
-const command = Buffer.from(JSON.stringify({
-  type: 'increment',
-  name: 'count',
-}))
-const [cmdSeq, value] = await nodes[0].append(command)
-console.log('count =', value)
-await Promise.all(nodes.map((node) => node.close()))
+  const command = Buffer.from(JSON.stringify({
+    type: 'increment',
+    name: 'count',
+  }))
+  const [cmdSeq, value] = await nodes[0].append(command)
+  console.log('count =', value)
+} finally {
+  await Promise.all(nodes.map((node) => node.close()))
+}
 ```
 
 `send(to, frame)` carries Buffer frames and may be synchronous or async. A real
@@ -134,7 +141,10 @@ instead.
 
 Useful public state includes `.id`, `.state`, and `.isOpen`.
 
-Public events include `change`, `warn`, and `error`.
+Gate exposes agreed protocol events including `change`, `commit`, `cmd`, and
+`sync`. Each component emits its own `warn` and `error` diagnostics; listen on
+Apply and every Proc as well as Gate. Gate does not collect their diagnostics.
+An ordinary rejected command item warns on Apply and remains a command result.
 
 ### Retention
 
@@ -193,8 +203,15 @@ base database path, and protocol options for the corresponding components.
 Local transports deliver Buffers to `.onReceive(from, frame)` using destinations
 `gate`, `procA`, `procB`, `procC`, and `apply`. They must preserve send order and
 deliver without loss once ready. Gate retries startup hello; later local
-timeouts stop the node. Gate and Apply can share a process while each Proc
-runs separately.
+timeouts stop the component that detects them. Gate's configurable
+`applyTimeout` defaults to 5,000 ms per Apply execution request. Gate and Apply
+can share a process while each Proc runs separately.
+
+An unexpected component failure reports locally and stops that component;
+Gate and runtime Procs detect missing progress through timeouts. Gate failure
+or failed `open()` does not coordinate cleanup. Explicitly call `Gate.close()`
+or stop the owning processes before restarting; Gate emits `close` only after
+coordinated shutdown succeeds.
 
 The library does not spawn OS processes. For production, use a supervisor and
 wait for old database owners to exit before replacing them. All components

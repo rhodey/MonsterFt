@@ -205,6 +205,10 @@ function node(id, ids) {
   components.set('apply', new MonsterApply(
     id, sendFrom('apply'), databasePath, { apply },
   ))
+  for (const [role, component] of components) {
+    component.on('warn', (err) => console.warn(`${id}/${role}`, err))
+    component.on('error', (err) => console.error(`${id}/${role}`, err))
+  }
 
   nodesById.set(id, gate)
   return gate

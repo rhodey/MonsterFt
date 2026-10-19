@@ -69,7 +69,8 @@ test('v2 Proc hello retains one seed and initializes randomness only on leaving 
     t.equal(f.request(0, { type: 'open' }).type, 'ack')
     t.equal(f.procs[0].random.cid(), new Random(seed).cid(), 'first draw uses complete shared state')
     t.equal(f.request(0, { type: 'hello', seed }), undefined, 'post-hello startup cannot ACK another run')
-    t.equal(f.events[0].filter((event) => event.type === 'fatal').length, 1)
+    t.equal(f.events[0].filter((event) => event.type === 'error').length, 1)
+    t.notOk(f.events[0].some((event) => event.type === 'fatal'), 'failure uses only the local error event')
     t.equal(f.request(0, { type: 'close' }).type, 'ack', 'already closed Proc acknowledges teardown')
   } finally { f.cleanup() }
   t.end()
@@ -80,9 +81,8 @@ test('v2 Proc rejects startup work before hello and malformed seeds', (t) => {
     const f = fixture()
     try {
       const reply = f.request(0, message)
-      if (message.type !== 'hello') { t.equal(reply.type, 'err') }
-      else { t.equal(reply, undefined, 'invalid hello does not ACK') }
-      t.equal(f.events[0].find((event) => event.type === 'fatal').value.code, Err.RPC_ILLEGAL)
+      t.equal(reply, undefined, 'invalid startup request sends no reply')
+      t.equal(f.events[0].find((event) => event.type === 'error').value.code, Err.RPC_ILLEGAL)
       t.notOk(fs.existsSync(f.paths.procA), 'invalid request creates no database')
     } finally { f.cleanup() }
   }
@@ -163,10 +163,9 @@ test('v2 Proc failures discard success outputs and rollback uncommitted work on 
         }
       }
       const reply = f.input(0, 'start')
-      t.equal(reply.type, 'err', `${boundary}: no successful completion`)
-      t.equal(reply.outputs, undefined, 'no buffered message released')
-      t.equal(reply.stack, original.stack, 'failure reply preserves original trace')
-      t.equal(f.events[0].find((event) => event.type === 'fatal').value.stack, original.stack)
+      t.equal(reply, undefined, `${boundary}: no completion or fatal ERR is sent`)
+      t.equal(f.events[0].find((event) => event.type === 'error').value.stack, original.stack,
+        'original trace remains available locally')
       const state = readDatabase(f.paths.procA, (db) => ({
         election: db.prepare('SELECT current_term FROM raft_election').get().current_term,
         entries: db.prepare('SELECT seq FROM raft_log').all().length,
@@ -208,9 +207,10 @@ test('v2 Proc treats CMD insert failures as fatal for local and forwarded comman
       const response = forwarded ? receive({
         type: 'fwd_cmd', cid: 'forwarded', term: 1n, items: [Buffer.from('cmd')],
       }) : f.input(0, 'append', { requestId: 'local', items: [Buffer.from('cmd')] })
-      t.equal(response.type, 'err', `${forwarded ? 'forwarded' : 'local'} SQL failure aborts input`)
+      t.equal(response, undefined, `${forwarded ? 'forwarded' : 'local'} SQL failure aborts input without a reply`)
       t.notOk(proc.isOpen, 'node cannot keep a half-started command in runtime')
-      t.equal(response.outputs, undefined, 'no ordinary command reply escapes failed input')
+      t.match(f.events[0].find((event) => event.type === 'error').value.message, /injected CMD insert/,
+        'failed input reports its diagnostic locally')
       t.equal(readDatabase(f.paths.procA, (db) => db.prepare('SELECT max(seq) AS seq FROM raft_log').get().seq),
         0n, 'durable history remains at completed setup')
     } finally { f.cleanup() }
@@ -218,28 +218,37 @@ test('v2 Proc treats CMD insert failures as fatal for local and forwarded comman
   t.end()
 })
 
-test('v2 Proc commits intentional fatal transitions before ACK and local shutdown', (t) => {
+test('v2 Proc commits and reports intentional repair before final completion', (t) => {
   const f = fixture().startup()
   try {
     const proc = f.procs[0]
     const err = new Err.ErrorWithCode('repair required', Err.REPAIR_OUTSIDE_AGREEMENT)
     proc.engine.start = () => {
-      proc.log.election(8n, null)
-      proc.engine.output('event', { type: 'fatal', error: wire.errorToWire(err, false) })
-      proc.engine.fatalError = err
+      proc.db.prepare('UPDATE monsterft_meta SET repair_state = 2').run()
+      proc.engine.output('client', { type: 'err', cid: 'caller', ...wire.errorToWire(err, false) })
+      proc.engine.fatal(err)
+    }
+    const send = proc._localSend
+    proc._localSend = (to, frame) => {
+      t.notOk(proc.log.isOpen, 'owner is closed before final completion is sent')
+      t.equal(f.events[0].find((event) => event.type === 'error').value, err,
+        'original repair diagnostic precedes send')
+      return send(to, frame)
     }
     const reply = f.input(0, 'start')
     t.equal(reply.type, 'ack', 'durable intended transition completes')
-    t.equal(wire.decodePayload(reply.outputs[0]).message.type, 'fatal')
-    t.equal(readDatabase(f.paths.procA, (db) => db.prepare('SELECT current_term FROM raft_election').get().current_term),
-      8n, 'durable state retained through close')
+    const output = wire.decodePayload(reply.outputs[0])
+    t.equal(output.to, 'client', 'buffered command result remains available')
+    t.equal(output.message.code, Err.REPAIR_OUTSIDE_AGREEMENT)
+    t.equal(readDatabase(f.paths.procA, (db) => db.prepare('SELECT repair_state FROM monsterft_meta').get().repair_state),
+      2n, 'repair fence retained through close')
     t.notOk(proc.isOpen)
-    t.equal(f.events[0].find((event) => event.type === 'fatal').value, err)
+    t.notOk(f.events[0].some((event) => event.type === 'fatal'), 'repair does not emit a redundant fatal event')
   } finally { f.cleanup() }
   t.end()
 })
 
-test('v2 Proc keeps local diagnostic stacks outside agreed error bytes', (t) => {
+test('v2 Proc keeps local diagnostics outside agreed outputs', (t) => {
   const f = fixture().startup()
   try {
     const proc = f.procs[0]
@@ -247,11 +256,64 @@ test('v2 Proc keeps local diagnostic stacks outside agreed error bytes', (t) => 
     err.stack = 'unique Proc stack'
     proc.engine.start = () => proc.engine.warn(err)
     const reply = f.input(0, 'start')
-    const warning = wire.decodePayload(reply.outputs[0]).message
-    t.equal(warning.type, 'warn')
-    t.notOk(Object.hasOwn(warning.error, 'stack'), 'independent trace omitted from agreed output')
+    t.deepEqual(reply.outputs, [], 'warnings are never protocol outputs')
     t.equal(f.events[0].find((event) => event.type === 'warn').value.stack, err.stack,
       'local diagnostic retains original trace')
+  } finally { f.cleanup() }
+  t.end()
+})
+
+test('v2 Proc preserves committed repair diagnostics when final completion send fails', async (t) => {
+  for (const asynchronous of [false, true]) {
+    const f = fixture().startup()
+    try {
+      const proc = f.procs[0]
+      const repair = new Err.ErrorWithCode('repair required', Err.REPAIR_OUTSIDE_AGREEMENT)
+      repair.stack = 'original local repair trace'
+      proc.engine.start = () => {
+        proc.db.prepare('UPDATE monsterft_meta SET repair_state = 2').run()
+        proc.engine.fatal(repair)
+      }
+      let attempted = 0
+      proc._localSend = () => {
+        attempted++
+        t.equal(f.events[0].find((event) => event.type === 'error').value, repair,
+          'repair is reported before the failed send')
+        t.notOk(proc.log.isOpen, 'Proc stops before trying its final completion')
+        const err = new Error('completion send failed')
+        if (asynchronous) { return Promise.reject(err) }
+        throw err
+      }
+      t.equal(f.input(0, 'start'), undefined, 'transport failure delivers no reply')
+      await delay(0)
+      t.equal(attempted, 1, 'only the final completion was attempted')
+      const errors = f.events[0].filter((event) => event.type === 'error').map((event) => event.value)
+      t.deepEqual(errors, [repair], 'send failure cannot replace the original diagnostic')
+      t.equal(errors[0].stack, repair.stack)
+      t.equal(readDatabase(f.paths.procA, (db) => db.prepare('SELECT repair_state FROM monsterft_meta').get().repair_state),
+        2n, 'failed send leaves the repair fence durable')
+    } finally { f.cleanup() }
+  }
+  t.end()
+})
+
+test('v2 Proc reports quorum-impossible repair locally without stopping', (t) => {
+  const f = fixture().startup()
+  try {
+    const proc = f.procs[0]
+    const digest = Buffer.alloc(32, 1)
+    proc.engine.start = () => {
+      proc.db.prepare(`UPDATE monsterft_meta SET applied_seq = 1,
+        applied_entry_hash = ?, pending_cmd_seq = 1, applied_local_digest = ?`).run(digest, digest)
+      proc.engine.pendingCommand = { cmdSeq: 1n, localDigest: digest }
+      proc.engine.applySync({ cmdSeq: 1n, quorum: false, agree: [], disagree: ['a', 'b', 'c'] }, 2n, digest)
+    }
+    const reply = f.input(0, 'start')
+    t.deepEqual(reply.outputs.map((output) => wire.decodePayload(output).message.type), ['sync'],
+      'SYNC remains a protocol event; repair error does not')
+    t.equal(f.events[0].find((event) => event.type === 'error').value.code, Err.REPAIR_QUORUM_IMPOSSIBLE)
+    t.equal(proc.db.prepare('SELECT repair_state FROM monsterft_meta').get().repair_state, 1n)
+    t.ok(proc.isOpen, 'quorum-impossible repair remains nonfatal')
   } finally { f.cleanup() }
   t.end()
 })
@@ -267,7 +329,8 @@ test('v2 Proc independently verifies nested cluster frames before applying them'
     } })
     frame[0] ^= 1
     const reply = f.input(0, 'rpc', { from: 'b', frame })
-    t.equal(reply.code, Err.FRAME_CORRUPT)
+    t.equal(reply, undefined, 'corrupt frame sends no fatal ERR reply')
+    t.equal(f.events[0].find((event) => event.type === 'error').value.code, Err.FRAME_CORRUPT)
     t.equal(readDatabase(f.paths.procA, (db) => db.prepare('SELECT current_term FROM raft_election').get().current_term),
       0n, 'corrupt cluster frame does not change election')
     t.equal(readDatabase(f.paths.procA, (db) => db.prepare('SELECT seq FROM raft_log').all().length),
@@ -292,7 +355,7 @@ test('v2 Proc diagnostic listeners cannot hide later listeners or prevent teardo
     t.equal(errored, 1, 'later error listener still runs')
     proc.engine.receive = () => { throw new Error('fatal work') }
     const frame = wire.encodeFrame({ to: 'a', message: { from: 'b', type: 'test' } })
-    t.equal(f.input(0, 'rpc', { from: 'b', frame }).type, 'err')
+    t.equal(f.input(0, 'rpc', { from: 'b', frame }), undefined)
     t.equal(errored, 2, 'fatal error reaches remaining listeners')
     t.notOk(proc.log.isOpen, 'throwing error listener cannot prevent closing DB')
   } finally { f.cleanup() }
@@ -322,8 +385,8 @@ test('v2 Proc rejects input reordering and clock regressions', (t) => {
     try {
       f.input(0, 'start', { timems: 5 })
       const reply = f.input(0, 'tick', bad)
-      t.equal(reply.type, 'err')
-      t.equal(reply.code, Err.RPC_ILLEGAL)
+      t.equal(reply, undefined, 'bad input sends no fatal ERR reply')
+      t.equal(f.events[0].find((event) => event.type === 'error').value.code, Err.RPC_ILLEGAL)
       t.notOk(f.procs[0].isOpen)
     } finally { f.cleanup() }
   }
@@ -343,7 +406,7 @@ test('v2 Proc watchdog is inactive during startup and only closes on Gate silenc
     t.equal(f.procs[0].engine.term, 0n, 'native elapsed time does not drive protocol election')
     await delay(60)
     t.notOk(f.procs[0].isOpen)
-    t.equal(f.events[0].find((event) => event.type === 'fatal').value.code, Err.LOCAL_TIMEOUT)
+    t.equal(f.events[0].find((event) => event.type === 'error').value.code, Err.LOCAL_TIMEOUT)
     t.equal(f.procs[0].executor.timems, 0, 'watchdog does not advance supplied time')
   } finally { f.cleanup() }
   t.end()

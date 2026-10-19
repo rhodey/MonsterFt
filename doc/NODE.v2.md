@@ -41,8 +41,7 @@ no findings
 
 ## `warn`
 
-Reports a warning locally and prepares its protocol event with the appropriate
-stack visibility.
+Reports a warning to the owning Proc's local listeners.
 
 ### findings
 

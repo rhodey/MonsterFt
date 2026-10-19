@@ -67,10 +67,7 @@ class RaftEngine {
   }
 
   event(type, fields = {}) { this.output('event', { type, ...fields }) }
-  warn(err, shared = false) {
-    this.diagnostic?.('warn', err)
-    this.event('warn', { error: errorToWire(err, shared) })
-  }
+  warn(err) { this.diagnostic?.('warn', err) }
   change() {
     this.event('change', {
       state: this.state, leaderId: this.leader, term: this.term,
@@ -269,7 +266,7 @@ class RaftEngine {
       if (this.state !== 'leader' || this.term !== term) { return }
       if (response && response.term !== term) { err = failure('node term different', Err.TERM_DIFF) }
       if (err) {
-        this.warn(err, typeof response?.stack === 'string')
+        this.warn(err)
         return
       }
       this.pongs.set(state.to, this.now)
@@ -336,7 +333,7 @@ class RaftEngine {
       if (this.state !== 'leader' || this.term !== term || state.cancelled) { return }
       if (response && response.term !== term) { err = failure('node term different', Err.TERM_DIFF) }
       if (err) {
-        this.warn(err, typeof response?.stack === 'string')
+        this.warn(err)
         if (err.code === Err.REPL_FORGOT) { state.cancelled = true; return }
         if (err.code === Err.REPL_BACKTRACK) {
           if (seqP < 0n) {

@@ -24,8 +24,8 @@ no findings
 
 ## `_fatal`
 
-Begins closing Apply after an unrecoverable failure and reports its error and
-fatal events.
+Begins closing Apply after an unrecoverable failure and reports its error
+locally.
 
 ### findings
 
@@ -50,20 +50,11 @@ no findings
 ## `onReceive`
 
 Handles Gate's startup, execution, and shutdown requests, permitting only one
-execution at a time and returning its receipt, outcomes, and warnings.
+execution at a time and returning its receipt and outcomes.
 
 ### findings
 
-- **Open: a synchronous failure sending ERR can hide the original fatal
-  error.** The catch sends its error reply before calling `_fatal(err)`.
-  If `localSend` throws, `_send` starts shutdown with `SEND_ERROR`, and the
-  subsequent `_fatal` call discards the original error because Apply is already
-  closing. A real cluster with a failing setup callback emitted only the
-  transport error locally and eventually `APPLY_TIMEOUT` at Gate; the setup
-  message and stack reached neither. An asynchronous send rejection preserves
-  the original. Establish and report the original fatal error before attempting
-  its fallible reply transmission. Source: `src/apply.v2.js`, `onReceive` catch
-  and `_send`.
+no findings
 
 ## `_writeReceipt`
 
@@ -76,7 +67,7 @@ no findings
 ## `_execute`
 
 Runs setup or a command batch and commits its apply receipt with the resulting
-DB2 changes, preserving individual command failures as outcomes and warnings.
+DB2 changes, preserving individual command failures as outcomes and local warnings.
 
 ### findings
 

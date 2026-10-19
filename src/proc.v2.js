@@ -62,7 +62,6 @@ class MonsterProc extends EventEmitter {
     this._fatalError = err
     try { this.close() } catch { }
     this._emitSafe('error', err)
-    this._emitSafe('fatal', err)
   }
 
   _send(message) {
@@ -155,13 +154,16 @@ class MonsterProc extends EventEmitter {
     this.db.exec('COMMIT')
     const outputs = this._outputs
     const diagnostics = this._diagnostics
+    const tickCount = this.tickCount
+    const fatalError = this.engine.fatalError
     this._outputs = null
     this._diagnostics = null
     this._phase = 'runtime'
-    this._armWatchdog()
-    this._ack(message, { tickCount: this.tickCount, outputs })
+    // Report and stop after committing a repair fence, before a fallible send.
+    if (fatalError) { this._fatal(fatalError) }
+    else { this._armWatchdog() }
+    this._ack(message, { tickCount, outputs })
     for (const { type, error } of diagnostics) { this._emitSafe(type, error) }
-    if (this.engine.fatalError) { this._fatal(this.engine.fatalError) }
   }
 
   onReceive(from, frame) {
@@ -232,10 +234,6 @@ class MonsterProc extends EventEmitter {
       this._outputs = null
       this._diagnostics = null
       this._fatal(err)
-      // A later hello must never look like an acknowledged replacement run.
-      if (message?.type !== 'hello' && isCid(message?.cid)) {
-        this._send({ type: 'err', cid: message.cid, ...wire.errorToWire(err) })
-      }
     }
   }
 
