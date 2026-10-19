@@ -84,11 +84,11 @@ class RaftEngine {
     this.send(to, { type: 'err', cid, term: this.term, ...errorToWire(err, false), ...extra })
   }
 
-  request(to, message, timeout, callback, validate = () => true) {
+  request(to, message, timeout, callback, validate = () => true, timeoutError = null) {
     const cid = message.cid ?? this.random.cid()
     const timer = this.executor.after(timeout, () => {
       if (!this.requests.delete(cid)) { return }
-      callback(failure(`${message.type} timeout`, Err.APPEND_TIMEOUT))
+      callback(timeoutError ?? failure(`${message.type} timeout`, Err.APPEND_TIMEOUT))
     })
     this.requests.set(cid, { to, timer, callback, validate })
     this.send(to, { ...message, cid })
@@ -278,7 +278,8 @@ class RaftEngine {
       this.change()
       this.executor.enqueue(() => this.replicate(state))
     }, (response) => response.type === 'err' ||
-      (util.isSeq(response.seq) && response.seq >= 0n && response.term >= term))
+      (util.isSeq(response.seq) && response.seq >= 0n && response.term >= term),
+    failure('ping timeout', Err.PING_TIMEOUT))
     state.heartbeatCids.add(cid)
   }
 

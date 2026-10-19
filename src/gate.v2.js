@@ -28,8 +28,8 @@ class Gate extends EventEmitter {
     if (this.nodes.length < 3 || !this.nodes.includes(id)) {
       throw illegal('nodes must contain at least 3 ids including its id')
     }
-    if (this.nodes.some((node) => [...COMPONENTS, 'gate'].includes(node))) {
-      throw illegal('node ids must not name local components')
+    if (this.nodes.some((node) => [...COMPONENTS, 'gate', 'event', 'client'].includes(node))) {
+      throw illegal('node ids must not name internal destinations')
     }
     if (typeof send !== 'function' || typeof localSend !== 'function') {
       throw illegal('send and localSend must be functions')

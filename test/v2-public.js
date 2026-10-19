@@ -95,6 +95,13 @@ test('v2 public constructor rejects malformed component configuration', (t) => {
     { code: api.ErrorCodes.ARGUMENT_ILLEGAL }, 'local transport is required')
   t.throws(() => new api.Gate('a', ['a', 'a', 'b'], () => {}, () => {}),
     { code: api.ErrorCodes.ARGUMENT_ILLEGAL })
+  for (const id of ['procA', 'procB', 'procC', 'apply', 'gate', 'event', 'client']) {
+    for (const localId of [id, 'a']) {
+      t.throws(() => new api.Gate(localId, ['a', 'b', id], () => {}, () => {}),
+        { code: api.ErrorCodes.ARGUMENT_ILLEGAL, message: 'node ids must not name internal destinations' },
+        `${id} is rejected as a ${localId === id ? 'local' : 'peer'} id`)
+    }
+  }
   t.throws(() => new api.MonsterApply('a', () => {}, '/tmp/not-opened-v2', { apply: null }),
     { code: api.ErrorCodes.ARGUMENT_ILLEGAL })
   t.throws(() => new api.MonsterApply('a', () => {}, ':memory:', { apply: () => null }),

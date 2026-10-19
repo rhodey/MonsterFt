@@ -54,6 +54,9 @@ for (const delay of [0, 2]) {
           t.deepEqual(values.map(({ value }) => Buffer.from(value).toString()), ['first', 'second'],
             `${members.gate.id} applies each command once and in order`)
         }
+        t.ok(c.warnings.some(({ id, error }) => id === leaderId &&
+          error.code === Err.APPEND_TIMEOUT && error.message === 'append timeout'),
+        'the lost data ACK still produces an append timeout')
       } else { t.fail('continued commands require no leadership change') }
       t.equal(c.errors.length, 0, 'the dropped ACK causes no fatal errors')
     } finally { await c.close() }
@@ -99,6 +102,12 @@ for (const delay of [0, 2]) {
         'the follower never needs a replacement leader')
       t.ok(c.gates().every((gate) => gate.term === term), 'the cluster keeps its term')
       t.equal(leader.state, 'leader', 'the leader stays ready')
+      const timeouts = c.warnings.filter(({ id, error }) =>
+        id === leaderId && error.code === Err.PING_TIMEOUT)
+      t.equal(timeouts.length, 1, 'the lost heartbeat ACK produces one ping timeout')
+      t.equal(timeouts[0]?.error.message, 'ping timeout', 'the warning identifies the heartbeat')
+      t.notOk(c.warnings.some(({ error }) => error.code === Err.APPEND_TIMEOUT),
+        'heartbeat loss is not reported as an append timeout')
       if (leader.state === 'leader' && leader.term === term) {
         t.equal((await leader.append(Buffer.from('after-heartbeat-loss')))[1], 'after-heartbeat-loss',
           'commands remain available')
