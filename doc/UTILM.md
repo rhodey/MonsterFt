@@ -1,4 +1,4 @@
-# Monster helpers v2
+# Monster helpers
 
 Function notes for [src/utilm.v2.js](../src/utilm.v2.js), in source order.
 Trivial conversion and type-check helpers are omitted, and nested callbacks
@@ -27,7 +27,11 @@ and outcomes, excluding error stacks.
 
 ### findings
 
-no findings
+- **Accepted: patchsets are hashed as opaque buffers.** Cluster members must
+  use the same Node.js version; interpreting and normalizing patchset contents
+  is deferred, as noted in [AGENTS.md](../AGENTS.md).
+- **Accepted encoding requirement:** outcomes must encode identically across
+  nodes, including object key order. Agreement excludes error stacks.
 
 ## `assertEncodable`
 
@@ -83,7 +87,13 @@ Validates a SYNC decision and returns its agreeing and disagreeing members.
 
 ### findings
 
-no findings
+- **Open: different quorum settings can invalidate a committed SYNC.**
+  Leaders decide using their configured `quorum`, while receivers validate the
+  agree list against their own value. A leader with a smaller quorum can return
+  success before another node rejects its SYNC. Increasing quorum can also
+  invalidate historical SYNC records that have not yet been applied. The
+  requirement for matching quorum settings across the cluster is not explicit
+  in the README; leave this documentation issue open.
 
 ## `isFwdCmdMsg`
 

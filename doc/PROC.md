@@ -1,4 +1,4 @@
-# MonsterProc v2
+# MonsterProc
 
 Function notes for [src/proc.v2.js](../src/proc.v2.js), in source order.
 Trivial getters and delegation helpers are omitted, and nested callbacks are

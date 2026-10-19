@@ -1,4 +1,4 @@
-# Gate v2
+# Gate
 
 Function notes for [src/gate.v2.js](../src/gate.v2.js), in source order.
 Trivial getters and delegation helpers are omitted, and nested callbacks are
@@ -125,7 +125,8 @@ command error.
 
 ### findings
 
-no findings
+- **Accepted input-ownership policy:** callers must leave a submitted Buffer
+  unchanged until the operation settles.
 
 ## `appendBatch`
 
@@ -134,7 +135,13 @@ outcomes.
 
 ### findings
 
-no findings
+- **Accepted input-ownership policy:** callers must leave the submitted array
+  and its Buffers unchanged until the operation settles. The queued request
+  retains the array, and the reply's result count is checked against its length.
+- **Accepted: sparse arrays are unsupported.** The public `every` check skips
+  holes; encoding and Proc validation can subsequently reject the request.
+  Leave this JavaScript-specific case unchanged, as noted in
+  [AGENTS.md](../AGENTS.md).
 
 ## `drainCmd`
 
@@ -188,7 +195,10 @@ after all close replies succeed. Failed attempts can be retried explicitly.
 
 ### findings
 
-no findings
+- **Accepted policy: only one close failure is returned to the caller.**
+  Gate waits for every close request to settle and rejects with the first
+  failure in its request list. Each database owner reports its own close error
+  locally, so additional owner diagnostics remain available.
 
 ## `close`
 

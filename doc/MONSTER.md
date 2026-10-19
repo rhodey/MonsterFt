@@ -1,655 +1,235 @@
-# MonsterNode and MonsterFt
+# MonsterEngine
 
-Function notes for [src/monster.js](../src/monster.js),
-[src/monsterft.js](../src/monsterft.js),
-[src/utilm.js](../src/utilm.js), and [src/utils.js](../src/utils.js), in source
-order within each file.
-The notes cover the module helpers and every MonsterNode method. Each findings
-area lists only unresolved items: open, deferred, skipped by decision, or
-accepted. "None" means no unresolved item is recorded. Review rules are in
-[RAFT.md](RAFT.md).
+Function notes for [src/monster.v2.js](../src/monster.v2.js), in source
+order. Trivial helpers are omitted, and nested callbacks are covered with their
+enclosing function.
 
-## Policies and accepted limitations
+## `commandBytes`
 
-- **Error codes:** `MONSTER_CORRUPT` covers malformed CMD/SYNC records, a
-  SYNC without its pending CMD, unknown entry types, and Monster metadata
-  corruption in either database. SQLiteLog row, sequence, and term errors use
-  `LOG_CORRUPT`.
-- **Hashing:** patchsets are hashed as opaque buffers, so every member must
-  run the same Node.js version, as AGENTS.md notes. Agreement digests
-  exclude error stacks. The default msgpackr `pack` does not use records, so
-  equal values encode identically. Results must be deterministic, including
-  object key order.
-- **Input ownership:** callers must not change submitted Buffers or batch
-  arrays until the operation settles.
-- **Sparse arrays:** out of scope under AGENTS.md. See `appendBatch`.
-- **Exotic thrown values:** see `_monsterApplyCmd` and `wrapError` in
-  RAFT.md.
-- **Apply transactions:** see the open doc gap under
-  `_monsterApplyCmd`.
-- **Repair:** certification is an offline step. Retention and repair are not
-  being redesigned; see `_monsterPrune`.
-
-## `asBuffer`
-
-Converts byte views to Buffers without copying, preserving existing Buffers,
-null, and undefined.
+Estimates a command record’s encoded size for the SQLite size limit.
 
 ### findings
 
-None.
-
-## `outcomesWire`
-
-Converts command outcomes into tuples for transport or agreement hashing,
-optionally including error stacks.
-
-### findings
-
-None.
-
-## `digestCmd`
-
-Produces the agreement digest for a command, its database changes, and its
-outcomes. Excludes error stacks from agreement.
-
-### findings
-
-None.
-
-## `assertEncodable`
-
-Rejects results that cannot be encoded as MessagePack, using `APPLY_ERROR`.
-
-### findings
-
-None.
+no findings
 
 ## `constructor`
 
-Validates the apply callback, database pair, and retention settings.
-Initializes Raft and Monster state, including command processing and leader
-recovery.
+Restores Monster protocol state and initializes command, agreement, retention,
+and drain tracking.
 
 ### findings
 
-- **Skipped by decision: the file-pair check can become stale before
-  `open()`.** It runs only in the constructor. If DB1 is deleted after
-  construction, `open()` creates a fresh DB1 with term zero and no vote,
-  because DB2 still holds a valid initial receipt. The node can then grant
-  a second vote in a term where it already voted. Decision: no open-time
-  check for now.
-- **Open, left as is: nodes with different `quorum` settings reject each
-  other's SYNC records.** A leader decides using its own `quorum`, but each
-  node validates a SYNC's agree list against its local `quorum`. A SYNC from
-  a leader with a smaller value is fatal on peers with larger values. In a
-  three-node example, two of three nodes closed after the client had
-  received success. Raising `quorum` across the cluster would likewise break
-  older SYNC records that a replica has not yet applied. Nothing documents
-  that `quorum` must match on every node. Decision: leave open.
-- **Minor, left as is: the derived DB2 path can be another node's DB1.** For
-  example, `node1` + `2` is `node12`. The node that opens second fails closed
-  with a misleading `LOG_CORRUPT` or `MONSTER_CORRUPT`. Paths ending in `.db`
-  or `.sqlite` avoid it. Decision: leave open.
+no findings
 
-## `_autoRaft`
+## `available`
 
-Defers Raft startup until MonsterNode has initialized and reconciled both
-databases.
+Rejects new commands when repair is required or commands are draining.
 
 ### findings
 
-None.
+no findings
 
-## `_monsterSortNodes`
+## `start`
 
-Removes duplicate node IDs and returns them in sorted order for SYNC records.
-
-### findings
-
-None.
-
-## `_monsterSyncAgrees`
-
-Determines whether the local command outcome agrees with a SYNC decision.
+Checks the startup repair fence, prunes eligible history, and starts Raft.
 
 ### findings
 
-None.
+no findings
 
-## `_monsterPrune`
+## `write`
 
-Prunes applied history to the retention target when its trigger is reached.
-Preserves unapplied entries and defers pruning while a CMD is unresolved.
-
-### findings
-
-- **Accepted: drain can hide a retention failure.** Pruning runs outside the
-  DB queue. If normal drain closure wins the race, the retention error is
-  never reported. The DB1 checkpoint is already durable, and startup retries
-  any pruning that is still due.
-- **Deferred: repairing one replica after retention needs a leadership
-  reset.** The surviving leader may already have cancelled replication to a
-  replica whose required history was pruned. Copying a donor pair to that
-  replica and reopening only the donor and target leaves it stuck at the
-  copied checkpoint until leadership changes or the leader restarts.
-  REPAIR.md should require that. Decision: deferred pending possible
-  bigger changes to retention.
-
-## `_monsterFatalError`
-
-Emits a fatal error if shutdown has not already started and returns the same
-error for the caller to throw or propagate.
+Performs a protocol metadata update that must change exactly one DB1 row.
 
 ### findings
 
-None.
+no findings
 
-## `_monsterRepairError`
+## `advanceApplied`
 
-Creates the public repair-required error for either supported repair state.
-Treats an unexpected runtime repair state as a fatal Monster invariant error.
-
-### findings
-
-None.
-
-## `_monsterAssertAvailable`
-
-Rejects new commands when the node is closed, requires repair, or is draining.
+Advances the durable and runtime protocol checkpoint.
 
 ### findings
 
-None.
+no findings
 
-## `_monsterAssertLeader`
+## `prune`
 
-Requires the node to be open and acting as leader. When supplied a term,
-also rejects work that belongs to a different leadership term.
-
-### findings
-
-None.
-
-## `_monsterStepDownForTerm`
-
-Steps down only when still leader in the supplied term and not closing.
-Returns whether leadership changed.
+Removes eligible applied history when retention reaches its trigger, preserving
+history while a command awaits agreement.
 
 ### findings
 
-None.
+no findings
 
-## `_monsterWriteTx`
+## `applyReady`
 
-Runs DB2 work atomically and rolls it back on failure. Reports both the
-original error and a fatal cleanup error if rollback fails.
-
-### findings
-
-None.
-
-## `_monsterAdvanceApplied`
-
-Persists the applied entry's sequence and hash in DB1.
+Processes committed protocol entries and requests Apply execution when setup or
+a command is ready.
 
 ### findings
 
-None.
+no findings
 
-## `_monsterWriteApply`
+## `execute`
 
-Records the latest apply receipt within its DB2 transaction.
-
-### findings
-
-None.
-
-## `_monsterWriteCmdDecision`
-
-Records a SYNC decision in DB1 and clears the matching pending CMD.
-Preserves the last apply digest.
+Requests setup or command execution from Apply and records the expected reply.
 
 ### findings
 
-None.
+no findings
 
-## `_monsterWriteRepair`
+## `receiveApply`
 
-Persists the repair state while preserving the checkpoint and pending command.
-
-### findings
-
-None.
-
-## `_monsterReleaseDb`
-
-Settles the active DB operation and allows queued work to continue. Retains
-the first failure for reporting during drain.
+Validates an Apply completion, copies its receipt into DB1, and resumes protocol
+progress.
 
 ### findings
 
-None.
+no findings
 
-## `_monsterDrainDb`
+## `syncAgrees`
 
-Runs queued DB operations one at a time in submission order.
-
-### findings
-
-None.
-
-## `_monsterRunDb`
-
-Queues a DB operation and returns a promise for its result. Rejects new work
-once shutdown begins.
+Determines whether this node’s command outcome agrees with a SYNC decision.
 
 ### findings
 
-None.
+no findings
 
-## `_monsterRunDbGetCmd`
+## `applySync`
 
-Returns the pending command after earlier DB work completes, optionally
-requiring a specific sequence. Returns null when no matching command remains.
-
-### findings
-
-None.
-
-## `_monsterInit`
-
-Initializes and reconciles the database pair, then restores the protocol
-checkpoint, repair state, and pending command.
+Records a command’s agreement decision, clears its pending state, and reports
+any required repair locally.
 
 ### findings
 
-- **Accepted: receipt reconciliation checks entry identity, not entry type.**
-  The referenced sequence must exist and match its stored hash when retained;
-  reconciliation does not decode the entry to verify that it is a CMD or
-  sequence-zero no-op. Ordinary protocol processing still validates types.
-  Manually clearing `pending_cmd_seq` is not detected solely from a matching
-  receipt.
+no findings
 
-## `_monsterRememberReport`
+## `fatal`
 
-Records each node's first reported digest for the pending command.
+Records a fatal protocol outcome and prevents further runnable work.
 
 ### findings
 
-None.
+no findings
 
-## `_monsterDecision`
+## `fenceLeader`
 
-Determines whether reported command outcomes have reached agreement or made
-agreement impossible, and returns the supporting reports.
-
-### findings
-
-None.
-
-## `_monsterRxOutcomeRequest`
-
-Answers valid requests for the local pending command's digest. Warns on
-malformed requests.
+Records the leader’s repair fence and ends its participation after disagreement.
 
 ### findings
 
-None.
+no findings
 
-## `_monsterRxOutcome`
+## `respond`
 
-While leader, records valid peer outcome reports for the pending command.
-Warns on malformed reports.
-
-### findings
-
-None.
-
-## `_monsterAnnounceOutcome`
-
-Reports the local command digest to the leader's agreement process.
+Returns a command result or error to its local or forwarded caller at most once.
 
 ### findings
 
-None.
+no findings
 
-## `_monsterApplyNoop`
+## `submit`
 
-Advances the protocol checkpoint for a no-op. At sequence zero, commits
-the setup callback's changes and DB2 receipt before recording completion
-in DB1.
-
-### findings
-
-None. The apply transaction rule under `_monsterApplyCmd` also
-applies to this sequence-zero callback.
-
-## `_monsterApplyCmd`
-
-Applies CMD items and collects their outcomes for agreement. Warns locally
-with `APPLY_ERROR` for failed items and rolls back their writes. Persists the
-apply receipt in DB2 and then the pending command in DB1 before
-announcing the local outcome digest.
+Validates a public command request and queues it locally or forwards it to the
+leader.
 
 ### findings
 
-- **Open: the apply contract does not cover SQL after a caught
-  automatic rollback.** The callback receives the raw DB2 connection. If it
-  catches a native SQLite error that ended the transaction, any further SQL
-  autocommits. Monster then fails the CMD and closes, but those writes are
-  already durable. On reopening, the replayed command applies them again;
-  for example, a counter reached 2 instead of 1. SYNC fences the replica if
-  only one is affected. If all are affected, they agree on the wrong state.
-  Suggested doc change: after catching a database error, if `db.isTransaction`
-  is false, rethrow and issue no further SQL. No change has been made.
+no findings
 
-## `_monsterApplySync`
+## `leaderChanged`
 
-Records the agreement decision, clears the pending command, and emits SYNC.
-Reports required repair: quorum impossibility blocks new commands, while
-being outside agreement closes the node.
+Rejects work invalidated by a leadership change or resumes the leader’s command
+processing.
 
 ### findings
 
-None.
+no findings
 
-## `_monsterApplyEntry`
+## `pumpLeader`
 
-Dispatches committed Monster entries to their handlers, respecting drain
-and repair state. Rejects unknown entry types as corruption.
-
-### findings
-
-None.
-
-## `_monsterApply`
-
-Applies a batch of committed Monster entries in order and returns their
-results. Prunes eligible history as the applied checkpoint advances.
+Advances one leader command through execution and agreement before starting the
+next queued command.
 
 ### findings
 
-- **Accepted: normal drain may suppress a retention error.** See
-  `_monsterPrune`.
+no findings
 
-## `_monsterAppendEntry`
+## `protocolFailure`
 
-Adds the current match indexes to CMD records and appends Monster records
-through Raft.
-
-### findings
-
-None.
-
-## `_monsterAwaitDecision`
-
-Waits as leader until command outcomes establish agreement or make it
-impossible. Returns the resulting SYNC decision and whether the leader agrees.
+Reports a failed active protocol append and steps down if its leader term
+remains current.
 
 ### findings
 
-None.
+no findings
 
-## `_monsterAppendSync`
+## `announceOutcome`
 
-Appends a SYNC while still leader in the expected term and returns its
-sequence.
-
-### findings
-
-None.
-
-## `_monsterFenceLeader`
-
-Steps down, marks the leader as requiring repair for being outside agreement,
-and closes it through fatal reporting.
+Reports this node’s pending command digest to the leader.
 
 ### findings
 
-None.
+no findings
 
-## `_monsterLeaderQueue`
+## `rememberReport`
 
-Runs commands one at a time after leader recovery, from CMD submission
-through agreement and SYNC or repair. Returns the caller's outcome once
-agreement is known and steps down if the protocol fails in the same term.
-
-### findings
-
-None.
-
-## `_monsterOnChange`
-
-Recovers any pending command when leadership begins, completing its SYNC or
-requiring repair. Steps down and warns if recovery fails.
+Records a node’s first outcome report and schedules agreement evaluation when
+needed.
 
 ### findings
 
-None.
+no findings
 
-## `_monsterRxFwdCmd`
+## `awaitDecision`
 
-Validates and handles forwarded command requests as leader. Replies with
-agreed outcomes or an error, warning locally when request processing fails.
-
-### findings
-
-None.
-
-## `onReceive`
-
-Routes member messages to the Monster or Raft protocol handlers. Reports
-unexpected outcome-handler failures as fatal.
+Starts agreement evaluation and requests missing outcome reports while a
+decision remains pending.
 
 ### findings
 
-None.
+no findings
 
-## `_monsterSendAndAwaitCmdAck`
+## `decide`
 
-Sends a forwarded command and waits for a valid response, respecting timeout
-and shutdown. Returns the acknowledgement or throws the reported error.
-
-### findings
-
-None.
-
-## `_monsterFwdCmdToLeader`
-
-Forwards command items to the known leader and returns their sequence and
-validated outcome tuples.
+Determines command agreement or quorum impossibility, returns the caller’s
+result, and records the decision or fences a dissenting leader.
 
 ### findings
 
-None.
+no findings
 
-## `_monsterAppendOrFwdCmd`
+## `receiveCustom`
 
-Submits commands to the local or remote leader and returns their sequence
-and public settled outcomes.
-
-### findings
-
-None.
-
-## `append`
-
-Submits one command and returns its sequence and agreed value. Rejects with
-the command's error when its agreed outcome is failure.
+Handles forwarded commands and command-outcome requests and reports.
 
 ### findings
 
-None.
+- **Deferred: duplicate forwarded requests execute twice.**
+  The `fwd_cmd` branch in `src/monster.v2.js:352` creates a new queued request
+  for every delivery, including the same sender and CID. Delivering one genuine
+  forwarded frame twice in a three-node cluster made a single public `append()`
+  execute at sequences 1 and 3 on every node; the caller received only the first
+  result. Duplicate outcome reports are handled separately and do not have this
+  problem. V1 has the same behavior. By decision, addressing this is deferred.
+  A later change can clarify that cluster transports must deliver each request
+  at most once or introduce request deduplication.
 
-## `appendBatch`
+## `drain`
 
-Submits a batch as one CMD and returns its sequence and settled outcome for
-each item.
-
-### findings
-
-- **Accepted: a sparse batch commits a CMD that every replica rejects.** The
-  `every` check skips holes, and a hole is encoded as `undefined` in the CMD.
-  Every replica fails with `CMD entry items must be buffers` and fails again
-  on restart. The same happens when an in-process forward passes the
-  caller's array directly; MessagePack forwarding instead gets
-  `RPC_ILLEGAL`. Decision: sparse arrays remain out of scope under AGENTS.md.
-
-## `drainCmd`
-
-Stops accepting commands and waits for any pending command's decision before
-closing. Reports saved DB failures and returns a promise for drain completion.
+Stops admitting commands and requests completion after outstanding protocol work
+settles.
 
 ### findings
 
-- **Accepted: normal closure may suppress a concurrent retention error.** See
-  `_monsterPrune`. The retention error would not happen again or it would be
-  thrown again on next open.
+no findings
 
-## `open`
+## `finishDrain`
 
-Opens the database pair, restores Monster state, and starts Raft. Refuses to
-open a node marked outside agreement and cleans up if startup fails.
+Completes drain requests once neither Apply execution nor command agreement
+remains pending.
 
 ### findings
 
-- **Accepted: an interrupted first creation can leave only DB1.** The
-  constructor then rejects the incomplete pair until it is cleaned up. This
-  fails closed.
-
-## `_monsterStop`
-
-Rejects active and queued DB work during shutdown.
-
-### findings
-
-None.
-
-## `close`
-
-Stops the node and closes both databases. Reports cleanup failures while
-allowing failed closes to be retried.
-
-### findings
-
-- **Accepted policy: only the first close failure is thrown.** If both the
-  DB2 and DB1 close fail, the DB1 error is discarded.
-
-## `del`
-
-Deletes both databases, requiring the pair to be closed.
-
-### findings
-
-None.
-
-## `requireNormalFile` (`src/monsterft.js`)
-
-Checks that a certification path identifies a regular file, reporting invalid
-paths as `FS_ERROR`.
-
-### findings
-
-None.
-
-## `MonsterFt.certify` (`src/monsterft.js`)
-
-Validates and reconciles a closed database pair, clears its repair state,
-and returns its applied sequence. Requires pending commands to be resolved
-unless explicitly overridden.
-
-### findings
-
-- **Deferred:** repairing one replica can also need a leadership reset; see
-  `_monsterPrune`.
-
-## `digestEntry` (`src/utilm.js`)
-
-Produces the checkpoint hash identifying an entry's term and payload.
-
-### findings
-
-None.
-
-## `readMeta` (`src/utils.js`)
-
-Reads and validates DB1's Monster protocol metadata.
-
-### findings
-
-None.
-
-## `readApply` (`src/utils.js`)
-
-Reads and validates DB2's latest apply receipt.
-
-### findings
-
-None.
-
-## `verifyEntry` (`src/utils.js`)
-
-Verifies that a stored sequence and hash identify an entry in DB1.
-
-### findings
-
-None.
-
-## `copyApply` (`src/utils.js`)
-
-Records a completed DB2 apply transaction in DB1. Leaves a command pending
-agreement, or records sequence-zero setup without a pending command.
-
-### findings
-
-None.
-
-## `reconcile` (`src/utils.js`)
-
-Validates the database pair and finishes a recognized interrupted apply
-receipt import. Preserves resolved and repair state when DB1 already recorded
-that completion.
-
-### findings
-
-- **Accepted: receipt reconciliation does not check entry types.** See
-  `_monsterInit`.
-- **Skipped by decision: initial checkpoints are accepted even when
-  retention has removed sequence zero.** With both metadata records initial
-  and `log.begin > 0`, the node opens, then fails during apply with
-  `LOG_CORRUPT`. Decision: the later error is acceptable.
-
-## `createMeta` (`src/utils.js`)
-
-Creates DB1's protocol metadata table and its initial singleton row.
-
-### findings
-
-None.
-
-## `createApply` (`src/utils.js`)
-
-Creates DB2's apply receipt table and its initial singleton row.
-
-### findings
-
-None.
-
-## `createInTransaction` (`src/utils.js`)
-
-Creates a metadata table and its initial row atomically, rolling back on
-failure.
-
-### findings
-
-None.
-
-## `initialize` (`src/utils.js`)
-
-Initializes fresh metadata or completes interrupted pristine initialization,
-then reconciles the pair. Rejects missing metadata beside established state.
-
-### findings
-
-None.
+no findings

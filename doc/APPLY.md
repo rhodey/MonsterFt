@@ -1,4 +1,4 @@
-# MonsterApply v2
+# MonsterApply
 
 Function notes for [src/apply.v2.js](../src/apply.v2.js), in source order.
 Trivial getters, guards, and delegation helpers are omitted, and nested
@@ -71,7 +71,14 @@ DB2 changes, preserving individual command failures as outcomes and local warnin
 
 ### findings
 
-no findings
+- **Open: the apply contract does not cover SQL after a caught automatic
+  rollback.** The callback receives the raw DB2 connection. If it catches a
+  SQLite error that ended the transaction, later SQL can autocommit before the
+  library detects the lost transaction. Those writes survive failure and can
+  be repeated on replay. This applies to setup and command callbacks. The
+  README should say that after a caught database error, if `db.isTransaction`
+  is false, the callback must rethrow and issue no further SQL. That guidance
+  has not yet been added.
 
 ## `close`
 

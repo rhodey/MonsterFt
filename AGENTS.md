@@ -27,8 +27,9 @@ but MonsterFt wanting things a little different.
 
 The [doc/](doc/) folder has a section for each function of moderate
 complexity in the core sources. Each section describes the function and
-references any open, deferred, or accepted known issues:
-[RAFT.md](doc/RAFT.md) covers RaftNode, [LOG.md](doc/LOG.md) covers
-SQLiteLog, and [MONSTER.md](doc/MONSTER.md) covers MonsterNode and
-MonsterFt. Check these before reporting an issue, and record new
+references any open, deferred, or accepted known issues.
+[doc/README.md](doc/README.md) indexes the component and helper guides.
+[RAFT.md](doc/RAFT.md) covers RaftEngine, [LOG.md](doc/LOG.md) covers
+SQLiteLog, and [MONSTER.md](doc/MONSTER.md) covers MonsterEngine.
+Check the relevant guides before reporting an issue, and record new
 findings there.

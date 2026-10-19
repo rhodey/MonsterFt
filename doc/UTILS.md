@@ -1,4 +1,4 @@
-# SQL helpers v2
+# SQL helpers
 
 Function notes for [src/utils.v2.js](../src/utils.v2.js), in source order.
 Trivial helpers and direct delegation functions are omitted.
@@ -52,7 +52,15 @@ eligible receipt into DB1 when its checkpoint is behind.
 
 ### findings
 
-no findings
+- **Accepted: reconciliation checks entry identity, not entry type.** A
+  retained entry must match the receipt's sequence and hash, but need not
+  decode as CMD or sequence-zero setup. Ordinary protocol application still
+  validates entry types. A matching receipt alone does not detect a manually
+  cleared `pending_cmd_seq`.
+- **Skipped by decision:** initial protocol metadata and an initial receipt
+  are accepted even when retention has removed sequence zero. Ordinary apply
+  later reports the missing entry as `MONSTER_CORRUPT`; that later rejection
+  is acceptable.
 
 ## `createMeta`
 
