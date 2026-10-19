@@ -7,7 +7,8 @@ const noop = () => {}
 
 // MessagePack supplies TCP boundaries; the inner checksummed frame stays exact.
 class FramePackrStream extends PackrStream {
-  constructor() { super({ useRecords: false, sequential: false }) }
+  // Socket closure destroys this stream after downstream writes have drained.
+  constructor() { super({ useRecords: false, sequential: false, autoDestroy: false }) }
 
   _transform(frame, encoding, callback) {
     if (!Buffer.isBuffer(frame)) {
@@ -114,6 +115,7 @@ function tcpClient(key, port, host, msgCb=noop) {
       sock.removeListener('close', onConnectClose)
       try {
         pack = new FramePackrStream()
+        pack.on('error', close)
         encrypt = new EncryptingStream(key)
         decrypt = new DecryptingStream(key)
         unpack = new UnpackrStream({ useRecords: false })

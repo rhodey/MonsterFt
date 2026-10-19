@@ -1,9 +1,7 @@
 # SQL helpers v2
 
 Function notes for [src/utils.v2.js](../src/utils.v2.js), in source order.
-Trivial helpers and direct delegation functions are omitted. Findings start
-empty for the upcoming review; this does not indicate that the functions have
-been reviewed.
+Trivial helpers and direct delegation functions are omitted.
 
 ## `readMeta`
 

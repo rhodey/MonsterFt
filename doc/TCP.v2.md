@@ -2,7 +2,7 @@
 
 Function notes for [src/tcp.v2.js](../src/tcp.v2.js), in source order.
 Trivial constructors are omitted; nested callbacks are covered with their
-enclosing function. Findings sections are placeholders for the upcoming review.
+enclosing function.
 
 ## `FramePackrStream._transform`
 

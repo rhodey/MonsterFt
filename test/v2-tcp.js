@@ -13,9 +13,9 @@ const closed = (stream) => stream.destroyed ? Promise.resolve() : event(stream, 
 const closeServer = (server) => !server.listening ? Promise.resolve() :
   new Promise((resolve, reject) => server.close((err) => err ? reject(err) : resolve()))
 
-function timeout(work) {
+function timeout(work, ms = 3000) {
   return new Promise((resolve, reject) => {
-    const timer = setTimeout(() => reject(new Error('TCP test timeout')), 3000)
+    const timer = setTimeout(() => reject(new Error('TCP test timeout')), ms)
     work.then((value) => { clearTimeout(timer); resolve(value) },
       (err) => { clearTimeout(timer); reject(err) })
   })
@@ -67,6 +67,98 @@ test('v2 TCP transports exact checksummed Buffers including nested Raft and Appl
   t.end()
 })
 
+for (const sender of ['client', 'server']) {
+  test(`v2 TCP ${sender} end flushes queued frames before closing`, async (t) => {
+    await sodium.ready
+    const key = Buffer.from(sodium.crypto_secretstream_xchacha20poly1305_keygen())
+    const payload = Buffer.alloc(16 * 1024 * 1024, 0xc5)
+    payload.write('final payload bytes', payload.length - 19)
+    const frames = [encodeFrame({ order: 1 }), encodeFrame({ order: 2, payload })]
+    const received = []
+    const failures = []
+    let peer
+    let peerClosing
+    const server = await tcpServer(key, 0, (reply, frame) => {
+      if (sender === 'client') received.push(frame)
+      else {
+        reply.write(frames[0])
+        reply.end(frames[1])
+      }
+    }, (err) => failures.push(err))
+    server.on('connection', (socket) => {
+      peer = socket
+      peerClosing = event(socket, 'close')
+    })
+    const client = await tcpClient(key, server.address().port, '127.0.0.1',
+      (frame) => received.push(frame))
+    client.on('error', (err) => failures.push(err))
+    try {
+      const closing = closed(client)
+      if (sender === 'client') {
+        client.write(frames[0])
+        client.end(frames[1])
+      } else client.write(encodeFrame({ type: 'request' }))
+      await timeout(closing, 10000)
+      await timeout(peerClosing)
+      t.equal(received.length, frames.length, 'all queued frames arrive before closure')
+      for (let index = 0; index < received.length; index++) {
+        t.ok(received[index].equals(frames[index]), 'frame bytes and order are preserved')
+        const message = decodeFrame(received[index])
+        t.equal(message.order, index + 1, 'frame checksum and MessagePack payload are valid')
+        if (message.payload) t.ok(message.payload.equals(payload), 'the complete final payload arrives')
+      }
+      t.ok(client.destroyed, 'client closes after the send finishes')
+      t.ok(peer.destroyed, 'server socket closes after the send finishes')
+      t.deepEqual(failures, [], 'orderly shutdown emits no errors')
+    } finally {
+      client.destroy()
+      peer?.destroy()
+      await closeServer(server)
+    }
+    t.end()
+  })
+}
+
+test('v2 TCP explicit destroy aborts pending output', async (t) => {
+  await sodium.ready
+  const key = Buffer.from(sodium.crypto_secretstream_xchacha20poly1305_keygen())
+  let accept
+  const accepted = new Promise((resolve) => { accept = resolve })
+  const server = net.createServer((socket) => {
+    socket.on('error', noop)
+    socket.pause()
+    accept(socket)
+  })
+  await new Promise((resolve, reject) => {
+    server.once('error', reject)
+    server.listen(0, '127.0.0.1', resolve)
+  })
+  const client = await tcpClient(key, server.address().port, '127.0.0.1')
+  client.on('error', noop)
+  const peer = await accepted
+  try {
+    let received = 0
+    peer.on('data', (chunk) => { received += chunk.length })
+    const peerClosing = closed(peer)
+    const frame = encodeFrame({ payload: Buffer.alloc(16 * 1024 * 1024) })
+    client.write(frame)
+    client.write(frame)
+    const closing = closed(client)
+    client.destroy()
+    await timeout(closing)
+    t.ok(client.destroyed, 'explicit destroy closes without waiting for the peer')
+    t.notOk(client.writableFinished, 'destroy does not finish the pending writes')
+    peer.resume()
+    await timeout(peerClosing)
+    t.ok(received < frame.length * 2, 'pending output is discarded by explicit destroy')
+  } finally {
+    client.destroy()
+    peer.destroy()
+    await closeServer(server)
+  }
+  t.end()
+})
+
 test('v2 TCP rejects non-Buffer writes and closes the connection', async (t) => {
   await sodium.ready
   const key = Buffer.from(sodium.crypto_secretstream_xchacha20poly1305_keygen())
@@ -81,6 +173,24 @@ test('v2 TCP rejects non-Buffer writes and closes the connection', async (t) => 
     t.equal(err.code, Err.ARGUMENT_ILLEGAL)
     t.equal(err.message, 'TCP message must be a Buffer')
     t.ok(client.destroyed)
+  } finally {
+    client.destroy()
+    await closeServer(server)
+  }
+  t.end()
+})
+
+test('v2 TCP closes on error without a caller error listener', async (t) => {
+  await sodium.ready
+  const key = Buffer.from(sodium.crypto_secretstream_xchacha20poly1305_keygen())
+  const server = await tcpServer(key, 0, noop, noop)
+  const client = await tcpClient(key, server.address().port, '127.0.0.1')
+  try {
+    const closing = closed(client)
+    client.write({ type: 'not a Buffer' })
+    await timeout(closing)
+    t.ok(client.destroyed, 'client closes without a caller error listener')
+    t.equal(client.eventNames().length, 0, 'cleanup removes client listeners')
   } finally {
     client.destroy()
     await closeServer(server)

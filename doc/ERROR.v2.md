@@ -1,7 +1,6 @@
 # Error handling
 
 Function notes for [src/error.v2.js](../src/error.v2.js), in source order.
-Findings sections are placeholders for the upcoming review.
 
 ## `ErrorWithCode.constructor`
 

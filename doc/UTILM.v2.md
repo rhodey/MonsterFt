@@ -2,8 +2,7 @@
 
 Function notes for [src/utilm.v2.js](../src/utilm.v2.js), in source order.
 Trivial conversion and type-check helpers are omitted, and nested callbacks
-are covered with their enclosing function. Findings start empty for the
-upcoming review; this does not indicate that the functions have been reviewed.
+are covered with their enclosing function.
 
 ## `outcomesWire`
 

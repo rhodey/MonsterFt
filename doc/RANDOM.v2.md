@@ -1,8 +1,7 @@
 # Random
 
 Function notes for [src/random.v2.js](../src/random.v2.js), in source order.
-The direct integer-distribution helper is omitted. Findings sections are
-placeholders for the upcoming review.
+The direct integer-distribution helper is omitted.
 
 ## `constructor`
 

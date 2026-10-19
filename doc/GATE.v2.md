@@ -2,8 +2,7 @@
 
 Function notes for [src/gate.v2.js](../src/gate.v2.js), in source order.
 Trivial getters and delegation helpers are omitted, and nested callbacks are
-covered with their enclosing function. Findings start empty for future review;
-`no findings` does not mean the function has already been reviewed.
+covered with their enclosing function.
 
 ## `constructor`
 

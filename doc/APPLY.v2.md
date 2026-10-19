@@ -2,8 +2,7 @@
 
 Function notes for [src/apply.v2.js](../src/apply.v2.js), in source order.
 Trivial getters, guards, and delegation helpers are omitted, and nested
-callbacks are covered with their enclosing function. Findings start empty for
-future review; `no findings` does not mean the function has already been reviewed.
+callbacks are covered with their enclosing function.
 
 ## `constructor`
 

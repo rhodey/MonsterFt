@@ -1,8 +1,7 @@
 # Executor
 
 Function notes for [src/executor.v2.js](../src/executor.v2.js), in source order.
-Trivial initialization and queue helpers are omitted. Findings sections are
-placeholders for the upcoming review.
+Trivial initialization and queue helpers are omitted.
 
 ## `after`
 

@@ -2,8 +2,7 @@
 
 Function notes for [src/log.v2.js](../src/log.v2.js), in source
 order. Trivial helpers are omitted, and nested callbacks are covered with their
-enclosing function. Findings sections are empty starting points for the upcoming
-review; no findings have been recorded yet.
+enclosing function.
 
 ## `constructor`
 

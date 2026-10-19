@@ -1,7 +1,6 @@
 # General utilities
 
 Function notes for [src/util.v2.js](../src/util.v2.js), in source order.
-Findings sections are placeholders for the upcoming review.
 
 ## `isCid`
 

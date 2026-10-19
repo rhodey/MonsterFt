@@ -2,8 +2,7 @@
 
 Function notes for [src/storage.v2.js](../src/storage.v2.js), in source order.
 Trivial helpers and getters are omitted, and nested callbacks are covered with
-their enclosing function. Findings start empty for the upcoming review; this
-does not indicate that the functions have been reviewed.
+their enclosing function.
 
 ## `databasePaths`
 

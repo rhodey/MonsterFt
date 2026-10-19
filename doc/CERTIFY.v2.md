@@ -1,9 +1,7 @@
 # Certification v2
 
 Function notes for [src/certify.v2.js](../src/certify.v2.js), in source order.
-Nested callbacks are covered with their enclosing function. Findings start
-empty for the upcoming review; this does not indicate that the functions have
-been reviewed.
+Nested callbacks are covered with their enclosing function.
 
 ## `requireFile`
 

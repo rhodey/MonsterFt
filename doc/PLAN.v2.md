@@ -147,13 +147,11 @@ module in [INDEX.v2.md](INDEX.v2.md).
 
 ## Progress
 
-All passes begin unreviewed; the initial `no findings` text is not a completion
-marker. Check a pass only after every assigned section has been examined and
-its findings recorded. At the end, confirm every guide and section is covered;
-review completion does not imply all reported issues have been patched.
+Check a pass after examining every assigned section and recording its findings.
+Use this checklist for progress; keep status notes out of the function guides.
 
-- [ ] 1. Deterministic runtime and shared checks
-- [ ] 2. Frames and transport
+- [x] 1. Deterministic runtime and shared checks
+- [x] 2. Frames and transport
 - [ ] 3. SQLite log operations
 - [ ] 4. Metadata, reconciliation, and certification
 - [ ] 5. Proc execution and Gate coordination
