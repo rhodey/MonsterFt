@@ -89,7 +89,7 @@ Cover all sections in [PROC.v2.md](PROC.v2.md), plus `constructor` through
 
 ## 6. Raft elections and request handling
 
-Cover `validRecords` through `voteResponse` in [NODE.v2.md](NODE.v2.md).
+Cover `validRecords` through `voteResponse` in [RAFT.v2.md](RAFT.v2.md).
 
 - Check restored state, membership, live-follower tracking, request validation,
   and late, duplicate, or wrong-sender replies.
@@ -99,7 +99,7 @@ Cover `validRecords` through `voteResponse` in [NODE.v2.md](NODE.v2.md).
 
 ## 7. Raft replication and commitment
 
-Cover `appendNoop` through `stop` in [NODE.v2.md](NODE.v2.md).
+Cover `appendNoop` through `stop` in [RAFT.v2.md](RAFT.v2.md).
 
 - Check election no-ops, replication pages, predecessor checks, backtracking
   hints, committed-history protection, and retention boundaries.

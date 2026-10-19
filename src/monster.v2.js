@@ -1,5 +1,5 @@
 import { pack, unpack } from 'msgpackr'
-import { RaftEngine } from './node.v2.js'
+import { RaftEngine } from './raft.v2.js'
 import * as Err from './error.v2.js'
 import * as util from './util.v2.js'
 import * as utilm from './utilm.v2.js'
