@@ -1,6 +1,6 @@
 # MonsterEngine
 
-Function notes for [src/monster.v2.js](../src/monster.v2.js), in source
+Function notes for [src/monster.js](../src/monster.js), in source
 order. Trivial helpers are omitted, and nested callbacks are covered with their
 enclosing function.
 
@@ -207,7 +207,7 @@ Handles forwarded commands and command-outcome requests and reports.
 ### findings
 
 - **Deferred: duplicate forwarded requests execute twice.**
-  The `fwd_cmd` branch in `src/monster.v2.js:352` creates a new queued request
+  The `fwd_cmd` branch in `src/monster.js:352` creates a new queued request
   for every delivery, including the same sender and CID. Delivering one genuine
   forwarded frame twice in a three-node cluster made a single public `append()`
   execute at sequences 1 and 3 on every node; the caller received only the first

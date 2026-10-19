@@ -57,7 +57,13 @@ function readApply(db2) {
   if (rows.length !== 1 || rows[0].id !== 1n) {
     corrupt('apply meta row is missing or not singleton')
   }
-  const receipt = rows[0]
+  return validateReceipt(rows[0])
+}
+
+function validateReceipt(receipt) {
+  if (receipt === null || typeof receipt !== 'object') {
+    corrupt('apply receipt must be a record')
+  }
   if (!util.isSeq(receipt.seq)) { corrupt('apply sequence is corrupt') }
   if (receipt.seq === -1n) {
     if (receipt.entry_hash !== null || receipt.local_digest !== null) {
@@ -107,8 +113,8 @@ function copyApply(db1, receipt) {
   }
 }
 
-function reconcile(db1, db2) {
-  const receipt = readApply(db2)
+function reconcileReceipt(db1, receipt) {
+  validateReceipt(receipt)
   const meta = readMeta(db1)
   if (meta.applied_seq >= 0n) {
     verifyEntry(db1, meta.applied_seq, meta.applied_entry_hash)
@@ -193,51 +199,11 @@ function createApply(db2) {
   `)
 }
 
-function createInTransaction(database, create) {
-  database.exec('BEGIN IMMEDIATE')
-  try {
-    create(database)
-    database.exec('COMMIT')
-  } catch (err) {
-    if (database.isTransaction) {
-      try { database.exec('ROLLBACK') } catch { }
-    }
-    throw err
-  }
+function reconcile(db1, db2) {
+  return reconcileReceipt(db1, readApply(db2))
 }
 
-function initialize(db1, db2) {
-  const schema1 = db1.prepare('SELECT name, type FROM sqlite_schema').all()
-  const schema2 = db2.prepare('SELECT name, type FROM sqlite_schema').all()
-  const hasMeta = schema1.some((row) => row.name === 'monsterft_meta' && row.type === 'table')
-  const hasApply = schema2.some((row) => row.name === 'monsterft_meta_apply' && row.type === 'table')
-  if (!hasMeta || !hasApply) {
-    const meta = hasMeta ? readMeta(db1) : null
-    const receipt = hasApply ? readApply(db2) : null
-    const emptyLog = db1.prepare('SELECT seq FROM raft_log LIMIT 1').get() === undefined
-    const pristine1 = schema1.every((row) =>
-      row.type === 'table' && ['raft_log', 'raft_election', 'monsterft_meta'].includes(row.name))
-    const pristine2 = schema2.every((row) =>
-      row.type === 'table' && row.name === 'monsterft_meta_apply')
-    if (!emptyLog) {
-      corrupt('meta init requires empty raft_log')
-    }
-    if (!pristine1) {
-      corrupt('meta init found unexpected DB1 schema')
-    }
-    if (!pristine2) {
-      corrupt('meta init found unexpected DB2 schema')
-    }
-    if (meta !== null && meta.applied_seq !== -1n) {
-      corrupt('meta init requires DB1 applied_seq = -1')
-    }
-    if (receipt !== null && receipt.seq !== -1n) {
-      corrupt('meta init requires DB2 apply seq = -1')
-    }
-    if (!hasMeta) { createInTransaction(db1, createMeta) }
-    if (!hasApply) { createInTransaction(db2, createApply) }
-  }
-  return reconcile(db1, db2)
+export {
+  readMeta, readApply, verifyEntry, copyApply, createMeta, createApply,
+  validateReceipt, reconcileReceipt, reconcile,
 }
-
-export { initialize, reconcile, copyApply }

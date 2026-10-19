@@ -1,6 +1,6 @@
 # Executor
 
-Function notes for [src/executor.v2.js](../src/executor.v2.js), in source order.
+Function notes for [src/executor.js](../src/executor.js), in source order.
 Trivial initialization and queue helpers are omitted.
 
 ## `after`

@@ -1,6 +1,6 @@
 # RaftEngine
 
-Function notes for [src/raft.v2.js](../src/raft.v2.js), in source
+Function notes for [src/raft.js](../src/raft.js), in source
 order. Trivial helpers are omitted, and nested callbacks are covered with their
 enclosing function.
 

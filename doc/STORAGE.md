@@ -1,6 +1,6 @@
 # Protocol storage
 
-Function notes for [src/storage.v2.js](../src/storage.v2.js), in source order.
+Function notes for [src/storage.js](../src/storage.js), in source order.
 Trivial helpers and getters are omitted, and nested callbacks are covered with
 their enclosing function.
 

@@ -1,6 +1,6 @@
 # Error handling
 
-Function notes for [src/error.v2.js](../src/error.v2.js), in source order.
+Function notes for [src/error.js](../src/error.js), in source order.
 
 `MONSTER_CORRUPT` covers invalid Monster records and protocol or Apply metadata.
 `LOG_CORRUPT` covers invalid log rows, sequences, terms, and election fields.

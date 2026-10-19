@@ -219,8 +219,8 @@ and examples; standalone RaftNode is no longer a supported public API.
 The v2 architecture moves toward tolerating faults in protocol execution while
 running user apply work only once per cluster node. It is not a claim of full
 single-fault tolerance: Gate and Apply remain individual components, and startup
-majority comparison does not authenticate every older log row. [PLAN.md](PLAN.md)
-and [DIRECTION.md](DIRECTION.md) describe the design and its boundaries.
+majority comparison does not authenticate every older log row. The
+[review guides](doc/) describe the components and their known limitations.
 
 ### Collaborations
 

@@ -1,6 +1,6 @@
 # TCP transport
 
-Function notes for [src/tcp.v2.js](../src/tcp.v2.js), in source order.
+Function notes for [src/tcp.js](../src/tcp.js), in source order.
 Trivial constructors are omitted; nested callbacks are covered with their
 enclosing function.
 

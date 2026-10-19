@@ -1,6 +1,6 @@
 # Certification
 
-Function notes for [src/certify.v2.js](../src/certify.v2.js), in source order.
+Function notes for [src/certify.js](../src/certify.js), in source order.
 Nested callbacks are covered with their enclosing function.
 
 ## `requireFile`

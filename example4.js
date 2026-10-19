@@ -2,7 +2,7 @@ import http from 'node:http'
 import { createHash, randomUUID } from 'node:crypto'
 import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { Gate, MonsterProc, MonsterApply } from './src/index.v2.js'
+import { Gate, MonsterProc, MonsterApply } from './src/index.js'
 
 const directory = mkdtempSync(`${tmpdir()}/monsterft-example4-`)
 

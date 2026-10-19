@@ -1,6 +1,6 @@
 # Random
 
-Function notes for [src/random.v2.js](../src/random.v2.js), in source order.
+Function notes for [src/random.js](../src/random.js), in source order.
 The direct integer-distribution helper is omitted.
 
 ## `constructor`

@@ -1,6 +1,6 @@
 # SQLiteLog
 
-Function notes for [src/log.v2.js](../src/log.v2.js), in source
+Function notes for [src/log.js](../src/log.js), in source
 order. Trivial helpers are omitted, and nested callbacks are covered with their
 enclosing function.
 

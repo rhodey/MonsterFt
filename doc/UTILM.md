@@ -1,6 +1,6 @@
 # Monster helpers
 
-Function notes for [src/utilm.v2.js](../src/utilm.v2.js), in source order.
+Function notes for [src/utilm.js](../src/utilm.js), in source order.
 Trivial conversion and type-check helpers are omitted, and nested callbacks
 are covered with their enclosing function.
 

@@ -1,6 +1,6 @@
 # SQL helpers
 
-Function notes for [src/utils.v2.js](../src/utils.v2.js), in source order.
+Function notes for [src/utils.js](../src/utils.js), in source order.
 Trivial helpers and direct delegation functions are omitted.
 
 ## `readMeta`

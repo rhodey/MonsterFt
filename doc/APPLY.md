@@ -1,6 +1,6 @@
 # MonsterApply
 
-Function notes for [src/apply.v2.js](../src/apply.v2.js), in source order.
+Function notes for [src/apply.js](../src/apply.js), in source order.
 Trivial getters, guards, and delegation helpers are omitted, and nested
 callbacks are covered with their enclosing function.
 

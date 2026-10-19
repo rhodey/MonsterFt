@@ -5,6 +5,27 @@ import * as Err from './error.js'
 
 const noop = () => {}
 
+// MessagePack supplies TCP boundaries; the inner checksummed frame stays exact.
+class FramePackrStream extends PackrStream {
+  // Socket closure destroys this stream after downstream writes have drained.
+  constructor() { super({ useRecords: false, sequential: false, autoDestroy: false }) }
+
+  _transform(frame, encoding, callback) {
+    if (!Buffer.isBuffer(frame)) {
+      callback(new Err.ErrorWithCode('TCP message must be a Buffer', Err.ARGUMENT_ILLEGAL))
+      return
+    }
+    super._transform(frame, encoding, callback)
+  }
+}
+
+function requireFrame(frame) {
+  if (!Buffer.isBuffer(frame)) {
+    throw new Err.ErrorWithCode('TCP message must be a Buffer', Err.RPC_ILLEGAL)
+  }
+  return frame
+}
+
 function tcpServer(key, port, msgCb, errCb) {
   const server = net.createServer((sock) => {
     let decrypt
@@ -27,8 +48,8 @@ function tcpServer(key, port, msgCb, errCb) {
     sock.on('error', onError)
     try {
       decrypt = new DecryptingStream(key)
-      unpack = new UnpackrStream()
-      pack = new PackrStream()
+      unpack = new UnpackrStream({ useRecords: false })
+      pack = new FramePackrStream()
       encrypt = new EncryptingStream(key)
       decrypt.on('error', onError)
       unpack.on('error', onError)
@@ -36,7 +57,11 @@ function tcpServer(key, port, msgCb, errCb) {
       encrypt.on('error', onError)
       sock.once('close', close)
       pack.once('close', close)
-      const onData = (data) => msgCb(pack, data)
+      const onData = (data) => {
+        let frame
+        try { frame = requireFrame(data) } catch (err) { onError(err); return }
+        msgCb(pack, frame)
+      }
       sock.pipe(decrypt).pipe(unpack).on('data', onData)
       pack.pipe(encrypt).pipe(sock)
     } catch (err) {
@@ -89,10 +114,11 @@ function tcpClient(key, port, host, msgCb=noop) {
       sock.removeListener('error', onConnectError)
       sock.removeListener('close', onConnectClose)
       try {
-        pack = new PackrStream()
+        pack = new FramePackrStream()
+        pack.on('error', close)
         encrypt = new EncryptingStream(key)
         decrypt = new DecryptingStream(key)
-        unpack = new UnpackrStream()
+        unpack = new UnpackrStream({ useRecords: false })
         const abort = (err) => {
           try {
             pack.emit('error', err)
@@ -110,7 +136,12 @@ function tcpClient(key, port, host, msgCb=noop) {
         })
         sock.once('close', close)
         pack.pipe(encrypt).pipe(sock)
-        sock.pipe(decrypt).pipe(unpack).on('data', msgCb)
+        const onData = (data) => {
+          let frame
+          try { frame = requireFrame(data) } catch (err) { abort(err); return }
+          msgCb(frame)
+        }
+        sock.pipe(decrypt).pipe(unpack).on('data', onData)
       } catch (err) {
         close()
         pack?.removeAllListeners()

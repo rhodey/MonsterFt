@@ -1,6 +1,6 @@
 # Encrypted streams
 
-Function notes for [src/stream.v2.js](../src/stream.v2.js), in source order.
+Function notes for [src/stream.js](../src/stream.js), in source order.
 Trivial initialization and reset helpers are omitted.
 
 ## `EncryptingStream.constructor`

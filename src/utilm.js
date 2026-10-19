@@ -1,8 +1,47 @@
 import crypto from 'node:crypto'
+import { pack } from 'msgpackr'
 import * as Err from './error.js'
 import { isCid, isSeq, isTerm } from './util.js'
 
 const DIGEST_BYTES = 32
+
+const asBuffer = (value) => {
+  if (value === null || value === undefined) { return value }
+  return Buffer.isBuffer(value)
+    ? value
+    : Buffer.from(value.buffer, value.byteOffset, value.byteLength)
+}
+
+const outcomesWire = (outcomes, includeStack=true) => outcomes.map((outcome) => {
+  if (outcome.status === 'fulfilled') { return [0, outcome.result] }
+  const { message, code, sqlCode, stack } = outcome.error
+  const item = [1, message, code, sqlCode]
+  if (includeStack && typeof stack === 'string') { item.push(stack) }
+  return item
+})
+
+const outcomesPublic = (outcomes) => outcomes.map((item) => {
+  if (item[0] === 0) { return { status: 'fulfilled', value: item[1] } }
+  return {
+    status: 'rejected',
+    reason: Err.wrapError({
+      message: item[1], code: item[2], sqlCode: item[3], stack: item[4],
+    }),
+  }
+})
+
+const digestCmd = (term, seq, patchset, outcomes) =>
+  crypto.createHash('sha256')
+    .update(pack([term, seq, patchset, outcomesWire(outcomes, false)]))
+    .digest()
+
+const assertEncodable = (value) => {
+  try { pack(value) } catch {
+    throw new Err.ErrorWithCode(
+      'apply result is not MessagePack-encodable', Err.APPLY_ERROR,
+    )
+  }
+}
 
 const isDigest = (digest) => digest instanceof Uint8Array &&
   digest.byteLength === DIGEST_BYTES
@@ -173,9 +212,10 @@ const normalizeKeepOptions = (opts) => {
 }
 
 export {
+  asBuffer, outcomesWire, outcomesPublic, digestCmd, assertEncodable,
   digestEntry, isDigest,
   validateOutcomeRequestMsg, validateOutcomeMsg,
   validateCmdEntry, validateSyncEntry,
-  isFwdCmdMsg, isFwdCmdAck,
+  isFwdCmdMsg, isFwdCmdAck, isOutcomeTuple,
   normalizeKeepOptions,
 }

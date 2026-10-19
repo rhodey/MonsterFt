@@ -13,9 +13,10 @@ const defaults = {
 
 class SQLiteLog {
   constructor(databasePath, opts={}) {
-    if (typeof databasePath !== 'string' || databasePath.length <= 0) {
+    if (typeof databasePath !== 'string' || databasePath.length <= 0 ||
+        databasePath === ':memory:') {
       throw new Err.ErrorWithCode(
-        'SQLiteLog DB path must be non-empty string', Err.ARGUMENT_ILLEGAL)
+        'SQLiteLog DB path must be a non-empty file path', Err.ARGUMENT_ILLEGAL)
     }
 
     opts = { ...defaults, ...opts }
@@ -25,7 +26,6 @@ class SQLiteLog {
     }
 
     this.path = databasePath
-    this._memory = databasePath === ':memory:'
     this.iterStepSize = opts.iterStepSize
     this.db = null
     this._statements = null
@@ -131,14 +131,12 @@ class SQLiteLog {
     this.begin = begin.seq
   }
 
-  open() {
+  open({ initialize=null }={}) {
     if (this._open) { return }
     const { path: databasePath } = this
     let db = null
     try {
-      if (!this._memory) {
-        util.createSQLiteDirectory(databasePath)
-      }
+      util.createSQLiteDirectory(databasePath)
       db = new DatabaseSync(databasePath, { readBigInts: true })
 
       db.exec('PRAGMA journal_mode = WAL')
@@ -162,8 +160,9 @@ class SQLiteLog {
 
           INSERT INTO raft_election (id, current_term, voted_for)
           VALUES (1, 0, NULL);
-          COMMIT;
         `)
+        if (initialize !== null) { initialize(db) }
+        db.exec('COMMIT')
       } else {
         for (const name of ['raft_log', 'raft_election']) {
           if (!schema.some((row) => row.type === 'table' && row.name === name)) {
@@ -290,13 +289,18 @@ class SQLiteLog {
       const last = data[data.length - 1]
       const { term, entry: head } = last
 
-      this.db.exec('BEGIN IMMEDIATE')
-      transaction = true
+      // The Proc executor owns the transaction while processing a Gate input.
+      if (!this.db.isTransaction) {
+        this.db.exec('BEGIN IMMEDIATE')
+        transaction = true
+      }
       data.forEach(({ term, entry }, idx) => {
         this._statements.insert.run(seq + BigInt(idx), term, entry.length ? entry : EMPTY_ENTRY)
       })
-      this.db.exec('COMMIT')
-      transaction = false
+      if (transaction) {
+        this.db.exec('COMMIT')
+        transaction = false
+      }
 
       this.term = term
       this.head = head

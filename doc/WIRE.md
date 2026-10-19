@@ -1,6 +1,6 @@
 # Wire encoding
 
-Function notes for [src/wire.v2.js](../src/wire.v2.js), in source order.
+Function notes for [src/wire.js](../src/wire.js), in source order.
 Direct composition and error-wrapper aliases are omitted.
 
 ## `encodePayload`

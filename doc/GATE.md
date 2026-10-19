@@ -1,6 +1,6 @@
 # Gate
 
-Function notes for [src/gate.v2.js](../src/gate.v2.js), in source order.
+Function notes for [src/gate.js](../src/gate.js), in source order.
 Trivial getters and delegation helpers are omitted, and nested callbacks are
 covered with their enclosing function.
 
