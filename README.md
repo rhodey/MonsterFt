@@ -1,7 +1,7 @@
 # MonsterFt
 
 MonsterFt is a fixed-membership replicated SQLite state machine. For each
-command (request), every available node executes the apply callback once and
+command (request), every available node executes the application and
 captures its database change as an [SQLite Session Extension](https://sqlite.org/sessionintro.html)
 patchset. The command succeeds when a configured quorum agrees on the database
 change and the return value.
@@ -53,20 +53,20 @@ function createNode(id) {
 
   const databasePath = `/tmp/node${id}.db`
   const opts = {}
-  const components = new Map()
-  const sendFrom = (from) => (to, frame) => {
-    return components.get(to).onReceive(from, frame)
+  const processes = new Map()
+  const localSend = (from) => (to, frame) => {
+    return processes.get(to).onReceive(from, frame)
   }
 
-  const gate = new Gate(id, nodeIds, send, sendFrom('gate'), opts)
-  components.set('gate', gate)
+  const gate = new Gate(id, nodeIds, send, localSend('gate'), opts)
+  processes.set('gate', gate)
   for (const role of ['procA', 'procB', 'procC']) {
-    components.set(role, new MonsterProc(
-      role, id, nodeIds, sendFrom(role), databasePath, opts,
+    processes.set(role, new MonsterProc(
+      role, id, nodeIds, localSend(role), databasePath, opts,
     ))
   }
-  components.set('apply', new MonsterApply(
-    id, sendFrom('apply'), databasePath, { apply },
+  processes.set('apply', new MonsterApply(
+    id, localSend('apply'), databasePath, { apply },
   ))
 
   nodesById.set(id, gate)
@@ -96,7 +96,7 @@ shutdown waits for outstanding Apply work. Reopening uses fresh component
 instances.
 
 The example constructs Gate, ProcA/B/C, and Apply in one process and connects
-them through `sendFrom`. Each Proc has its own protocol database; Apply alone
+them through `localSend`. Each Proc has its own protocol database; Apply alone
 writes the application database. The files are `${databasePath}.a`, `.b`, `.c`,
 and `${databasePath}2`.
 V2 requires file-backed databases and a fresh layout; there is no migration
@@ -192,7 +192,7 @@ Frames carry SHA-256 checksums. Startup reconciles the local protocol copies
 by majority before recovering completed Apply work.
 
 For separate processes, construct each component in its intended process and
-replace the in-process `sendFrom` routing with a `localSend(to, frame)` transport,
+replace the in-process `localSend` routing with a `localSend(to, frame)` transport,
 such as Unix-domain sockets. Gate takes both cluster `send` and `localSend`;
 the Procs and Apply take only `localSend`. Use the same node ID, membership,
 base database path, and protocol options for the corresponding components.
