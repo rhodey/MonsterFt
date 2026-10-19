@@ -190,7 +190,35 @@ backtracking, and retries.
 
 ### findings
 
-no findings
+- **Deferred: retention can cancel replication to a caught-up follower after
+  a lost page ACK.** This behavior is reproduced in both v1 and v2. A missing
+  ACK causes a timeout and retry from the same position; only an explicit
+  `REPL_BACKTRACK` response moves that position backward. If retention removes
+  the predecessor needed to construct the retry, the leader locally raises
+  `REPL_FORGOT` and cancels replication to that follower for the current
+  leadership, without receiving a rejection from it.
+
+  With `keepTarget: 2` and `keepTrigger: 5`, delayed delivery and a lost ACK
+  left all three nodes applied through 4 with identical retained entries 3–4.
+  Heartbeats had communicated the commit, but the leader's unconfirmed retry
+  still required deleted predecessor 2. Later appends advanced the other two
+  nodes while that follower stayed at 4.
+
+  Leave this unchanged for now. Retention settings should leave generous room
+  for replication delays and retries, reducing the risk of deleting history
+  before confirmation arrives. This is a mitigation, not a guarantee under
+  prolonged message loss; revisit the behavior with a broader retention
+  redesign.
+
+  A possible smaller fix is to include `matched` in heartbeat ACKs, reporting
+  the existing cached head sequence-and-term comparison without another SQL
+  read. A matching reply in the current leader term could advance `matchIndex`
+  and `nextIndex` using that heartbeat request's captured sequence and resume
+  replication cancelled by retention. A nonmatching reply would still confirm
+  only liveness. Older replies and retries must not undo the confirmed progress.
+  This could address the caught-up follower case, but would not recover missing
+  history or locate a shared prefix in divergent logs. This idea is also deferred;
+  no implementation change is planned now.
 
 ## `checkCommit`
 
