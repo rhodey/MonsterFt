@@ -155,7 +155,7 @@ Use this checklist for progress; keep status notes out of the function guides.
 - [x] 3. SQLite log operations
 - [x] 4. Metadata, reconciliation, and certification
 - [x] 5. Proc execution and Gate coordination
-- [ ] 6. Raft elections and request handling
+- [x] 6. Raft elections and request handling
 - [ ] 7. Raft replication and commitment
 - [ ] 8. Apply execution, receipts, and retention
 - [ ] 9. Monster agreement and command progress
