@@ -404,6 +404,31 @@ test('v2 Gate warning listener may throw or close without dispatching later Appl
   t.end()
 })
 
+test('v2 Gate listener failures reach later error listeners even when an earlier one throws', async (t) => {
+  for (const type of ['change', 'warn']) {
+    const h = harness({
+      outputs: (input) => input.kind === 'append' ? [wire.encodePayload({
+        to: 'event', message: { type, error: { message: 'transport warning', code: Err.SEND_ERROR } },
+      }), client(input)] : [],
+    })
+    const original = new Error(`${type} listener failed`)
+    let delivered = 0
+    h.gate.prependListener('error', () => { throw new Error('error listener failed') })
+    h.gate.once(type, () => { throw original })
+    h.gate.on(type, () => { delivered++ })
+    try {
+      await h.gate.open()
+      t.deepEqual(await h.gate.append(Buffer.from('first')), [3n, 'first'])
+      t.equal(h.errors[0], original, `${type}: later error listener gets the original exception`)
+      t.equal(delivered, 1, `${type}: later event listener still runs`)
+      t.deepEqual(await h.gate.append(Buffer.from('second')), [3n, 'second'])
+      t.equal(h.errors.length, 1, `${type}: once listener is not called again`)
+      t.equal(delivered, 2, `${type}: subsequent events still arrive`)
+    } finally { await h.gate.close() }
+  }
+  t.end()
+})
+
 test('v2 Gate reports an agreed repair fence as fatal and ordinary errors as nonfatal', async (t) => {
   let fatal = false
   const h = harness({

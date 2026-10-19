@@ -81,9 +81,7 @@ class Gate extends EventEmitter {
       try {
         listener.call(this, value)
       } catch (err) {
-        if (type !== 'error') {
-          try { this.emit('error', err) } catch { }
-        }
+        if (type !== 'error') { this._emitSafe('error', err) }
       }
     }
   }
