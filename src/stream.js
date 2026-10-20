@@ -2,8 +2,8 @@ import { Transform } from 'node:stream'
 import sodium from 'libsodium-wrappers'
 
 class EncryptingStream extends Transform {
-  constructor(key) {
-    super()
+  constructor(key, opts = {}) {
+    super(opts)
     const res = sodium.crypto_secretstream_xchacha20poly1305_init_push(key)
     this.state = res.state
     this.push(Buffer.from(res.header))
@@ -100,8 +100,8 @@ function streamDestroyedError() {
 }
 
 class DecryptingStream extends Transform {
-  constructor(key) {
-    super()
+  constructor(key, opts = {}) {
+    super(opts)
     this.key = key
     this.state = null
     this.len = null

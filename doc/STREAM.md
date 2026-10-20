@@ -5,7 +5,8 @@ Trivial initialization and reset helpers are omitted.
 
 ## `EncryptingStream.constructor`
 
-Initializes an encryption stream and emits its header.
+Initializes an encryption stream and emits its header. Accepts standard stream
+options; TCP uses object mode for incoming messages.
 
 ### findings
 
@@ -55,6 +56,7 @@ no findings
 ## `DecryptingStream.constructor`
 
 Initializes a decryption stream awaiting its header and encrypted input.
+Accepts standard stream options; TCP uses object mode for decrypted messages.
 
 ### findings
 

@@ -32,8 +32,8 @@ no findings
 
 ## `onReceive`
 
-Accepts local component replies and cluster messages, resolving local requests
-or queuing cluster input.
+Decodes local replies to resolve requests and verifies cluster frames before
+queuing their original bytes. The Procs decode cluster payloads independently.
 
 ### findings
 
@@ -90,7 +90,12 @@ nodes.
 
 ### findings
 
-no findings
+- **Deferred optimization: routing parses the complete output.** Gate
+  decodes all of an agreed output to read its destination and message type,
+  even when forwarding its original bytes to a remote node or Apply.
+  Separately readable routing metadata could avoid that parse, but requires
+  a framing change. Destination and request identity must remain covered by
+  output agreement; preserve the current forwarding of exact agreed bytes.
 
 ## `_event`
 

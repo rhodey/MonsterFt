@@ -4,17 +4,10 @@ Function notes for [src/tcp.js](../src/tcp.js), in source order.
 Trivial constructors are omitted; nested callbacks are covered with their
 enclosing function.
 
-## `FramePackrStream._transform`
+## `FrameStream._transform`
 
-Validates and encodes outgoing Buffer frames for transmission over TCP.
-
-### findings
-
-no findings
-
-## `requireFrame`
-
-Rejects received TCP messages that are not Buffer frames.
+Validates outgoing Buffer frames for transmission over TCP. Object mode
+preserves message boundaries while buffers wait for encryption.
 
 ### findings
 
@@ -23,7 +16,8 @@ no findings
 ## `tcpServer`
 
 Starts an encrypted TCP server that delivers received frames to the supplied
-callback. Provides a reply stream per connection and reports connection failures.
+callback. Encrypted-record lengths delimit messages without an outer codec.
+Provides a reply stream per connection and reports connection failures.
 
 ### findings
 

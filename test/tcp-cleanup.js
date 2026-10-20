@@ -115,13 +115,13 @@ test('tcp server closes a connection when setup throws', async (t) => {
 test('tcp server reports connection errors and cleans up even if the error callback throws', async (t) => {
   await sodium.ready
   const key = Buffer.from(sodium.crypto_secretstream_xchacha20poly1305_keygen())
-  for (const source of ['socket', 'decrypt', 'unpack', 'pack', 'encrypt', 'throwing callback']) {
+  for (const source of ['socket', 'decrypt', 'frames', 'encrypt', 'throwing callback']) {
     const original = new Error(`${source} failed`)
     const reporterFailure = new Error('error callback failed')
     const reported = []
     let receive
     const received = new Promise((res) => { receive = res })
-    const server = await tcpServer(key, 0, (pack) => receive(pack), (err) => {
+    const server = await tcpServer(key, 0, (frames) => receive(frames), (err) => {
       reported.push(err)
       if (source === 'throwing callback') { throw reporterFailure }
     })
@@ -131,11 +131,10 @@ test('tcp server reports connection errors and cleans up even if the error callb
     try {
       const socket = await timeout(accepted, 'server connection')
       client.write(encodeFrame({ message: 'hello' }))
-      const pack = await timeout(received, 'server message')
+      const frames = await timeout(received, 'server message')
       const decrypt = socket._readableState.pipes[0]
-      const unpack = decrypt._readableState.pipes[0]
-      const encrypt = pack._readableState.pipes[0]
-      const streams = { socket, decrypt, unpack, pack, encrypt }
+      const encrypt = frames._readableState.pipes[0]
+      const streams = { socket, decrypt, frames, encrypt }
       const clientClosed = closed(client)
       const stream = streams[source] || socket
       if (source === 'throwing callback') {

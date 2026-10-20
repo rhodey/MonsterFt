@@ -125,8 +125,8 @@ class Gate extends EventEmitter {
     if (this._closing && this._requests.size === 0) { return }
     if (!this._opening && !this._open && !this._closing) { return }
     try {
-      const message = wire.decodeFrame(frame)
       if (COMPONENTS.includes(from)) {
+        const message = wire.decodeFrame(frame)
         if (message?.type !== 'ack' && message?.type !== 'err') {
           throw rpcIllegal('local reply must be ACK or ERR')
         }
@@ -143,6 +143,7 @@ class Gate extends EventEmitter {
         if (!this.nodes.includes(from) || from === this.id) {
           throw rpcIllegal('cluster frame has invalid sender')
         }
+        wire.verifyFrame(frame)
         this._enqueue({ kind: 'rpc', from, frame })
       }
     } catch (err) {

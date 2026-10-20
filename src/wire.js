@@ -29,7 +29,7 @@ function encodeFrame(value) {
   return frame
 }
 
-function decodeFrame(frame) {
+function verifyFrame(frame) {
   if (!Buffer.isBuffer(frame) || frame.length <= 32) {
     throw new Err.ErrorWithCode('frame is incomplete', Err.FRAME_CORRUPT)
   }
@@ -37,8 +37,10 @@ function decodeFrame(frame) {
   if (!checksum(payload).equals(frame.subarray(0, 32))) {
     throw new Err.ErrorWithCode('frame checksum differs', Err.FRAME_CORRUPT)
   }
-  return decodePayload(payload)
+  return payload
 }
+
+const decodeFrame = (frame) => decodePayload(verifyFrame(frame))
 
 function errorToWire(error, includeStack = true) {
   const err = Err.wrapError(error)
@@ -51,5 +53,5 @@ const errorFromWire = (value) => Err.wrapError(value)
 
 export {
   encodePayload, decodePayload, checksum, framePayload,
-  encodeFrame, decodeFrame, errorToWire, errorFromWire,
+  encodeFrame, verifyFrame, decodeFrame, errorToWire, errorFromWire,
 }

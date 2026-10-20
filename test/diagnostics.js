@@ -1,8 +1,71 @@
 import test from 'tape'
-import { cluster, roles } from './helper.js'
-import { decodeFrame } from '../src/wire.js'
+import { cluster, roles, until } from './helper.js'
+import { decodeFrame, framePayload } from '../src/wire.js'
 import { readApply } from '../src/utils.js'
 import * as Err from '../src/error.js'
+
+for (const localDelay of [0, 2]) {
+  test(`malformed remote MessagePack is diagnosed by each Proc with ${localDelay ? 'delayed' : 'synchronous'} local transport`, async (t) => {
+    const received = []
+    const c = cluster({
+      opts: { tickInterval: 1_000, localTimeout: 100 },
+      localDelay,
+      local({ id, from, to, frame }) {
+        if (id !== 'a' || from !== 'gate') { return }
+        const message = decodeFrame(frame)
+        if (message.type === 'input' && message.kind === 'rpc') {
+          received.push({ to, frame: message.frame })
+        }
+      },
+    })
+    try {
+      const node = c.nodes.get('a')
+      await node.gate.open()
+      const malformed = framePayload(Buffer.from([0xdb, 0, 0, 0, 10, 65]))
+      node.gate.onReceive('b', malformed)
+      t.equal(c.errors.length, 0, 'Gate accepts the checksum without parsing the payload')
+      await until(() => c.errors.some(({ role }) => role === 'gate'), 'Gate completion timeout')
+      t.deepEqual(received.map(({ to }) => to), roles, 'all three Procs receive the remote input')
+      t.ok(received.every(({ frame }) => frame.equals(malformed)), 'fanout preserves the exact remote bytes')
+      t.deepEqual(c.errors.map(({ role, error }) => [role, error.code]), [
+        ...roles.map((role) => [role, Err.FRAME_CORRUPT]),
+        ['gate', Err.LOCAL_TIMEOUT],
+      ], 'each Proc reports its own decode failure before Gate reports missing completion')
+      t.ok(roles.every((role) => node[role].db === null), 'all failing Procs close their own stores')
+      t.notOk(node.gate.isOpen)
+      t.notEqual(node.apply.db, null, 'Gate does not implicitly close the remaining owner')
+      t.equal(c.calls.length, 0, 'malformed input never invokes Apply')
+    } finally { await c.close() }
+    t.end()
+  })
+}
+
+test('a bad remote checksum stops Gate before local fanout', async (t) => {
+  const received = []
+  const c = cluster({
+    opts: { tickInterval: 1_000, localTimeout: 100 },
+    local({ id, from, frame }) {
+      if (id !== 'a' || from !== 'gate') { return }
+      const message = decodeFrame(frame)
+      if (message.type === 'input' && message.kind === 'rpc') { received.push(message) }
+    },
+  })
+  try {
+    const node = c.nodes.get('a')
+    await node.gate.open()
+    const corrupt = framePayload(Buffer.from([0xdb, 0, 0, 0, 10, 65]))
+    corrupt[0] ^= 1
+    node.gate.onReceive('b', corrupt)
+    t.deepEqual(c.errors.map(({ role, error }) => [role, error.code]),
+      [['gate', Err.FRAME_CORRUPT]], 'Gate reports checksum corruption immediately')
+    t.equal(c.errors[0].error.message, 'frame checksum differs')
+    t.notOk(node.gate.isOpen)
+    t.equal(received.length, 0, 'corrupt bytes are never dispatched to the Procs')
+    t.ok(roles.every((role) => node[role].isOpen), 'Proc owners remain open until explicit cleanup')
+    t.equal(c.calls.length, 0)
+  } finally { await c.close() }
+  t.end()
+})
 
 test('failed startup reports locally and leaves remaining owners for explicit cleanup', async (t) => {
   const messages = []

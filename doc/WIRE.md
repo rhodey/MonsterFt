@@ -35,10 +35,18 @@ Packages encoded payload bytes with a supplied or computed checksum.
 
 no findings
 
-## `decodeFrame`
+## `encodeFrame`
 
-Validates a frame's checksum and decodes its payload. Rejects incomplete or
-corrupt frames.
+Encodes a value as a checksummed frame.
+
+### findings
+
+no findings
+
+## `verifyFrame`
+
+Validates a frame's checksum and returns its encoded payload. Rejects incomplete
+or corrupt frames without decoding MessagePack.
 
 ### findings
 

@@ -5,8 +5,8 @@ import { EncryptingStream, DecryptingStream } from '../src/index.js'
 
 const immediate = () => new Promise((res) => setImmediate(res))
 
-async function encryptChunks(key, input) {
-  const encrypt = new EncryptingStream(key)
+async function encryptChunks(key, input, opts) {
+  const encrypt = new EncryptingStream(key, opts)
   const chunks = []
   encrypt.on('data', (chunk) => chunks.push(Buffer.from(chunk)))
   const ended = once(encrypt, 'end')
@@ -95,6 +95,29 @@ test('encrypting and decrypting streams round trip messages', async (t) => {
   await ended
   t.equal(output.length, input.length, 'preserves message boundaries')
   t.ok(output.every((chunk, idx) => chunk.equals(input[idx])), 'preserves message data')
+})
+
+test('object-mode encrypted streams preserve buffered message boundaries and empty frames', async (t) => {
+  await sodium.ready
+  const key = Buffer.from(sodium.crypto_secretstream_xchacha20poly1305_keygen())
+  const input = Array.from({ length: 64 }, (_, index) => Buffer.alloc(index * 7, index))
+  const chunks = await encryptChunks(key, input, { writableObjectMode: true })
+  t.equal(chunks.length, input.length + 1, 'encryption emits a header and a record for every input')
+  const decrypt = new DecryptingStream(key, {
+    readableObjectMode: true,
+    readableHighWaterMark: 2,
+  })
+  let finished = false
+  decrypt.end(Buffer.concat(chunks), () => { finished = true })
+  await immediate()
+  t.equal(decrypt.readableLength, 2, 'readable backpressure counts messages')
+  t.notOk(finished, 'the coalesced write waits for buffered messages to be read')
+  const output = [decrypt.read(10_000)]
+  t.deepEqual(output[0], input[0], 'a buffered read returns exactly one empty message')
+  for await (const frame of decrypt) { output.push(frame) }
+  t.deepEqual(output, input, 'later reads preserve each message through repeated backpressure')
+  t.ok(finished, 'the write finishes after all encrypted records are consumed')
+  t.end()
 })
 
 test('decrypted messages survive later pulls and stream destruction', async (t) => {

@@ -1,39 +1,31 @@
 import net from 'node:net'
-import { PackrStream, UnpackrStream } from 'msgpackr'
+import { Transform } from 'node:stream'
 import { EncryptingStream, DecryptingStream } from './stream.js'
 import * as Err from './error.js'
 
 const noop = () => {}
 
-// MessagePack supplies TCP boundaries; the inner checksummed frame stays exact.
-class FramePackrStream extends PackrStream {
+// Object mode preserves one Buffer per encrypted message, even while buffered.
+class FrameStream extends Transform {
   // Socket closure destroys this stream after downstream writes have drained.
-  constructor() { super({ useRecords: false, sequential: false, autoDestroy: false }) }
+  constructor() { super({ objectMode: true, autoDestroy: false }) }
 
   _transform(frame, encoding, callback) {
     if (!Buffer.isBuffer(frame)) {
       callback(new Err.ErrorWithCode('TCP message must be a Buffer', Err.ARGUMENT_ILLEGAL))
       return
     }
-    super._transform(frame, encoding, callback)
+    callback(null, frame)
   }
-}
-
-function requireFrame(frame) {
-  if (!Buffer.isBuffer(frame)) {
-    throw new Err.ErrorWithCode('TCP message must be a Buffer', Err.RPC_ILLEGAL)
-  }
-  return frame
 }
 
 function tcpServer(key, port, msgCb, errCb) {
   const server = net.createServer((sock) => {
     let decrypt
-    let unpack
-    let pack
+    let frames
     let encrypt
     const close = () => {
-      const streams = [decrypt, unpack, pack, encrypt, sock]
+      const streams = [decrypt, frames, encrypt, sock]
       streams.forEach((stream) => stream?.unpipe())
       streams.forEach((stream) => stream?.removeAllListeners())
       streams.forEach((stream) => stream?.destroy())
@@ -47,23 +39,16 @@ function tcpServer(key, port, msgCb, errCb) {
     }
     sock.on('error', onError)
     try {
-      decrypt = new DecryptingStream(key)
-      unpack = new UnpackrStream({ useRecords: false })
-      pack = new FramePackrStream()
-      encrypt = new EncryptingStream(key)
+      decrypt = new DecryptingStream(key, { readableObjectMode: true })
+      frames = new FrameStream()
+      encrypt = new EncryptingStream(key, { writableObjectMode: true })
       decrypt.on('error', onError)
-      unpack.on('error', onError)
-      pack.on('error', onError)
+      frames.on('error', onError)
       encrypt.on('error', onError)
       sock.once('close', close)
-      pack.once('close', close)
-      const onData = (data) => {
-        let frame
-        try { frame = requireFrame(data) } catch (err) { onError(err); return }
-        msgCb(pack, frame)
-      }
-      sock.pipe(decrypt).pipe(unpack).on('data', onData)
-      pack.pipe(encrypt).pipe(sock)
+      frames.once('close', close)
+      sock.pipe(decrypt).on('data', (frame) => msgCb(frames, frame))
+      frames.pipe(encrypt).pipe(sock)
     } catch (err) {
       onError(err)
     }
@@ -88,17 +73,16 @@ function tcpServer(key, port, msgCb, errCb) {
 function tcpClient(key, port, host, msgCb=noop) {
   const sock = new net.Socket()
   return new Promise((res, rej) => {
-    let pack
+    let frames
     let encrypt
     let decrypt
-    let unpack
     const close = () => {
-      const streams = [encrypt, decrypt, unpack, sock]
-      pack?.unpipe()
+      const streams = [encrypt, decrypt, sock]
+      frames?.unpipe()
       streams.forEach((stream) => stream?.unpipe())
       streams.forEach((stream) => stream?.removeAllListeners())
       streams.forEach((stream) => stream?.destroy())
-      pack?.destroy()
+      frames?.destroy()
     }
     const onConnectError = (err) => {
       close()
@@ -114,14 +98,13 @@ function tcpClient(key, port, host, msgCb=noop) {
       sock.removeListener('error', onConnectError)
       sock.removeListener('close', onConnectClose)
       try {
-        pack = new FramePackrStream()
-        pack.on('error', close)
-        encrypt = new EncryptingStream(key)
-        decrypt = new DecryptingStream(key)
-        unpack = new UnpackrStream({ useRecords: false })
+        frames = new FrameStream()
+        frames.on('error', close)
+        encrypt = new EncryptingStream(key, { writableObjectMode: true })
+        decrypt = new DecryptingStream(key, { readableObjectMode: true })
         const abort = (err) => {
           try {
-            pack.emit('error', err)
+            frames.emit('error', err)
           } finally {
             close()
           }
@@ -129,26 +112,20 @@ function tcpClient(key, port, host, msgCb=noop) {
         sock.on('error', (err) => abort(Err.wrapError(err, null, 'net error ')))
         encrypt.on('error', (err) => abort(Err.wrapError(err, null, 'encrypt error ')))
         decrypt.on('error', (err) => abort(Err.wrapError(err, null, 'decrypt error ')))
-        unpack.on('error', (err) => abort(Err.wrapError(err, null, 'unpack error ')))
-        pack.once('close', () => {
+        frames.once('close', () => {
           close()
-          pack.removeAllListeners()
+          frames.removeAllListeners()
         })
         sock.once('close', close)
-        pack.pipe(encrypt).pipe(sock)
-        const onData = (data) => {
-          let frame
-          try { frame = requireFrame(data) } catch (err) { abort(err); return }
-          msgCb(frame)
-        }
-        sock.pipe(decrypt).pipe(unpack).on('data', onData)
+        frames.pipe(encrypt).pipe(sock)
+        sock.pipe(decrypt).on('data', (frame) => msgCb(frame))
       } catch (err) {
         close()
-        pack?.removeAllListeners()
+        frames?.removeAllListeners()
         rej(err)
         return
       }
-      res(pack)
+      res(frames)
     })
     try {
       sock.connect(port, host)

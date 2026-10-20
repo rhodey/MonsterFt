@@ -3,7 +3,7 @@ import crypto from 'node:crypto'
 import { Executor } from '../src/executor.js'
 import { Random } from '../src/random.js'
 import {
-  encodeFrame, decodeFrame, encodePayload, decodePayload,
+  encodeFrame, verifyFrame, decodeFrame, encodePayload, decodePayload,
   checksum, framePayload, errorToWire, errorFromWire,
 } from '../src/wire.js'
 import * as Err from '../src/error.js'
@@ -179,6 +179,9 @@ test('encoded frames preserve their bytes across later encodes and delayed sends
 
 test('frames reject corrupt bytes and malformed payloads', (t) => {
   const frame = encodeFrame({ type: 'tick', tickCount: 1n })
+  const payload = verifyFrame(frame)
+  t.deepEqual(payload, frame.subarray(32), 'verification returns the encoded payload')
+  t.equal(payload.buffer, frame.buffer, 'verification does not copy the payload')
   for (const offset of [0, 31, 32, frame.length - 1]) {
     const corrupt = Buffer.from(frame)
     corrupt[offset] ^= 1
@@ -188,7 +191,10 @@ test('frames reject corrupt bytes and malformed payloads', (t) => {
     t.throws(() => decodeFrame(incomplete), (err) => err.code === Err.FRAME_CORRUPT)
   }
   const malformed = Buffer.from([0xdb, 0, 0, 0, 10, 65])
-  t.throws(() => decodeFrame(framePayload(malformed, checksum(malformed))),
+  const malformedFrame = framePayload(malformed, checksum(malformed))
+  t.deepEqual(verifyFrame(malformedFrame), malformed,
+    'checksum verification leaves payload decoding to the recipient')
+  t.throws(() => decodeFrame(malformedFrame),
     (err) => err.code === Err.FRAME_CORRUPT, 'a valid checksum does not authorize malformed MessagePack')
   t.end()
 })
