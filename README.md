@@ -53,19 +53,19 @@ function createNode(id) {
 
   const databasePath = `/tmp/node${id}.db`
   const opts = {}
-  const processes = new Map()
+  const components = new Map()
   const localSend = (from) => (to, frame) => {
-    return processes.get(to).onReceive(from, frame)
+    return components.get(to).onReceive(from, frame)
   }
 
   const gate = new Gate(id, nodeIds, send, localSend('gate'), opts)
-  processes.set('gate', gate)
+  components.set('gate', gate)
   for (const role of ['procA', 'procB', 'procC']) {
-    processes.set(role, new MonsterProc(
+    components.set(role, new MonsterProc(
       role, id, nodeIds, localSend(role), databasePath, opts,
     ))
   }
-  processes.set('apply', new MonsterApply(
+  components.set('apply', new MonsterApply(
     id, localSend('apply'), databasePath, { apply },
   ))
 
