@@ -43,7 +43,7 @@ function createNode(id) {
 
     db.prepare(`
       INSERT INTO counters (name, value) VALUES (?, 1)
-      ON CONFLICT (name) DO UPDATE SET value = value + 1
+        ON CONFLICT (name) DO UPDATE SET value = value + 1
     `).run(command.name)
 
     return db.prepare(
