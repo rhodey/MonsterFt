@@ -1,5 +1,6 @@
 import { createHash } from 'node:crypto'
 import { Packr, Unpackr } from 'msgpackr'
+import { RESERVE_START_SPACE } from 'msgpackr/pack'
 import * as Err from './error.js'
 
 const encoder = new Packr({ useRecords: false, sequential: false })
@@ -21,7 +22,12 @@ function framePayload(payload, hash = checksum(payload)) {
   return Buffer.concat([hash, payload])
 }
 
-const encodeFrame = (value) => framePayload(encodePayload(value))
+function encodeFrame(value) {
+  // Encode directly after the space reserved for the checksum.
+  const frame = encoder.pack(value, RESERVE_START_SPACE | 32)
+  checksum(frame.subarray(32)).copy(frame, 0)
+  return frame
+}
 
 function decodeFrame(frame) {
   if (!Buffer.isBuffer(frame) || frame.length <= 32) {

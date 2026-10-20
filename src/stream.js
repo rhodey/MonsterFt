@@ -15,10 +15,9 @@ class EncryptingStream extends Transform {
       const bytes = sodium.crypto_secretstream_xchacha20poly1305_push(this.state,
         chunk, null, sodium.crypto_secretstream_xchacha20poly1305_TAG_MESSAGE,
       )
-      const buf = Buffer.from(bytes)
-      const len = Buffer.allocUnsafe(4)
-      len.writeUInt32BE(buf.byteLength)
-      output = Buffer.concat([len, buf])
+      output = Buffer.allocUnsafe(4 + bytes.byteLength)
+      output.writeUInt32BE(bytes.byteLength)
+      output.set(bytes, 4)
     } catch (err) {
       callback(err)
       return
@@ -153,7 +152,8 @@ class DecryptingStream extends Transform {
 
         const res = sodium.crypto_secretstream_xchacha20poly1305_pull(this.state, frame)
         if (!res) { throw new Error('stream decrypt error') }
-        const ready = this.push(Buffer.from(res.message))
+        const message = res.message
+        const ready = this.push(Buffer.from(message.buffer, message.byteOffset, message.byteLength))
         if (this.destroyed || !this.transformCallback) { break }
         if (!ready) {
           this.backpressured = true

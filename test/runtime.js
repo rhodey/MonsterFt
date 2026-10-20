@@ -148,6 +148,35 @@ test('frames decode independently and preserve nested records and shared errors'
   t.end()
 })
 
+test('encoded frames preserve their bytes across later encodes and delayed sends', async (t) => {
+  const sizes = [0, 1, 31, 32, 255, 256, 65_535, 65_536, 131_072]
+  const messages = sizes.map((size) => ({
+    type: 'input', tickCount: 9n, frame: encodeFrame({
+      term: 9_223_372_036_854_775_807n,
+      data: [{ term: 0n, entry: Buffer.alloc(size, 0xa5) }],
+    }),
+  }))
+  const saved = messages.map((message) => ({
+    expected: framePayload(encodePayload(message)),
+    frame: encodeFrame(message),
+    message,
+  }))
+  for (const { expected, frame } of saved) {
+    t.deepEqual(frame, expected, 'reserved prefix preserves the existing frame format')
+  }
+  await new Promise((resolve) => setImmediate(resolve))
+  for (let i = 0; i < 100; i++) {
+    const value = { data: Buffer.alloc(100 + i * 1_000, i) }
+    encodePayload(value)
+    encodeFrame(value)
+  }
+  for (const { expected, frame, message } of saved) {
+    t.deepEqual(frame, expected, 'later encodes leave queued frame bytes intact')
+    t.deepEqual(decodeFrame(frame), message, 'queued frame still verifies and decodes independently')
+  }
+  t.end()
+})
+
 test('frames reject corrupt bytes and malformed payloads', (t) => {
   const frame = encodeFrame({ type: 'tick', tickCount: 1n })
   for (const offset of [0, 31, 32, frame.length - 1]) {

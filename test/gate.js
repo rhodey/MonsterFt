@@ -177,6 +177,41 @@ test('Gate releases agreed outputs but waits for all three before next input', a
   t.end()
 })
 
+test('Gate shares one stable input frame across synchronous and delayed fanout', async (t) => {
+  for (const delayed of [false, true]) {
+    const saved = []
+    const h = harness({
+      local({ to, message, frame, complete }) {
+        if (message.type !== 'input') { return false }
+        saved.push({ frame, bytes: Buffer.from(frame), message })
+        const respond = () => complete(to, message,
+          message.kind === 'append' ? [client(message)] : [])
+        if (delayed) { setImmediate(respond) } else { respond() }
+        return true
+      },
+    })
+    try {
+      await h.gate.open()
+      t.deepEqual(await h.gate.append(Buffer.from('one')), [3n, 'one'])
+      t.deepEqual(await h.gate.append(Buffer.from('two')), [3n, 'two'])
+      await immediate()
+      const inputs = h.requests.filter((request) =>
+        request.to === 'procA' && request.message.type === 'input')
+      t.equal(inputs.length, 3, 'startup and both commands complete')
+      for (const input of inputs) {
+        const fanout = saved.filter(({ message }) => message.cid === input.message.cid)
+        t.equal(fanout.length, 3, 'every Proc receives the input')
+        t.ok(fanout.every(({ frame }) => frame === input.frame),
+          'all Procs receive the same encoded Buffer')
+        t.ok(fanout.every(({ frame, bytes }) => frame.equals(bytes)),
+          'interleaved replies and later inputs cannot overwrite retained frames')
+      }
+      t.equal(h.errors.length, 0)
+    } finally { await h.gate.close() }
+  }
+  t.end()
+})
+
 test('Gate detects checksum-only disagreement without waiting for ProcA', async (t) => {
   const h = harness({
     local({ to, message, reply }) {
@@ -597,15 +632,19 @@ test('Gate rejects differing startup selections before adoption', async (t) => {
 })
 
 test('Gate missing completion fatally times out without input retries', async (t) => {
-  const h = harness({
-    opts: { localTimeout: 15 },
-    local({ to, message }) { return to === 'procC' && message.kind === 'append' },
-  })
-  await h.gate.open()
-  await assert.rejects(h.gate.append(Buffer.from('wait')), { code: Err.LOCAL_TIMEOUT })
-  t.equal(h.requests.filter((r) => r.to === 'procC' && r.message.kind === 'append').length, 1)
-  t.equal(h.errors[0].code, Err.LOCAL_TIMEOUT)
-  await h.gate.close()
+  for (const missing of procs) {
+    const h = harness({
+      opts: { localTimeout: 15 },
+      local({ to, message }) { return to === missing && message.kind === 'append' },
+    })
+    try {
+      await h.gate.open()
+      await assert.rejects(h.gate.append(Buffer.from('wait')), { code: Err.LOCAL_TIMEOUT })
+      t.equal(h.requests.filter((r) => r.to === missing && r.message.kind === 'append').length, 1)
+      t.equal(h.errors[0].code, Err.LOCAL_TIMEOUT, `${missing} retains its own completion timeout`)
+      t.equal(h.gate._requests.size, 0, 'failure clears the remaining requests')
+    } finally { await h.gate.close() }
+  }
   t.end()
 })
 

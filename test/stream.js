@@ -97,6 +97,36 @@ test('encrypting and decrypting streams round trip messages', async (t) => {
   t.ok(output.every((chunk, idx) => chunk.equals(input[idx])), 'preserves message data')
 })
 
+test('decrypted messages survive later pulls and stream destruction', async (t) => {
+  t.plan(4)
+  await sodium.ready
+  const key = Buffer.from(sodium.crypto_secretstream_xchacha20poly1305_keygen())
+  const input = [
+    Buffer.from('retained message'),
+    Buffer.alloc(96 * 1024, 42).subarray(7, -9),
+    Buffer.from('last message'),
+  ]
+  const chunks = await encryptChunks(key, input)
+  const decrypt = new DecryptingStream(key)
+  const output = []
+  decrypt.on('data', (chunk) => output.push(chunk))
+  decrypt.write(Buffer.concat(chunks.slice(0, 2)))
+  t.ok(output[0].equals(input[0]), 'delivers the first plaintext before later pulls')
+  decrypt.write(Buffer.concat(chunks.slice(2)))
+  t.ok(output.every((chunk, idx) => chunk.equals(input[idx])), 'later pulls preserve retained plaintext')
+  const closed = closeEvent(decrypt)
+  decrypt.destroy()
+  await closed
+  t.ok(output.every((chunk, idx) => chunk.equals(input[idx])), 'freeing native state preserves plaintext')
+
+  const another = new DecryptingStream(key)
+  another.on('data', (chunk) => chunk.fill(0))
+  const ended = once(another, 'end')
+  another.end(Buffer.concat(chunks))
+  await ended
+  t.ok(output.every((chunk, idx) => chunk.equals(input[idx])), 'new decryption and mutation cannot change retained plaintext')
+})
+
 test('decrypting stream drains coalesced output after backpressure', async (t) => {
   t.plan(2)
   await sodium.ready

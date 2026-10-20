@@ -260,11 +260,14 @@ class Gate extends EventEmitter {
   }
 
   async _runInput(input) {
+    let frame
+    try { frame = wire.encodeFrame(input) }
+    catch (err) { throw Err.wrapError(err, Err.SEND_ERROR, '(localSend) ') }
     const completed = new Map()
     let released = false
     await Promise.all(PROCS.map(async (to) => {
       try {
-        const reply = await this._request(to, input)
+        const reply = await this._request(to, input, this.localTimeout, false, frame)
         if (this._closing) { throw this._shutdownError ?? nodeClosed() }
         if (!Array.isArray(reply.outputs) || !reply.outputs.every((value) =>
           Buffer.isBuffer(value) && (to === 'procA' || value.length === 32))) {
