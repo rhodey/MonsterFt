@@ -52,17 +52,16 @@ function createNode(id) {
   }
 
   const databasePath = `/tmp/node${id}.db`
-  const opts = {}
   const components = new Map()
   const localSend = (from) => (to, frame) => {
     return components.get(to).onReceive(from, frame)
   }
 
-  const gate = new Gate(id, nodeIds, send, localSend('gate'), opts)
+  const gate = new Gate(id, nodeIds, send, localSend('gate'))
   components.set('gate', gate)
   for (const role of ['procA', 'procB', 'procC']) {
     components.set(role, new MonsterProc(
-      role, id, nodeIds, localSend(role), databasePath, opts,
+      role, id, nodeIds, localSend(role), databasePath,
     ))
   }
   components.set('apply', new MonsterApply(
@@ -145,7 +144,7 @@ Raft log to target limits. Each MonsterFt command adds two log entries: one
 `CMD` and one `SYNC`. Raft also comes with post-election no-op entries but
 in general `keepTarget` of 1,000 will retain 500 commands.
 
-Pass the same retention options to each `MonsterProc` through `opts` above:
+Pass the same retention options to each `MonsterProc` through `opts`:
 
 ```js
 const opts = {
