@@ -370,7 +370,7 @@ test('Gate transport failures warn and close cancels awaiting leader', async (t)
 test('Gate awaitEvent preserves every thrown value', async (t) => {
   const h = harness({
     outputs: (input) => input.kind === 'append' ? [wire.encodePayload({
-      to: 'event', message: { type: 'cmd', cmdSeq: 3n, cmdCount: 1, status: { appliedSeq: 3n } },
+      to: 'event', message: { type: 'cmd', cmdSeq: 3n, cmdCount: 1, status: { commitSeq: 3n } },
     }), client(input)] : [],
   })
   const error = new Error('condition failed')
@@ -400,7 +400,7 @@ test('Gate awaitEvent preserves every thrown value', async (t) => {
 test('Gate awaitEvent filters events and rejects if its condition closes Gate', async (t) => {
   const h = harness({
     outputs: (input) => input.kind === 'append' ? [wire.encodePayload({
-      to: 'event', message: { type: 'cmd', cmdSeq: 3n, cmdCount: 1, status: { appliedSeq: 3n } },
+      to: 'event', message: { type: 'cmd', cmdSeq: 3n, cmdCount: 1, status: { commitSeq: 3n } },
     }), client(input)] : [],
   })
   try {
@@ -573,7 +573,10 @@ test('Gate rejects diagnostic and unknown event outputs instead of forwarding th
 })
 
 test('Gate preserves supported protocol events', async (t) => {
-  const status = { state: 'leader', leaderId: 'a', term: 1n }
+  const status = {
+    state: 'leader', leader: 'a', term: 1n, seq: 4n,
+    commitSeq: 4n, commitTerm: 1n, followers: ['b'],
+  }
   const messages = [
     { type: 'change' },
     { type: 'commit', seq: 3n },
@@ -592,10 +595,42 @@ test('Gate preserves supported protocol events', async (t) => {
     await h.gate.open()
     t.deepEqual(await h.gate.append(Buffer.from('work')), [3n, 'work'])
     t.deepEqual(events.map(([type]) => type), messages.map(({ type }) => type))
-    t.equal(events[0][1].leader, 'a')
+    t.deepEqual(events[0][1], status, 'change contains only the seven status fields')
     t.equal(events[1][1], 3n)
     t.deepEqual(events[2][1], messages[2])
     t.deepEqual(events[3][1], messages[3])
+    t.equal(h.errors.length, 0)
+  } finally { await h.gate.close() }
+  t.end()
+})
+
+test('both awaitLeader modes observe leader and commit changes without applied progress', async (t) => {
+  let committed = false
+  const h = harness({
+    outputs: (input) => input.kind === 'append' ? [wire.encodePayload({
+      to: 'event',
+      message: { type: 'change', status: {
+        state: 'follower', leader: 'b', term: 2n, seq: 4n,
+        commitSeq: committed ? 4n : 3n, commitTerm: committed ? 2n : 1n, followers: [],
+      } },
+    }), client(input)] : [],
+  })
+  try {
+    await h.gate.open()
+    const known = h.gate.awaitLeader()
+    let ready = false
+    const currentTerm = h.gate.awaitLeader(true).then(() => { ready = true })
+    known.catch(() => {})
+    currentTerm.catch(() => {})
+    await h.gate.append(Buffer.from('leader known'))
+    await known
+    t.equal(h.gate.leader, 'b')
+    t.notOk(ready, 'committed-leader wait remains pending until the current term commits')
+    committed = true
+    await h.gate.append(Buffer.from('current term committed'))
+    await currentTerm
+    t.ok(ready)
+    t.notOk('appliedSeq' in h.gate)
     t.equal(h.errors.length, 0)
   } finally { await h.gate.close() }
   t.end()

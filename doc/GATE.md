@@ -95,7 +95,8 @@ no findings
 ## `_event`
 
 Updates Gate's public node status before delivering each agreed protocol event
-to listeners.
+to listeners. A `change` payload contains only the role, leader, log and commit
+positions, and live followers.
 
 ### findings
 

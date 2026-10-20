@@ -44,7 +44,8 @@ no findings
 
 ## `event`
 
-Publishes a protocol event with the node status at the point it occurred.
+Publishes a protocol event with the role, leader, log and commit positions,
+and live followers at the point it occurred.
 
 ### findings
 
@@ -61,6 +62,7 @@ no findings
 ## `change`
 
 Publishes the current role, leader, log progress, and live followers.
+Repeated identical notifications are allowed.
 
 ### findings
 

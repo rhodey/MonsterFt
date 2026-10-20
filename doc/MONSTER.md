@@ -65,7 +65,7 @@ no findings
 ## `applyReady`
 
 Processes committed protocol entries and requests Apply execution when setup or
-a command is ready.
+a command is ready. Apply progress alone does not emit `change`.
 
 ### findings
 

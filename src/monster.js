@@ -108,7 +108,6 @@ class MonsterEngine extends RaftEngine {
       this.prune()
       if (this.finishDrain()) { return }
     }
-    this.change()
     this.pumpLeader()
     this.finishDrain()
   }

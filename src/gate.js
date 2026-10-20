@@ -51,7 +51,6 @@ class Gate extends EventEmitter {
     this.seq = -1n
     this.commitSeq = -1n
     this.commitTerm = -1n
-    this.appliedSeq = -1n
     this.followers = []
     this._send = send
     this._localSend = localSend
@@ -353,15 +352,11 @@ class Gate extends EventEmitter {
     if (status === null || typeof status !== 'object') {
       throw rpcIllegal('output has invalid event status')
     }
-    for (const key of ['state', 'term', 'seq', 'commitSeq', 'commitTerm', 'appliedSeq', 'followers']) {
+    for (const key of ['state', 'leader', 'term', 'seq', 'commitSeq', 'commitTerm', 'followers']) {
       if (Object.hasOwn(status, key)) { this[key] = status[key] }
     }
-    if (Object.hasOwn(status, 'leaderId')) { this.leader = status.leaderId }
     if (message.type === 'change') {
-      this._emitSafe('change', {
-        ...message, ...status, id: this.id, nodes: [...this.nodes], leader: this.leader,
-        open: this.isOpen,
-      })
+      this._emitSafe('change', status)
     } else if (message.type === 'commit') {
       this._emitSafe('commit', message.seq)
     } else {
