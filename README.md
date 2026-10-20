@@ -51,21 +51,21 @@ function createNode(id) {
     ).get(command.name).value
   }
 
-  const components = new Map()
+  const local = new Map()
   const localSend = (from) => (to, frame) => {
-    return components.get(to).onReceive(from, frame)
+    return local.get(to).onReceive(from, frame)
   }
 
   const gate = new Gate(id, nodeIds, send, localSend('gate'))
-  components.set('gate', gate)
+  local.set('gate', gate)
 
   const databasePath = `/tmp/node${id}.db`
   for (const role of ['procA', 'procB', 'procC']) {
-    components.set(role, new MonsterProc(
+    local.set(role, new MonsterProc(
       role, id, nodeIds, localSend(role), databasePath,
     ))
   }
-  components.set('apply', new MonsterApply(
+  local.set('apply', new MonsterApply(
     id, localSend('apply'), databasePath, { apply },
   ))
 
@@ -87,9 +87,8 @@ console.log('count =', value)
 
 `send(to, frame)` carries Buffer frames and may be synchronous or async. A real
 deployment delivers each frame to `target.onReceive(senderId, frame)`. Await
-`open()` and `close()` on Gate, which coordinates the other components;
-shutdown waits for outstanding Apply work. Reopening uses fresh component
-instances.
+`open()` and `close()` on Gate, which coordinates the local components;
+shutdown waits for outstanding Apply work. Reopening uses fresh instances.
 
 The example constructs Gate, ProcA/B/C, and Apply in one process and connects
 them through `localSend`. Each Proc has its own protocol database; Apply alone
