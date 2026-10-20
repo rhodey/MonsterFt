@@ -93,8 +93,8 @@ instances.
 
 The example constructs Gate, ProcA/B/C, and Apply in one process and connects
 them through `localSend`. Each Proc has its own protocol database; Apply alone
-writes the application database. The files are `${databasePath}.a`, `.b`, `.c`,
-and `${databasePath}2`.
+writes the application database. The files are `${databasePath}1a`,
+`${databasePath}1b`, `${databasePath}1c`, and `${databasePath}2`.
 V2 requires file-backed databases and a fresh layout; there is no migration
 from earlier releases.
 

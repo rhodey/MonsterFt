@@ -201,7 +201,7 @@ test('cluster dissenting follower warns before its repair fence closes it', asyn
     t.equal(relevant[0][1].stack, 'dissenting follower trace')
     t.equal(relevant[1][0], 'error')
     t.equal(relevant[1][1].code, Err.REPAIR_OUTSIDE_AGREEMENT)
-    const db = new DatabaseSync(`${c.directory}/${dissenter}.a`, { readOnly: true, readBigInts: true })
+    const db = new DatabaseSync(`${c.directory}/${dissenter}1a`, { readOnly: true, readBigInts: true })
     try {
       t.equal(db.prepare('SELECT repair_state FROM monsterft_meta').get().repair_state, 2n,
         'repair fence is durable before shutdown')
@@ -236,7 +236,7 @@ for (const committed of [1, 2]) {
       await until(() => members.procA.log.seq > before, 'first interrupted commit')
       await original.close()
       t.equal((await pending).code, Err.NODE_NOT_OPEN)
-      const states = roles.map((role, index) => readDatabase(`${c.directory}/${target}.${'abc'[index]}`, readState))
+      const states = roles.map((role, index) => readDatabase(`${c.directory}/${target}1${'abc'[index]}`, readState))
       t.equal(states[0].head.seq, before + 1n)
       t.equal(states[committed].head.seq, before, 'unprocessed Proc retains entire old state')
       t.ok(stateDigest(states[committed === 1 ? 1 : 0]).equals(

@@ -122,7 +122,7 @@ test('runs nine independent protocol processes against shared files with delayed
     await until(() => [...members.values()].every(({ base }) => {
       const receipt = read(`${base}2`, readApply)
       return receipt.seq > 0n && roles.every((role) => {
-        const meta = read(`${base}.${role.at(-1).toLowerCase()}`, readMeta)
+        const meta = read(`${base}1${role.at(-1).toLowerCase()}`, readMeta)
         return meta.pending_cmd_seq === null && meta.applied_seq > receipt.seq
       })
     }), 'completed SYNC across separate processes')
@@ -135,7 +135,7 @@ test('runs nine independent protocol processes against shared files with delayed
     const exits = await bounded(Promise.all(children.map((record) => record.exited)), 'OS process exit')
     t.ok(exits.every(({ code, signal }) => code === 0 && signal === null), 'all nine OS processes exit normally')
     for (const { base, gate } of members.values()) {
-      const states = roles.map((role) => read(`${base}.${role.at(-1).toLowerCase()}`, (db) => stateDigest(readState(db))))
+      const states = roles.map((role) => read(`${base}1${role.at(-1).toLowerCase()}`, (db) => stateDigest(readState(db))))
       t.ok(states.every((state) => state.equals(states[0])), `${gate.id} protocol files agree after shutdown`)
       t.deepEqual(read(`${base}2`, (db) => db.prepare('SELECT value FROM items ORDER BY id').all()
         .map((row) => Buffer.from(row.value).toString())), ['first', 'second'])

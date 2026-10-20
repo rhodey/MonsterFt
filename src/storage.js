@@ -22,7 +22,7 @@ function databasePaths(base) {
       'databasePath must be a non-empty file path', Err.ARGUMENT_ILLEGAL)
   }
   return {
-    procA: `${base}.a`, procB: `${base}.b`, procC: `${base}.c`, apply: `${base}2`,
+    procA: `${base}1a`, procB: `${base}1b`, procC: `${base}1c`, apply: `${base}2`,
   }
 }
 

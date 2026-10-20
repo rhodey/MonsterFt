@@ -117,7 +117,7 @@ test('a late unlisted patchset dissenter fences without producing another decisi
     t.equal(decisions(healthy).length, 1)
     const target = c.nodes.get(slow)
     await target.gate.close()
-    const db = new DatabaseSync(`${c.directory}/${slow}.a`, { readOnly: true, readBigInts: true })
+    const db = new DatabaseSync(`${c.directory}/${slow}1a`, { readOnly: true, readBigInts: true })
     try { t.equal(readMeta(db).repair_state, 2n) } finally { db.close() }
     const reopened = c.makeNode(slow)
     t.equal((await rejection(reopened.gate.open())).code, Err.LOCAL_TIMEOUT, 'state 2 cannot start protocol')
@@ -256,7 +256,7 @@ test('five-node donor repair preserves completed work while the remaining quorum
     certify(`${c.directory}/${donorId}`)
     t.equal((await oldLeader.append(buf('while donor stopped')))[1], 'while donor stopped',
       'three healthy nodes still form a quorum')
-    for (const suffix of ['.a', '.b', '.c', '2']) {
+    for (const suffix of ['1a', '1b', '1c', '2']) {
       for (const sidecar of ['', '-wal', '-shm', '-journal']) {
         const from = `${c.directory}/${donorId}${suffix}${sidecar}`
         const to = `${c.directory}/${bad}${suffix}${sidecar}`
@@ -434,7 +434,7 @@ test('drain rejects on transaction loss, pending SYNC failure, and terminal clos
       t.equal(closed, 1, 'explicit cleanup confirms closure after the fault is removed')
       if (fault === 'sync') {
         for (const suffix of ['a', 'b', 'c']) {
-          const db = new DatabaseSync(`${c.directory}/${target}.${suffix}`)
+          const db = new DatabaseSync(`${c.directory}/${target}1${suffix}`)
           try { db.exec('DROP TRIGGER fail_sync') } finally { db.close() }
         }
       }

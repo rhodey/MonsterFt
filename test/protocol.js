@@ -90,7 +90,7 @@ test('dissenting leader reports its original apply warning then fences before re
     t.equal(relevant[1][0], 'error')
     t.equal(relevant[1][1].code, Err.REPAIR_OUTSIDE_AGREEMENT)
     for (const suffix of ['a', 'b', 'c']) {
-      const db = new DatabaseSync(`${c.directory}/${dissenter}.${suffix}`, { readOnly: true, readBigInts: true })
+      const db = new DatabaseSync(`${c.directory}/${dissenter}1${suffix}`, { readOnly: true, readBigInts: true })
       try {
         const meta = readMeta(db)
         t.equal(meta.repair_state, 2n, 'intentional repair fence survives shutdown')
@@ -265,7 +265,7 @@ test('drain waits for pending Apply and SYNC but does not start the next command
       t.deepEqual(writes(db), ['one'], 'only the already-started command executes')
     } finally { db.close() }
     for (const suffix of ['a', 'b', 'c']) {
-      const db1 = new DatabaseSync(`${c.directory}/${slow}.${suffix}`, { readOnly: true, readBigInts: true })
+      const db1 = new DatabaseSync(`${c.directory}/${slow}1${suffix}`, { readOnly: true, readBigInts: true })
       try { t.equal(readMeta(db1).pending_cmd_seq, null, 'drain waits for the command decision') }
       finally { db1.close() }
     }
@@ -301,7 +301,7 @@ test('leader drain continues pending agreement and rejects queued commands', asy
     t.equal((await first)[1], 'one', 'in-flight command keeps its agreed result')
     await draining
     t.notOk(leader.isOpen)
-    const db = new DatabaseSync(`${c.directory}/${leader.id}.a`, { readOnly: true, readBigInts: true })
+    const db = new DatabaseSync(`${c.directory}/${leader.id}1a`, { readOnly: true, readBigInts: true })
     try { t.equal(readMeta(db).pending_cmd_seq, null) } finally { db.close() }
     t.equal(c.calls.some((call) => call.buffer?.toString() === 'queued'), false)
     t.equal(c.errors.length, 0)

@@ -2,8 +2,8 @@
 
 Use this procedure when a node reports `REPAIR_QUORUM_IMPOSSIBLE` or
 `REPAIR_OUTSIDE_AGREEMENT`, or when history can no longer catch it up due
-to retention. Each node owns four databases: `${databasePath}.a`,
-`${databasePath}.b`, `${databasePath}.c`, and `${databasePath}2`. The first
+to retention. Each node owns four databases: `${databasePath}1a`,
+`${databasePath}1b`, `${databasePath}1c`, and `${databasePath}2`. The first
 three belong to ProcA/B/C; the last belongs to Apply.
 
 1. Choose the donor whose state you accept. A successful drain closes the donor:
