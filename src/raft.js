@@ -51,6 +51,7 @@ class RaftEngine {
     this.votes = new Set()
     this.electionTimer = null
     this.heartbeatTimer = null
+    this.lastChange = null
     this.stopped = false
   }
 
@@ -73,7 +74,18 @@ class RaftEngine {
       seq: this.seq, commitSeq: this.commitSeq, commitTerm: this.commitTerm,
       followers: this.followers,
     }
+    if (type === 'change') {
+      const last = this.lastChange
+      if (last && status.state === last.state && status.leader === last.leader &&
+          status.term === last.term && status.seq === last.seq &&
+          status.commitSeq === last.commitSeq && status.commitTerm === last.commitTerm &&
+          status.followers.length === last.followers.length &&
+          status.followers.every((id, index) => id === last.followers[index])) {
+        return
+      }
+    }
     this.output('event', { type, ...fields, status })
+    if (type === 'change') { this.lastChange = status }
   }
   warn(err) { this.diagnostic?.('warn', err) }
   change() { this.event('change') }

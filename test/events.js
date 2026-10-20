@@ -1,6 +1,8 @@
 import test from 'tape'
+import { isDeepStrictEqual } from 'node:util'
 import { cluster, until, pause } from './helper.js'
 import { protocol, append, record, cmd, messages, outputs } from './fixtures/protocol.js'
+import { RaftEngine } from '../src/raft.js'
 import * as Err from '../src/error.js'
 
 const keys = (value) => Object.keys(value).sort()
@@ -9,6 +11,35 @@ const syncKeys = ['type', 'cmdSeq', 'syncSeq', 'quorum', 'agree', 'disagree'].so
 const changeKeys = [
   'state', 'leader', 'term', 'seq', 'commitSeq', 'commitTerm', 'followers',
 ].sort()
+
+test('change compares every scalar and preserves transitions between other event types', (t) => {
+  const log = { seq: -1n, elec: { term: 0n, votedFor: null } }
+  const store = { log, load: () => ({ applied_seq: -1n }) }
+  const events = []
+  const engine = new RaftEngine('a', ['a', 'b', 'c'], store, { timems: 0 }, null,
+    (to, message) => events.push(message))
+  engine.change()
+  const initial = events.shift().status
+  for (const [key, value] of [
+    ['state', 'candidate'], ['leader', 'b'], ['term', 1n],
+    ['seq', 0n], ['commitSeq', 0n], ['commitTerm', 0n],
+  ]) {
+    const target = key === 'seq' ? log : engine
+    const previous = target[key]
+    target[key] = value
+    for (const type of ['commit', 'cmd', 'sync']) { engine.event(type) }
+    engine.change()
+    engine.change()
+    target[key] = previous
+    engine.change()
+    t.deepEqual(events.map(({ type }) => type), ['commit', 'cmd', 'sync', 'change', 'change'],
+      `${key}: other events preserve the comparison baseline and only the duplicate is suppressed`)
+    t.deepEqual(events[3]?.status, { ...initial, [key]: value }, `${key}: the changed value is captured`)
+    t.deepEqual(events[4]?.status, initial, `${key}: returning to the earlier snapshot is observable`)
+    events.length = 0
+  }
+  t.end()
+})
 
 test('setup and CMD receipt imports do not publish apply-only change events', (t) => {
   const f = protocol()
@@ -32,21 +63,71 @@ test('setup and CMD receipt imports do not publish apply-only change events', (t
   t.end()
 })
 
-test('successful heartbeat responses still publish repeated identical change snapshots', (t) => {
+test('successful heartbeat responses suppress identical change snapshots', (t) => {
   const f = protocol().leader()
   try {
-    const changes = []
     const now = f.proc.executor.timems
     for (const offset of [45, 90]) {
       const tick = f.tick(now + offset)
       const heartbeat = messages(tick, 'append', 'b').find((msg) => msg.data === undefined)
       const response = f.rpc({ type: 'ack', cid: heartbeat.cid, term: heartbeat.term, seq: 1n }, 'b')
-      const events = messages(response, 'change', 'event')
-      t.equal(events.length, 1, 'successful heartbeat retains its change notification')
-      changes.push(events[0].status)
+      t.equal(messages(response, 'change', 'event').length, 0,
+        'successful heartbeat publishes no duplicate change output')
     }
-    t.deepEqual(changes[0], changes[1], 'identical snapshots are not suppressed')
-    t.deepEqual(keys(changes[0]), changeKeys)
+  } finally { f.close() }
+  t.end()
+})
+
+test('follower membership is sorted regardless of membership and response order', (t) => {
+  for (const peers of [['c', 'b'], ['b', 'c']]) {
+    const f = protocol({}, [peers[0], 'a', peers[1]]).leader()
+    try {
+      const now = f.proc.executor.timems
+      const respond = (tick, peer) => {
+        const heartbeat = messages(tick, 'append', peer).find((msg) => msg.data === undefined)
+        return f.rpc({ type: 'ack', cid: heartbeat.cid, term: heartbeat.term, seq: 1n }, peer)
+      }
+      const tick = f.tick(now + 45)
+      const joined = respond(tick, peers[1])
+      t.deepEqual(messages(joined, 'change', 'event').map(({ status }) => status.followers),
+        [['b', 'c']], 'a new member produces one sorted snapshot')
+      t.equal(messages(respond(tick, peers[0]), 'change', 'event').length, 0,
+        'refreshing an existing member does not change the snapshot')
+      const next = f.tick(now + 90)
+      for (const peer of peers) {
+        t.equal(messages(respond(next, peer), 'change', 'event').length, 0,
+          'reversing response order leaves membership unchanged')
+      }
+      for (const offset of [135, 180, 225]) {
+        t.equal(messages(respond(f.tick(now + offset), 'b'), 'change', 'event').length, 0,
+          'membership remains unchanged while the other follower is still live')
+      }
+      const expired = f.tick(now + 270)
+      t.deepEqual(messages(respond(expired, 'b'), 'change', 'event').map(({ status }) => status.followers),
+        [['b']], 'the next notification reports expired membership')
+      t.deepEqual(messages(respond(expired, 'c'), 'change', 'event').map(({ status }) => status.followers),
+        [['b', 'c']], 'returning to previous membership still produces a change')
+      t.equal(f.diagnostics.filter(({ type }) => type === 'error').length, 0)
+    } finally { f.close() }
+  }
+  t.end()
+})
+
+test('a fresh engine publishes its initial change snapshot on every restart', (t) => {
+  const f = protocol().setup()
+  try {
+    const changes = []
+    f.onSend = (proc, reply) => {
+      if (proc.role === 'procA') { changes.push(...messages(reply, 'change', 'event')) }
+    }
+    f.reopen()
+    f.reopen()
+    t.equal(changes.length, 2, 'each restart publishes an initial snapshot')
+    t.deepEqual(changes[0].status, {
+      state: 'follower', leader: null, term: 1n, seq: 0n,
+      commitSeq: 0n, commitTerm: 1n, followers: [],
+    }, 'the initial snapshot includes restored durable progress')
+    t.deepEqual(changes[1], changes[0], 'identical snapshots from separate lifetimes are retained')
   } finally { f.close() }
   t.end()
 })
@@ -61,14 +142,16 @@ test('applying SYNC still pumps queued commands and reports the resulting append
     const first = f.input('append', { requestId: 'first', items: [Buffer.from('first')] })
     t.equal(messages(first, 'change', 'event').at(-1).status.seq, 1n, 'CMD append reports its log head')
     const committed = ack(page(first))
+    t.deepEqual(outputs(committed).filter(({ to }) => to === 'event').map(({ message }) => message.type),
+      ['commit', 'change'], 'commit remains observable without a duplicate replication change')
     f.complete(messages(committed, 'execute', 'apply')[0])
     f.input('append', { requestId: 'second', items: [Buffer.from('second')] })
     const decision = f.rpc({ type: 'monster_outcome', cmdSeq: 1n, digest: Buffer.alloc(32) }, 'b')
     const finished = ack(page(decision))
     t.equal(f.proc.engine.appliedSeq, 2n, 'SYNC advances internal applied progress')
     t.equal(f.proc.engine.active.cmdSeq, 3n, 'next command is started')
-    t.deepEqual(messages(finished, 'change', 'event').map(({ status }) => status.seq), [2n, 2n, 3n],
-      'commit, replication and next append notify without an extra apply-only change')
+    t.deepEqual(messages(finished, 'change', 'event').map(({ status }) => status.seq), [2n, 3n],
+      'commit and next append retain distinct snapshots without the duplicate replication change')
     t.equal(messages(finished, 'sync', 'event')[0].syncSeq, 2n)
   } finally { f.close() }
   t.end()
@@ -156,11 +239,15 @@ for (const delay of [0, 2]) {
       t.deepEqual(changes.map(({ state }) => state), changes.map(({ event }) => event),
         'Gate properties match each captured snapshot before listeners run')
       for (const id of c.ids) {
-        const initial = changes.find((sample) => sample.id === id).event
+        const nodeChanges = changes.filter((sample) => sample.id === id).map(({ event }) => event)
+        const initial = nodeChanges[0]
         t.deepEqual(initial, {
           state: 'follower', leader: null, term: 0n, seq: -1n,
           commitSeq: -1n, commitTerm: -1n, followers: [],
         }, 'startup still publishes its initial status')
+        t.ok(nodeChanges.every((event, index) => index === 0 ||
+          !isDeepStrictEqual(event, nodeChanges[index - 1])),
+        `${id} delivers no consecutive duplicate changes`)
         t.notOk('appliedSeq' in c.nodes.get(id).gate, 'Gate does not acquire an applied checkpoint')
       }
       t.equal(c.errors.length, 0, 'event publication introduces no component errors')

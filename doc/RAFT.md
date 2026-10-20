@@ -27,7 +27,8 @@ initializes Raft runtime state.
 
 ## `followers`
 
-Returns the peers whose recent responses qualify them as live followers.
+Returns the peers whose recent responses qualify them as live followers, sorted
+by node ID.
 
 ### findings
 
@@ -62,7 +63,8 @@ no findings
 ## `change`
 
 Publishes the current role, leader, log progress, and live followers.
-Repeated identical notifications are allowed.
+Publishes the initial snapshot and suppresses subsequent snapshots identical to
+the previous change notification.
 
 ### findings
 
