@@ -367,6 +367,148 @@ test('Gate transport failures warn and close cancels awaiting leader', async (t)
   t.end()
 })
 
+test('Gate close waits observe successful cleanup across lifecycle states', async (t) => {
+  let release
+  const h = harness({
+    local({ to, message, reply }) {
+      if (to !== 'procC' || message.type !== 'close') { return false }
+      release = () => reply(to, { type: 'ack', cid: message.cid })
+      return true
+    },
+  })
+  let resolved = 0
+  let closes = 0
+  let reentrant
+  const wait = () => h.gate.awaitEvent('close').then((value) => { resolved++; return value })
+  h.gate.once('close', () => { closes++; reentrant = wait() })
+  try {
+    const before = wait()
+    await immediate()
+    t.equal(resolved, 0, 'waiting before open stays pending')
+    t.equal(h.requests.length, 0, 'waiting does not start or close components')
+    await h.gate.open()
+    const running = wait()
+    const closing = h.gate.close()
+    const during = wait()
+    await immediate()
+    t.equal(typeof release, 'function', 'one owner has not acknowledged close')
+    t.equal(resolved, 0, 'all close waits survive stopping Gate until cleanup succeeds')
+    t.equal(h.gate._shutdownWaiters.size, 0, 'close waits are not shutdown cancellations')
+    t.equal(h.requests.filter((r) => r.message.type === 'close').length, 4,
+      'only explicit close sends requests')
+    release()
+    await closing
+    t.deepEqual(await Promise.all([before, running, during, reentrant]),
+      [undefined, undefined, undefined, undefined], 'all lifecycle waits resolve without a value')
+    t.equal(resolved, 4, 'registration inside a close listener resolves too')
+    t.equal(h.gate.listenerCount('close'), 0, 'completed waits remove their listeners')
+    const requests = h.requests.length
+    t.equal(await h.gate.awaitEvent('close'), undefined, 'late registration resolves immediately')
+    await h.gate.close()
+    t.equal(h.requests.length, requests, 'late waits and repeated close send no requests')
+    t.equal(closes, 1, 'successful shutdown emits close once')
+    await assert.rejects(h.gate.open(), { code: Err.NODE_NOT_OPEN })
+    t.equal(h.requests.length, requests, 'a stopped Gate cannot reopen')
+  } finally { await h.gate.close() }
+  t.end()
+})
+
+test('Gate close waits survive fatal stop until explicit cleanup', async (t) => {
+  const h = harness()
+  await h.gate.open()
+  let resolved = 0
+  const before = h.gate.awaitEvent('close').then(() => { resolved++ })
+  const ordinary = h.gate.awaitEvent('cmd').catch((err) => err)
+  h.gate.onReceive('b', Buffer.alloc(0))
+  const after = h.gate.awaitEvent('close').then(() => { resolved++ })
+  await immediate()
+  t.equal(resolved, 0, 'neither existing nor new close waits resolve on fatal stop')
+  t.equal((await ordinary), h.errors[0], 'ordinary waits reject with the fatal error')
+  t.equal(h.errors[0].code, Err.FRAME_CORRUPT)
+  t.notOk(h.requests.some((r) => r.message.type === 'close'), 'fatal stop and waits send no close requests')
+  await h.gate.close()
+  await Promise.all([before, after])
+  t.equal(resolved, 2, 'explicit successful cleanup resolves both waits')
+  t.equal(h.gate.listenerCount('close'), 0, 'resolved waits leave no listeners')
+  t.end()
+})
+
+test('Gate close waits survive owner errors and timeouts until a successful retry', async (t) => {
+  for (const failure of ['err', 'timeout']) {
+    let failing = true
+    const reason = new Err.ErrorWithCode('owner close failed', Err.SQLITE_ERROR)
+    const h = harness({
+      opts: { localTimeout: 15 },
+      local({ to, message, reply }) {
+        if (!failing || to !== 'apply' || message.type !== 'close') { return false }
+        if (failure === 'err') {
+          reply(to, { type: 'err', cid: message.cid, error: wire.errorToWire(reason) })
+        }
+        return true
+      },
+    })
+    await h.gate.open()
+    let resolved = false
+    let closes = 0
+    h.gate.on('close', () => { closes++ })
+    const waiting = h.gate.awaitEvent('close').then(() => { resolved = true })
+    const error = await h.gate.close().then(() => null, (err) => err)
+    t.equal(error?.code, failure === 'err' ? Err.SQLITE_ERROR : Err.LOCAL_TIMEOUT,
+      `${failure}: explicit close still rejects`)
+    if (failure === 'err') {
+      t.equal(error.message, reason.message, 'owner close error message is preserved')
+      t.equal(error.stack, reason.stack, 'owner close error stack is preserved')
+    }
+    await immediate()
+    t.notOk(resolved, `${failure}: unsuccessful cleanup leaves the close wait pending`)
+    t.equal(closes, 0, `${failure}: unsuccessful cleanup emits no close`)
+    const after = h.gate.awaitEvent('close')
+    t.equal(h.requests.filter((r) => r.message.type === 'close').length, 4,
+      `${failure}: waiting does not retry cleanup`)
+    failing = false
+    await h.gate.close()
+    await Promise.all([waiting, after])
+    t.ok(resolved, `${failure}: retry resolves the existing wait`)
+    t.equal(closes, 1, `${failure}: retry emits one successful close`)
+    t.equal(h.gate.listenerCount('close'), 1, `${failure}: only the persistent listener remains`)
+    t.equal(h.errors.length, 0, `${failure}: Gate does not duplicate owner diagnostics`)
+  }
+  t.end()
+})
+
+test('Gate close waits retain condition behavior before and after cleanup', async (t) => {
+  const h = harness()
+  const error = new Error('close condition failed')
+  const captureThrow = (reason) => h.gate.awaitEvent('close', () => { throw reason }).then(
+    () => ({ fulfilled: true }),
+    (error) => ({ error }),
+  )
+  let calls = 0
+  let resolved = false
+  const rejectMatch = (value) => {
+    t.equal(value, undefined, 'close conditions receive no payload')
+    calls++
+    return false
+  }
+  h.gate.awaitEvent('close', rejectMatch).then(() => { resolved = true })
+  const early = [captureThrow(undefined), captureThrow(error)]
+  await h.gate.close()
+  for (const [index, reason] of [undefined, error].entries()) {
+    t.deepEqual(await early[index], { error: reason }, 'early condition rejects unchanged')
+    t.deepEqual(await captureThrow(reason), { error: reason }, 'late condition rejects unchanged')
+  }
+  h.gate.awaitEvent('close', rejectMatch).then(() => { resolved = true })
+  t.equal(await h.gate.awaitEvent('close', () => 'match'), undefined, 'truthy condition resolves late wait')
+  await h.gate.close()
+  t.notOk(resolved, 'false conditions remain pending after successful close')
+  t.equal(calls, 2, 'each false condition runs once without a synthetic close event')
+  t.equal(h.gate.listenerCount('close'), 2, 'only unmatched conditions retain listeners')
+  t.equal(h.gate._shutdownWaiters.size, 0, 'close conditions never register shutdown cancellation')
+  t.equal(h.errors.length, 0, 'condition failures are returned only to their callers')
+  h.gate.removeAllListeners('close')
+  t.end()
+})
+
 test('Gate awaitEvent preserves every thrown value', async (t) => {
   const h = harness({
     outputs: (input) => input.kind === 'append' ? [wire.encodePayload({

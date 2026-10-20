@@ -89,6 +89,63 @@ test('Proc rejects startup work before hello and malformed seeds', (t) => {
   t.end()
 })
 
+test('Proc reports fatal errors before close listeners can remove diagnostics', (t) => {
+  for (const started of [false, true]) {
+    const f = fixture()
+    try {
+      if (started) { f.startup(); f.input(0, 'start') }
+      const proc = f.procs[0]
+      let reported = null
+      proc.on('error', () => {
+        t.notOk(proc.isOpen, 'fatal error listeners see a stopped Proc')
+        t.notOk(proc.log.isOpen, 'database cleanup precedes the diagnostic')
+        proc.close()
+        throw new Error('error listener failed')
+      })
+      proc.on('error', (err) => { reported = err })
+      proc.on('close', () => proc.removeAllListeners())
+      t.equal(f.request(0, { type: 'invalid' }), undefined, 'fatal failure sends no error reply')
+      t.deepEqual(f.events[0].map(({ type }) => type), ['error', 'close'],
+        `${started ? 'runtime' : 'startup'}: original error precedes the single close notification`)
+      t.equal(reported, proc._fatalError, 'later listeners receive the original fatal error')
+      t.equal(reported.code, Err.RPC_ILLEGAL)
+    } finally { f.cleanup() }
+  }
+  t.end()
+})
+
+test('Proc preserves the original fatal error when database close fails or is retried', (t) => {
+  for (const retryInListener of [false, true]) {
+    const f = fixture().startup()
+    const proc = f.procs[0]
+    const close = proc.store.close.bind(proc.store)
+    try {
+      f.input(0, 'start')
+      const failure = new Err.ErrorWithCode('database close failed', Err.SQLITE_ERROR)
+      let attempts = 0
+      proc.store.close = () => {
+        if (++attempts === 1) { throw failure }
+        return close()
+      }
+      if (retryInListener) {
+        proc.on('error', (err) => { if (err === failure) { proc.close() } })
+      }
+      proc.onReceive('gate', Buffer.alloc(0))
+      t.equal(f.events[0][0].value.code, Err.FRAME_CORRUPT, 'the original failure is reported first')
+      t.equal(f.events[0][1].value, failure, 'the cleanup failure is also reported')
+      t.notOk(proc.isOpen, 'failed cleanup does not leave the Proc accepting work')
+      t.equal(proc.log.isOpen, !retryInListener, 'only successful cleanup closes the database')
+      t.deepEqual(f.events[0].map(({ type }) => type),
+        retryInListener ? ['error', 'error', 'close'] : ['error', 'error'],
+        'a listener retry cannot publish close before the original diagnostic')
+      proc.close()
+      t.deepEqual(f.events[0].map(({ type }) => type), ['error', 'error', 'close'],
+        'explicit retry finishes cleanup without repeating diagnostics or close')
+    } finally { proc.store.close = close; f.cleanup() }
+  }
+  t.end()
+})
+
 test('Proc startup reports agree and input completion carries matched output lists', (t) => {
   const f = fixture().startup()
   try {

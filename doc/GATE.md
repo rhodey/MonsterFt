@@ -155,8 +155,9 @@ no findings
 
 ## `awaitEvent`
 
-Waits for an event that satisfies the supplied condition, rejecting if the
-condition throws or the node shuts down.
+Waits for a matching event, rejecting if the condition throws. Shutdown rejects
+ordinary waits; close waits observe successful cleanup, including success before
+registration, without starting cleanup themselves.
 
 ### findings
 
@@ -173,8 +174,9 @@ no findings
 
 ## `_stop`
 
-Stops input scheduling and rejects outstanding requests, queued work, and event
-waits with the shutdown error.
+Stops input scheduling and rejects outstanding requests, queued work, and
+non-close event waits with the shutdown error. Retains the last protocol status
+without emitting `change`.
 
 ### findings
 
@@ -203,8 +205,8 @@ after all close replies succeed. Failed attempts can be retried explicitly.
 
 ## `close`
 
-Stops Gate and waits for its local components to close, including after a
-fatal failure.
+Permanently stops Gate and waits for its local components to close, including
+after a fatal failure.
 
 ### findings
 

@@ -60,8 +60,7 @@ class MonsterProc extends EventEmitter {
     if (this._closing) { return }
     err = Err.wrapError(err)
     this._fatalError = err
-    try { this.close() } catch { }
-    this._emitSafe('error', err)
+    try { this._close(err) } catch { }
   }
 
   _send(message) {
@@ -237,29 +236,30 @@ class MonsterProc extends EventEmitter {
     }
   }
 
-  close() {
+  close() { this._close() }
+
+  _close(error = null) {
     if (this._closing && !this.store.log.isOpen) { return }
     this._closing = true
     clearTimeout(this._watchdog)
     this._watchdog = null
     this._outputs = null
     this._diagnostics = null
-    let failure = null
+    const failures = []
     try {
       this.engine?.stop()
     } catch (err) {
-      failure = Err.wrapError(err)
-      this._emitSafe('error', failure)
+      failures.push(Err.wrapError(err))
     }
     this.executor.clear()
     try {
       this.store.close()
     } catch (err) {
-      err = Err.wrapError(err)
-      failure = failure ?? err
-      this._emitSafe('error', err)
+      failures.push(Err.wrapError(err))
     }
-    if (failure !== null) { throw failure }
+    if (error !== null) { this._emitSafe('error', error) }
+    for (const failure of failures) { this._emitSafe('error', failure) }
+    if (failures.length > 0) { throw failures[0] }
     this._emitSafe('close')
   }
 }

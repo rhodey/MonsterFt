@@ -24,7 +24,8 @@ no findings
 
 ## `_fatal`
 
-Closes the Proc after an unrecoverable failure and reports its error locally.
+Stops the Proc after an unrecoverable failure and reports its error before the
+close notification.
 
 ### findings
 
@@ -84,10 +85,11 @@ lifecycle and reporting failures.
 
 no findings
 
-## `close`
+## `_close`
 
 Stops the engine, executor, and watchdog and closes the Proc's protocol store,
-reporting any shutdown failures.
+reporting any fatal error and shutdown failures before a successful close
+notification.
 
 ### findings
 
