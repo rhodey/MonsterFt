@@ -67,8 +67,9 @@ no findings
 ## `_input`
 
 Processes one ordered input and its runnable protocol work atomically in DB1,
-producing a completion and local diagnostics. Intentional repair fences stop
-the Proc before its final completion is sent.
+checking for a final status change before commit. Produces a completion and local
+diagnostics; intentional repair fences stop the Proc before its final completion
+is sent.
 
 ### findings
 

@@ -128,7 +128,7 @@ test('Raft same-term valid APPEND steps down a leader; lower term cannot', (t) =
   t.end()
 })
 
-test('Raft progress events capture status before later work in the same input', (t) => {
+test('Raft progress events keep captured status and publish one final change per input', (t) => {
   const f = fixture().leader()
   try {
     const oldTerm = f.proc.engine.term
@@ -138,18 +138,15 @@ test('Raft progress events capture status before later work in the same input', 
       data: [record(oldTerm, ''), record(term, '')],
     }))
     const events = f.outputs(reply).filter(({ to }) => to === 'event').map(({ message }) => message)
-    t.deepEqual(events.map(({ type }) => type), ['change', 'commit', 'change'],
-      'role and commitment notifications remain without the apply-only change')
+    t.deepEqual(events.map(({ type }) => type), ['commit', 'change'],
+      'the role transition and commitment produce one final change')
+    t.equal(events[0].seq, 1n, 'the commit event still identifies the committed sequence')
     t.deepEqual(events[0].status, {
-      state: 'follower', leader: 'b', term, seq: 0n,
-      commitSeq: 0n, commitTerm: oldTerm, followers: [],
-    }, 'the role change describes the state before the replication page is appended')
-    t.equal(events[1].seq, 1n, 'the commit event still identifies the committed sequence')
-    t.deepEqual(events[1].status, {
       state: 'follower', leader: 'b', term, seq: 2n,
       commitSeq: 1n, commitTerm: oldTerm, followers: [],
     }, 'commit reports its actual older term and includes the unapplied tail')
-    t.deepEqual(events[2].status, events[1].status, 'change retains the committed status')
+    t.deepEqual(events[1].status, events[0].status, 'change retains the final committed status')
+    t.equal(f.outputs(reply).at(-1).message.type, 'change')
     t.ok(events.every(({ status }) => !Object.hasOwn(status, 'appliedSeq')),
       'protocol event snapshots do not carry applied progress')
     t.equal(f.proc.engine.appliedSeq, 1n, 'all snapshots are released after the input finishes')
@@ -159,8 +156,8 @@ test('Raft progress events capture status before later work in the same input', 
     t.deepEqual(laterEvents.map(({ type }) => type), ['commit', 'change'])
     t.equal(laterEvents[0].status.commitTerm, term, 'the next commit uses its own entry term')
     t.equal(f.proc.engine.appliedSeq, 2n, 'the later no-op still advances the internal applied checkpoint')
-    t.equal(events[1].status.commitTerm, oldTerm, 'earlier outputs retain their captured term')
-    t.equal(events[1].status.commitSeq, 1n, 'earlier outputs retain their captured commit sequence')
+    t.equal(events[0].status.commitTerm, oldTerm, 'earlier outputs retain their captured term')
+    t.equal(events[0].status.commitSeq, 1n, 'earlier outputs retain their captured commit sequence')
   } finally { f.close() }
   t.end()
 })

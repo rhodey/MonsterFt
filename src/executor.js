@@ -21,7 +21,7 @@ class Executor {
 
   cancel(id) { this.timers.delete(id) }
 
-  run(timems, handler) {
+  run(timems, handler, complete = null) {
     if (this.running || !Number.isSafeInteger(timems) || timems < this.timems) {
       throw new Err.ErrorWithCode('executor input order is illegal', Err.RAFT_ILLEGAL)
     }
@@ -42,6 +42,7 @@ class Executor {
         this.enqueue(due.task)
         this.drain()
       }
+      complete?.()
     } finally {
       this.running = false
       this.queue.length = 0

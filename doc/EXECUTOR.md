@@ -16,7 +16,8 @@ no findings
 
 Processes one input and all runnable continuations before due timers.
 Enforces ordered protocol time and deterministic timer ordering without
-replaying missed intervals.
+replaying missed intervals. An optional completion callback runs after successful
+processing, while the executor is still active.
 
 ### findings
 

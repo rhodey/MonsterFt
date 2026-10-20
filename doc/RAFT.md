@@ -27,8 +27,8 @@ initializes Raft runtime state.
 
 ## `followers`
 
-Returns the peers whose recent responses qualify them as live followers, sorted
-by node ID.
+Returns the leader's live peers, sorted by node ID. Other roles return an empty
+array.
 
 ### findings
 
@@ -62,9 +62,9 @@ no findings
 
 ## `change`
 
-Publishes the current role, leader, log progress, and live followers.
-Publishes the initial snapshot and suppresses subsequent snapshots identical to
-the previous change notification.
+Publishes the final role, leader, log progress, and live followers for a completed
+input. The initial snapshot is always published; unchanged snapshots are
+suppressed.
 
 ### findings
 
@@ -90,7 +90,7 @@ no findings
 
 ## `start`
 
-Starts election timing and publishes the initial Raft state.
+Starts election timing.
 
 ### findings
 
@@ -114,7 +114,7 @@ no findings
 
 ## `follower`
 
-Transitions to follower state and notifies the protocol of the leadership
+Transitions to follower state and updates protocol work for the leadership
 change.
 
 ### findings

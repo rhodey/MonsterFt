@@ -1,8 +1,10 @@
 import test from 'tape'
 import { isDeepStrictEqual } from 'node:util'
+import { pack } from 'msgpackr'
 import { cluster, until, pause } from './helper.js'
 import { protocol, append, record, cmd, messages, outputs } from './fixtures/protocol.js'
 import { RaftEngine } from '../src/raft.js'
+import { checksum } from '../src/wire.js'
 import * as Err from '../src/error.js'
 
 const keys = (value) => Object.keys(value).sort()
@@ -12,7 +14,7 @@ const changeKeys = [
   'state', 'leader', 'term', 'seq', 'commitSeq', 'commitTerm', 'followers',
 ].sort()
 
-test('change compares every scalar and preserves transitions between other event types', (t) => {
+test('change comparison uses every scalar and ignores the baseline of other event types', (t) => {
   const log = { seq: -1n, elec: { term: 0n, votedFor: null } }
   const store = { log, load: () => ({ applied_seq: -1n }) }
   const events = []
@@ -38,6 +40,83 @@ test('change compares every scalar and preserves transitions between other event
     t.deepEqual(events[4]?.status, initial, `${key}: returning to the earlier snapshot is observable`)
     events.length = 0
   }
+  t.end()
+})
+
+test('follower changes report uncommitted appends and truncation after the complete input', (t) => {
+  const f = protocol().setup()
+  try {
+    const status = {
+      state: 'follower', leader: 'b', term: 1n,
+      seq: 2n, commitSeq: 0n, commitTerm: 1n, followers: [],
+    }
+    const page = append({
+      seqP: 0n, termP: 1n, commitSeq: 0n, data: [record(1n, 'one'), record(1n, 'two')],
+    })
+    const grown = f.rpc(page)
+    t.deepEqual(messages(grown, 'change', 'event').map(({ status }) => status), [status],
+      'uncommitted growth reports one final snapshot')
+    t.equal(outputs(grown).at(-1).message.type, 'change', 'change follows the replication ACK')
+    t.equal(messages(f.rpc(page), 'change', 'event').length, 0,
+      'repeating the same page leaves the snapshot unchanged')
+    const shortened = f.rpc({ ...page, data: [record(1n, 'replacement')] })
+    t.deepEqual(messages(shortened, 'change', 'event').map(({ status }) => status),
+      [{ ...status, seq: 1n }], 'trim and append report only the resulting head, with no commit change')
+    t.equal(outputs(shortened).at(-1).message.type, 'change')
+    const replaced = f.rpc({ ...page, data: [record(1n, 'another replacement')] })
+    t.equal(messages(replaced, 'change', 'event').length, 0,
+      'replacing payload bytes alone does not change the public snapshot')
+  } finally { f.close() }
+  t.end()
+})
+
+test('candidate votes become sorted followers only when the final state is leader', (t) => {
+  const f = protocol({}, ['e', 'd', 'a', 'c', 'b'])
+  try {
+    const election = f.tick(f.proc.executor.timers.get(f.proc.engine.electionTimer).due)
+    t.deepEqual(messages(election, 'change', 'event').map(({ status }) => [status.state, status.followers]),
+      [['candidate', []]], 'starting an election reports no followers')
+    const term = f.proc.engine.term
+    const partial = f.rpc({ type: 'vote', term, voteGranted: true }, 'd')
+    t.equal(messages(partial, 'change', 'event').length, 0, 'a vote below quorum changes no public field')
+    t.deepEqual(f.proc.engine.followers, [], 'a candidate does not expose voters as followers')
+    const completions = new Map()
+    f.onSend = (proc, reply) => completions.set(proc.role, reply)
+    const elected = f.rpc({ type: 'vote', term, voteGranted: true }, 'b')
+    const expected = {
+      state: 'leader', leader: 'a', term, seq: 0n,
+      commitSeq: -1n, commitTerm: -1n, followers: ['b', 'd'],
+    }
+    t.deepEqual(messages(elected, 'change', 'event').map(({ status }) => status), [expected],
+      'leadership, sorted voters, and the election no-op appear in one final snapshot')
+    t.equal(outputs(elected).at(-1).message.type, 'change')
+    const hashes = completions.get('procA').outputs.map(checksum)
+    for (const role of ['procB', 'procC']) {
+      t.deepEqual(completions.get(role).outputs, hashes, `${role} agrees on the complete output list`)
+    }
+    const steppedDown = f.rpc({ type: 'vote_request', term: term + 1n, termP: -1n, seqP: -1n }, 'e')
+    t.deepEqual(messages(steppedDown, 'change', 'event').map(({ status }) =>
+      [status.state, status.followers]), [['follower', []]], 'stepping down clears public followers')
+  } finally { f.close() }
+  t.end()
+})
+
+test('backtracking replies report newly live followers without a successful replication ACK', (t) => {
+  const f = protocol().setup()
+  try {
+    const elected = f.elect()
+    const page = messages(elected, 'append', 'c').find((message) => message.data)
+    const reply = f.rpc({
+      type: 'err', term: page.term, cid: page.cid,
+      code: Err.REPL_BACKTRACK, message: 'missing predecessor', logSeq: -1n,
+    }, 'c')
+    t.deepEqual(messages(reply, 'change', 'event').map(({ status }) => status.followers),
+      [['b', 'c']], 'the backtracking responder becomes visible immediately')
+    t.equal(messages(reply, 'commit', 'event').length, 0, 'liveness does not imply commitment')
+    t.equal(outputs(reply).at(-1).message.type, 'change', 'the retry is buffered before final change')
+    t.ok(messages(reply, 'append', 'c').some((message) => message.seqP === -1n),
+      'ordinary backtracking continues')
+  } finally { f.close() }
   t.end()
 })
 
@@ -103,13 +182,38 @@ test('follower membership is sorted regardless of membership and response order'
           'membership remains unchanged while the other follower is still live')
       }
       const expired = f.tick(now + 270)
-      t.deepEqual(messages(respond(expired, 'b'), 'change', 'event').map(({ status }) => status.followers),
-        [['b']], 'the next notification reports expired membership')
+      t.deepEqual(messages(expired, 'change', 'event').map(({ status }) => status.followers),
+        [['b']], 'the clock input itself reports expired membership')
+      t.equal(messages(respond(expired, 'b'), 'change', 'event').length, 0,
+        'a later response does not repeat the expiration')
       t.deepEqual(messages(respond(expired, 'c'), 'change', 'event').map(({ status }) => status.followers),
         [['b', 'c']], 'returning to previous membership still produces a change')
       t.equal(f.diagnostics.filter(({ type }) => type === 'error').length, 0)
     } finally { f.close() }
   }
+  t.end()
+})
+
+test('an input refreshes an expiring follower before publishing final membership', (t) => {
+  const f = protocol().leader()
+  try {
+    const now = f.proc.executor.timems
+    const heartbeat = (reply, peer) => messages(reply, 'append', peer).find((message) => !message.data)
+    const ack = (request, peer, timems = f.proc.executor.timems) => f.rpc({
+      type: 'ack', cid: request.cid, term: request.term, seq: 1n,
+    }, peer, timems)
+    const first = f.tick(now + 45)
+    ack(heartbeat(first, 'b'), 'b')
+    ack(heartbeat(first, 'c'), 'c')
+    ack(heartbeat(f.tick(now + 90), 'b'), 'b')
+    const later = f.tick(now + 135)
+    ack(heartbeat(later, 'b'), 'b')
+    const refreshed = ack(heartbeat(later, 'c'), 'c', now + 195)
+    t.equal(messages(refreshed, 'change', 'event').length, 0,
+      'refresh at the liveness deadline produces no transient expired/rejoined notifications')
+    t.deepEqual(f.proc.engine.followers, ['b', 'c'])
+    t.equal(f.proc.engine.state, 'leader', 'the due heartbeat observes the refreshed membership')
+  } finally { f.close() }
   t.end()
 })
 
@@ -150,9 +254,13 @@ test('applying SYNC still pumps queued commands and reports the resulting append
     const finished = ack(page(decision))
     t.equal(f.proc.engine.appliedSeq, 2n, 'SYNC advances internal applied progress')
     t.equal(f.proc.engine.active.cmdSeq, 3n, 'next command is started')
-    t.deepEqual(messages(finished, 'change', 'event').map(({ status }) => status.seq), [2n, 3n],
-      'commit and next append retain distinct snapshots without the duplicate replication change')
+    t.deepEqual(messages(finished, 'change', 'event').map(({ status }) => status.seq), [3n],
+      'commit, SYNC, and the next append produce one final change snapshot')
     t.equal(messages(finished, 'sync', 'event')[0].syncSeq, 2n)
+    t.deepEqual(outputs(finished).filter(({ to }) => to === 'event').map(({ message }) =>
+      [message.type, message.status.seq]), [['commit', 2n], ['sync', 2n], ['change', 3n]],
+    'progress events retain capture-time status before the final change')
+    t.equal(outputs(finished).at(-1).message.type, 'change')
   } finally { f.close() }
   t.end()
 })
@@ -256,7 +364,7 @@ for (const delay of [0, 2]) {
   })
 }
 
-test('dissenting follower reports its final SYNC sequence without a following change', async (t) => {
+test('dissenting follower reports its final SYNC state before any final change', async (t) => {
   let dissenter = null
   const c = cluster({
     apply(id, db, buffer, term, seq) {
@@ -272,9 +380,9 @@ test('dissenting follower reports its final SYNC sequence without a following ch
     dissenter = c.ids.find((id) => id !== c.leader().id)
     const { gate } = c.nodes.get(dissenter)
     let finalSync = null
-    let laterChanges = 0
+    const laterChanges = []
     gate.on('sync', (event) => { finalSync = { event, commitSeq: gate.commitSeq } })
-    gate.on('change', () => { if (finalSync) { laterChanges++ } })
+    gate.on('change', (event) => { if (finalSync) { laterChanges.push(event) } })
     const waiting = gate.awaitEvent('sync', (event) => event.syncSeq > event.cmdSeq)
       .then(() => true, () => false)
     t.equal((await c.leader().append(Buffer.from('item')))[1], 'accepted')
@@ -284,9 +392,39 @@ test('dissenting follower reports its final SYNC sequence without a following ch
     t.notOk('appliedSeq' in gate)
     t.ok(await Promise.race([waiting, pause(100).then(() => false)]),
       'a progress wait observes the final SYNC before repair shutdown')
-    t.equal(laterChanges, 0, 'the update does not depend on another change event')
+    t.ok(laterChanges.length <= 1, 'repair permits at most one final change')
+    t.ok(laterChanges.every((event) => event.commitSeq === finalSync.commitSeq),
+      'any final change preserves the state already available to SYNC listeners')
     t.ok(c.errors.some(({ id, role, error }) => id === dissenter && role === 'procA' &&
       error.code === Err.REPAIR_OUTSIDE_AGREEMENT), 'the owner still reports its repair decision')
   } finally { await c.close() }
+  t.end()
+})
+
+test('a committed repair decision retains its final change after SYNC', (t) => {
+  const f = protocol().setup()
+  try {
+    const command = f.rpc(append({
+      seqP: 0n, termP: 1n, data: [record(1n, cmd())], commitSeq: 1n,
+    }))
+    f.complete(messages(command, 'execute', 'apply')[0],
+      [[1, 'dissenting result', Err.APPLY_ERROR, null]], Buffer.alloc(32, 1))
+    const decision = pack({
+      type: 'sync', cmdSeq: 1n, quorum: true, digest: Buffer.alloc(32),
+      agree: ['b', 'c'], disagree: ['a'],
+    })
+    const reply = f.rpc(append({
+      seqP: 1n, termP: 1n, data: [record(1n, decision)], commitSeq: 2n,
+    }))
+    const events = outputs(reply).filter(({ to }) => to === 'event').map(({ message }) => message)
+    t.deepEqual(events.map(({ type }) => type), ['commit', 'sync', 'change'],
+      'intentional repair preserves progress events and final status')
+    t.equal(events.at(-1).status.commitSeq, 2n)
+    t.equal(outputs(reply).at(-1).message.type, 'change')
+    t.equal(f.state().meta.repair_state, 2n, 'the repair fence is durable')
+    t.ok(f.procs.every((proc) => !proc.isOpen), 'all three owners stop after committing the decision')
+    t.equal(f.diagnostics.filter(({ type, error }) =>
+      type === 'error' && error.code === Err.REPAIR_OUTSIDE_AGREEMENT).length, 3)
+  } finally { f.close() }
   t.end()
 })

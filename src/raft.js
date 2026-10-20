@@ -58,6 +58,7 @@ class RaftEngine {
   get now() { return this.executor.timems }
   get seq() { return this.log.seq }
   get followers() {
+    if (this.state !== 'leader') { return [] }
     return this.nodes.filter((id) => id !== this.id &&
       this.now - (this.pongs.get(id) ?? -Infinity) < this.opts.electionTimeout)
   }
@@ -135,7 +136,6 @@ class RaftEngine {
 
   start() {
     this.resetElection()
-    this.change()
   }
 
   resetElection() {
@@ -171,7 +171,6 @@ class RaftEngine {
     this.pongs.clear()
     this.votes.clear()
     if (reset) { this.resetElection() }
-    this.change()
     this.leaderChanged()
   }
 
@@ -194,7 +193,6 @@ class RaftEngine {
     this.votes = new Set([this.id])
     this.pongs.clear()
     this.log.election(this.term, this.id)
-    this.change()
     this.leaderChanged()
     for (const to of this.nodes) {
       if (to !== this.id) {
@@ -239,7 +237,6 @@ class RaftEngine {
         })
       }
     }
-    this.change()
     this.heartbeatTimer = this.executor.after(
       this.opts.electionTimeout * 0.3, () => this.heartbeat(), this.opts.electionTimeout * 0.3,
     )
@@ -286,7 +283,6 @@ class RaftEngine {
       this.pongs.set(state.to, this.now)
       if (state.matchIndex < this.seq) { state.nextIndex = min(state.nextIndex, this.seq) }
       this.checkCommit()
-      this.change()
       this.executor.enqueue(() => this.replicate(state))
     }, (response) => response.type === 'err' ||
       (util.isSeq(response.seq) && response.seq >= 0n && response.term >= term),
@@ -302,7 +298,6 @@ class RaftEngine {
       this.finishAppend(waiter, failure('quorum append timeout', Err.APPEND_TIMEOUT)))
     this.appendWaiters.add(waiter)
     for (const state of this.replication.values()) { this.replicate(state) }
-    this.change()
     return seq
   }
 
@@ -374,7 +369,6 @@ class RaftEngine {
       state.matchIndex = max(state.matchIndex, matched)
       state.nextIndex = max(state.nextIndex, matched + 1n)
       this.checkCommit()
-      this.change()
       this.executor.enqueue(() => this.replicate(state))
     }, (response) => response.type === 'err' ||
       (util.isSeq(response.seq) && response.seq >= 0n && response.term >= term))
@@ -392,7 +386,6 @@ class RaftEngine {
     this.commitSeq = seq
     this.commitTerm = record.term
     this.event('commit', { seq })
-    this.change()
     this.executor.enqueue(() => this.applyReady())
     for (const waiter of [...this.appendWaiters]) {
       if (waiter.seq <= seq) { this.finishAppend(waiter) }
@@ -457,7 +450,6 @@ class RaftEngine {
         this.commitTerm = record.term
         this.event('commit', { seq: next })
         this.executor.enqueue(() => this.applyReady())
-        this.change()
       }
     }
     this.send(from, { type: 'ack', cid, term: this.term, seq: seqP + 1n })

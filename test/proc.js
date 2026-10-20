@@ -127,7 +127,9 @@ test('Proc commits runnable continuation writes before releasing any output', (t
     }
     const response = f.input(0, 'start')
     t.equal(response.type, 'ack')
-    t.equal(response.outputs.length, 1)
+    const outputs = response.outputs.map(wire.decodePayload)
+    t.deepEqual(outputs.map(({ message }) => message.type), ['test', 'change'])
+    t.equal(outputs[1].message.status.seq, 1n, 'final change includes the continuation write')
     t.notOk(proc.db.isTransaction, 'completion follows COMMIT')
     const state = readDatabase(f.paths.procA, (db) => ({
       election: db.prepare('SELECT current_term FROM raft_election').get().current_term,
@@ -140,19 +142,31 @@ test('Proc commits runnable continuation writes before releasing any output', (t
 })
 
 test('Proc failures discard success outputs and rollback uncommitted work on close', (t) => {
-  for (const boundary of ['handler', 'commit before', 'commit after']) {
+  for (const boundary of ['handler', 'continuation', 'timer', 'completion', 'commit before', 'commit after']) {
     const f = fixture().startup()
     try {
       const proc = f.procs[0]
       const original = new Error(`injected ${boundary}`)
       original.stack = `original ${boundary} stack`
+      const fail = () => { throw original }
+      const change = proc.engine.change.bind(proc.engine)
+      let checks = 0
+      proc.engine.change = () => {
+        checks++
+        t.ok(proc.executor.running, 'final comparison runs inside executor')
+        t.ok(proc.db.isTransaction, 'final comparison precedes commit')
+        change()
+        if (boundary === 'completion') { fail() }
+      }
       proc.engine.start = () => {
         proc.log.election(5n, 'a')
         proc.log.append({ term: 5n, entry: Buffer.from('pending') })
         proc.engine.output('event', { type: 'test' })
-        if (boundary === 'handler') { throw original }
+        if (boundary === 'handler') { fail() }
+        if (boundary === 'continuation') { proc.executor.enqueue(fail) }
+        if (boundary === 'timer') { proc.executor.after(0, fail) }
       }
-      if (boundary !== 'handler') {
+      if (boundary.startsWith('commit')) {
         const exec = proc.db.exec.bind(proc.db)
         proc.db.exec = (sql) => {
           if (sql === 'COMMIT') {
@@ -164,6 +178,8 @@ test('Proc failures discard success outputs and rollback uncommitted work on clo
       }
       const reply = f.input(0, 'start')
       t.equal(reply, undefined, `${boundary}: no completion or fatal ERR is sent`)
+      t.equal(checks, ['handler', 'continuation', 'timer'].includes(boundary) ? 0 : 1,
+        'only successfully processed inputs reach the final comparison')
       t.equal(f.events[0].find((event) => event.type === 'error').value.stack, original.stack,
         'original trace remains available locally')
       const state = readDatabase(f.paths.procA, (db) => ({
@@ -240,6 +256,8 @@ test('Proc commits and reports intentional repair before final completion', (t) 
     const output = wire.decodePayload(reply.outputs[0])
     t.equal(output.to, 'client', 'buffered command result remains available')
     t.equal(output.message.code, Err.REPAIR_OUTSIDE_AGREEMENT)
+    t.equal(wire.decodePayload(reply.outputs.at(-1)).message.type, 'change',
+      'intentional repair retains the final change output')
     t.equal(readDatabase(f.paths.procA, (db) => db.prepare('SELECT repair_state FROM monsterft_meta').get().repair_state),
       2n, 'repair fence retained through close')
     t.notOk(proc.isOpen)
@@ -256,7 +274,8 @@ test('Proc keeps local diagnostics outside agreed outputs', (t) => {
     err.stack = 'unique Proc stack'
     proc.engine.start = () => proc.engine.warn(err)
     const reply = f.input(0, 'start')
-    t.deepEqual(reply.outputs, [], 'warnings are never protocol outputs')
+    t.deepEqual(reply.outputs.map((output) => wire.decodePayload(output).message.type), ['change'],
+      'only the initial change is published; warnings are never protocol outputs')
     t.equal(f.events[0].find((event) => event.type === 'warn').value.stack, err.stack,
       'local diagnostic retains original trace')
   } finally { f.cleanup() }
@@ -309,8 +328,8 @@ test('Proc reports quorum-impossible repair locally without stopping', (t) => {
       proc.engine.applySync({ cmdSeq: 1n, quorum: false, agree: [], disagree: ['a', 'b', 'c'] }, 2n, digest)
     }
     const reply = f.input(0, 'start')
-    t.deepEqual(reply.outputs.map((output) => wire.decodePayload(output).message.type), ['sync'],
-      'SYNC remains a protocol event; repair error does not')
+    t.deepEqual(reply.outputs.map((output) => wire.decodePayload(output).message.type), ['sync', 'change'],
+      'SYNC and final change remain protocol events; repair error does not')
     t.equal(f.events[0].find((event) => event.type === 'error').value.code, Err.REPAIR_QUORUM_IMPOSSIBLE)
     t.equal(proc.db.prepare('SELECT repair_state FROM monsterft_meta').get().repair_state, 1n)
     t.ok(proc.isOpen, 'quorum-impossible repair remains nonfatal')

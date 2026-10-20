@@ -150,7 +150,7 @@ class MonsterProc extends EventEmitter {
         case 'apply': this.engine.receiveApply(message.reply); break
         case 'tick': break
       }
-    })
+    }, () => this.engine.change())
     this.db.exec('COMMIT')
     const outputs = this._outputs
     const diagnostics = this._diagnostics

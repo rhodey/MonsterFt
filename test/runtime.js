@@ -22,11 +22,36 @@ test('executor drains input continuations before due timers', (t) => {
       executor.cancel(timeout)
       order.push('reply continuation')
     })
+  }, () => {
+    t.ok(executor.running, 'completion runs inside the active executor')
+    t.equal(executor.queue.length, 0, 'completion sees no remaining runnable work')
+    order.push('complete')
   })
-  t.deepEqual(order, ['input', 'reply continuation', 'timer', 'timer continuation'],
-    'reply processing cancels a deadline reached by the same input')
+  t.deepEqual(order, ['input', 'reply continuation', 'timer', 'timer continuation', 'complete'],
+    'completion follows input continuations and due timers')
   t.equal(executor.queue.length, 0)
   t.equal(executor.running, false)
+  t.end()
+})
+
+test('executor skips completion on processing failures and propagates completion failures', (t) => {
+  for (const stage of ['input', 'continuation', 'timer', 'completion']) {
+    const executor = new Executor()
+    const failure = new Error(stage)
+    let completed = false
+    const fail = () => { throw failure }
+    t.throws(() => executor.run(0, () => {
+      if (stage === 'input') { fail() }
+      if (stage === 'continuation') { executor.enqueue(fail) }
+      if (stage === 'timer') { executor.after(0, fail) }
+    }, () => {
+      completed = true
+      if (stage === 'completion') { fail() }
+    }), (err) => err === failure, `${stage}: original error propagates`)
+    t.equal(completed, stage === 'completion', `${stage}: failed processing cannot finalize`)
+    t.notOk(executor.running, `${stage}: executor stops running`)
+    t.equal(executor.queue.length, 0, `${stage}: runnable work is discarded`)
+  }
   t.end()
 })
 
