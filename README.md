@@ -51,7 +51,6 @@ function createNode(id) {
     ).get(command.name).value
   }
 
-  const databasePath = `/tmp/node${id}.db`
   const components = new Map()
   const localSend = (from) => (to, frame) => {
     return components.get(to).onReceive(from, frame)
@@ -59,6 +58,8 @@ function createNode(id) {
 
   const gate = new Gate(id, nodeIds, send, localSend('gate'))
   components.set('gate', gate)
+
+  const databasePath = `/tmp/node${id}.db`
   for (const role of ['procA', 'procB', 'procC']) {
     components.set(role, new MonsterProc(
       role, id, nodeIds, localSend(role), databasePath,
