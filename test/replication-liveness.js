@@ -109,15 +109,16 @@ test('heartbeat ACK commits an acknowledged CMD when it restores a live quorum',
   t.end()
 })
 
-test('backtracking keeps a responsive follower live throughout a long divergent suffix', (t) => {
-  for (const delay of [0, 4]) {
+test('backtracking handles equal, longer divergent and empty follower logs', (t) => {
+  for (const [delay, followerLength] of [0, 4].flatMap((delay) => [0, 100, 150].map((n) => [delay, n]))) {
     const a = fixture('a')
     const b = fixture('b')
     try {
       // These are legal uncommitted histories received from an earlier leader.
-      for (const [f, term] of [[a, 2n], [b, 1n]]) {
+      for (const [f, term, length] of [[a, 2n, 100], [b, 1n, followerLength]]) {
+        if (length === 0) { continue }
         f.rpc({ type: 'append', cid: 'old-history', term: 3n, termP: -1n, seqP: -1n,
-          commitSeq: -1n, data: Array.from({ length: 100 }, () => ({ term, entry: Buffer.alloc(0) })),
+          commitSeq: -1n, data: Array.from({ length }, () => ({ term, entry: Buffer.alloc(0) })),
         }, 'c')
       }
       const queue = []
@@ -146,13 +147,14 @@ test('backtracking keeps a responsive follower live throughout a long divergent 
         collect(item.to, reply)
       }
       t.ok(deliveries < 1000, `${delay} ms transport: replication completes within the delivery limit`)
-      t.equal(backtracks, 100, 'conflicting history still uses ordinary one-entry backtracking')
+      t.equal(backtracks, followerLength === 0 ? 1 : 100,
+        'empty tails skip in one rejection; conflicting history backtracks one entry at a time')
       t.notOk(matchAdvancedByBacktrack, 'backtracking replies never establish matching history')
       t.equal(a.proc.engine.state, 'leader', 'responsive follower preserves leadership')
       t.equal(a.proc.engine.term, 4n, 'no election restarts the search')
       t.deepEqual([...b.proc.log.iter()], [...a.proc.log.iter()], 'all divergent history is replaced')
       t.equal(a.proc.engine.commitSeq, 100n, 'current-term no-op commits after the follower catches up')
-      if (delay > 0) {
+      if (delay > 0 && followerLength > 0) {
         t.ok(now - 10_000 > 150, 'backtracking outlasts the follower liveness window')
       }
     } finally { a.close(); b.close() }

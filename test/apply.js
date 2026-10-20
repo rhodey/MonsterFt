@@ -466,3 +466,121 @@ test('Apply validates execution and frame checksums before invoking user code', 
   }
   t.end()
 })
+
+test('one CMD session captures only the successful net batch transition', async (t) => {
+  const f = fixture((db, data, term, seq, index) => {
+    if (seq === 0n) { db.exec(schema); return }
+    if (index === 0) { db.exec('INSERT INTO items VALUES (1, 10), (2, 20)') }
+    if (index === 1) { db.exec('DELETE FROM items WHERE id = 1') }
+    if (index === 2) {
+      db.exec('UPDATE items SET value = 99; INSERT INTO items VALUES (3, 30)')
+      throw new Error('rollback this item')
+    }
+    return index
+  })
+  try {
+    await f.start()
+    await f.execute(0n, null)
+    const events = []
+    let patchset
+    const create = f.component.db.createSession.bind(f.component.db)
+    f.component.db.createSession = (...args) => {
+      events.push('create')
+      const session = create(...args)
+      const extract = session.patchset.bind(session)
+      const close = session.close.bind(session)
+      session.patchset = () => {
+        events.push('patchset')
+        patchset = Buffer.from(extract())
+        return patchset
+      }
+      session.close = () => { events.push('close'); close() }
+      return session
+    }
+    const write = f.component._writeReceipt.bind(f.component)
+    f.component._writeReceipt = (receipt) => { events.push('receipt'); write(receipt) }
+    const result = await f.execute(1n, [buf('insert'), buf('delete'), buf('reject')])
+    t.deepEqual(events, ['create', 'patchset', 'close', 'receipt'])
+    t.deepEqual(result.outcomes.map((item) => item[0]), [0, 0, 1])
+    const copy = new DatabaseSync(path.join(f.dir, 'patchset-copy'))
+    try {
+      copy.exec(schema)
+      const tables = []
+      t.ok(copy.applyChangeset(patchset, { filter: (table) => { tables.push(table); return true } }))
+      t.deepEqual(tables, ['items'], 'receipt table is absent from the patchset')
+      t.deepEqual(copy.prepare('SELECT * FROM items').all().map((row) => ({ ...row })),
+        [{ id: 2, value: 20 }], 'insert/delete cancel and rejected writes leave no changes')
+    } finally { copy.close() }
+  } finally { await f.close() }
+  t.end()
+})
+
+test('session, receipt, disk-full and RELEASE failures abort the entire CMD', async (t) => {
+  for (const mode of ['patchset', 'receipt error', 'receipt ignored', 'disk full', 'release']) {
+    const original = new Error('original failed item')
+    let lostTransaction = false
+    let calls = 0
+    const f = fixture((db, data, term, seq, index) => {
+      if (seq === 0n) { db.exec(schema); return }
+      calls++
+      if (mode === 'disk full' && index === 1) {
+        try { db.exec('INSERT INTO items VALUES (2, zeroblob(1000000))') }
+        catch (err) { lostTransaction = !db.isTransaction; throw err }
+      }
+      db.prepare('INSERT INTO items VALUES (?, ?)').run(index, index)
+      if (mode === 'release' && index === 1) { throw original }
+      return index
+    })
+    try {
+      await f.start()
+      await f.execute(0n, null)
+      let closed = 0
+      const create = f.component.db.createSession.bind(f.component.db)
+      f.component.db.createSession = (...args) => {
+        const session = create(...args)
+        const close = session.close.bind(session)
+        session.close = () => { closed++; close() }
+        if (mode === 'patchset') {
+          session.patchset = () => { throw new Error('patchset failed') }
+        }
+        return session
+      }
+      if (mode.startsWith('receipt')) {
+        f.component.db.exec(`CREATE TRIGGER bad_receipt BEFORE UPDATE ON monsterft_meta_apply
+          BEGIN SELECT RAISE(${mode === 'receipt ignored' ? 'IGNORE' : "ABORT, 'receipt failed'"}); END`)
+      }
+      if (mode === 'disk full') {
+        const pages = f.component.db.prepare('PRAGMA page_count').get().page_count
+        f.component.db.exec(`PRAGMA max_page_count = ${pages}`)
+      }
+      if (mode === 'release') {
+        const exec = f.component.db.exec.bind(f.component.db)
+        f.component.db.exec = (sql) => {
+          if (sql === 'RELEASE monsterft_item' && calls === 2) { throw new Error('release failed') }
+          return exec(sql)
+        }
+      }
+      t.equal(await f.execute(1n, [buf('first'), buf('second')]), undefined, `${mode}: no ACK`)
+      await f.component.close()
+      t.equal(closed, 1, `${mode}: session closed exactly once`)
+      const errors = f.diagnostics.filter(({ type }) => type === 'error').map(({ err }) => err)
+      const last = errors.at(-1)
+      t.equal(last.code, Err.APPLY_ERROR)
+      if (mode === 'release') {
+        t.ok(errors.some((err) => err.stack === original.stack), 'cleanup cannot hide original trace')
+        t.match(last.message, /DB2 item rollback release failed/)
+      } else if (mode === 'disk full') {
+        t.ok(lostTransaction, 'real SQLITE_FULL ends the transaction')
+        t.equal(last.sqlCode, 13)
+      } else {
+        t.match(last.message, mode === 'patchset' ? /patchset failed/ : /DB2 write apply/)
+      }
+      const db = new DatabaseSync(`${f.base}2`, { readOnly: true, readBigInts: true })
+      try {
+        t.equal(readApply(db).seq, 0n, 'receipt stays at setup')
+        t.equal(db.prepare('SELECT count(*) AS n FROM items').get().n, 0n, 'all item work rolled back')
+      } finally { db.close() }
+    } finally { await f.close() }
+  }
+  t.end()
+})

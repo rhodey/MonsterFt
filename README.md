@@ -74,19 +74,15 @@ function createNode(id) {
 }
 
 const nodes = nodeIds.map(createNode)
-try {
-  await Promise.all(nodes.map((node) => node.open()))
-  await Promise.all(nodes.map((node) => node.awaitLeader()))
+await Promise.all(nodes.map((node) => node.open()))
+await Promise.all(nodes.map((node) => node.awaitLeader()))
 
-  const command = Buffer.from(JSON.stringify({
-    type: 'increment',
-    name: 'count',
-  }))
-  const [cmdSeq, value] = await nodes[0].append(command)
-  console.log('count =', value)
-} finally {
-  await Promise.all(nodes.map((node) => node.close()))
-}
+const command = Buffer.from(JSON.stringify({
+  type: 'increment',
+  name: 'count',
+}))
+const [cmdSeq, value] = await nodes[0].append(command)
+console.log('count =', value)
 ```
 
 `send(to, frame)` carries Buffer frames and may be synchronous or async. A real
