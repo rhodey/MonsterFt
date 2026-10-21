@@ -31,7 +31,7 @@ function createNode(id) {
 
     db.prepare(`
       INSERT INTO counters (name, value) VALUES (?, 1)
-      ON CONFLICT (name) DO UPDATE SET value = value + 1
+        ON CONFLICT (name) DO UPDATE SET value = value + 1
     `).run(command.name)
 
     return db.prepare(
@@ -39,25 +39,27 @@ function createNode(id) {
     ).get(command.name).value
   }
 
-  const databasePath = `${directory}/node-${id}.db`
-  const components = new Map()
-  const sendFrom = (from) => (to, frame) => {
-    return components.get(to).onReceive(from, frame)
+  const local = new Map()
+  const localSend = (from) => (to, frame) => {
+    return local.get(to).onReceive(from, frame)
   }
 
-  const gate = new Gate(id, nodeIds, send, sendFrom('gate'))
-  components.set('gate', gate)
+  const gate = new Gate(id, nodeIds, send, localSend('gate'))
+  local.set('gate', gate)
+
+  const opts = { electionTimeout: 100 }
+  const databasePath = `${directory}/node-${id}.db`
   for (const role of ['procA', 'procB', 'procC']) {
-    components.set(role, new MonsterProc(
-      role, id, nodeIds, sendFrom(role), databasePath,
+    local.set(role, new MonsterProc(
+      role, id, nodeIds, localSend(role), databasePath, opts
     ))
   }
-  components.set('apply', new MonsterApply(
-    id, sendFrom('apply'), databasePath, { apply },
+  local.set('apply', new MonsterApply(
+    id, localSend('apply'), databasePath, { apply },
   ))
-  for (const [role, component] of components) {
-    component.on('warn', (err) => console.warn(`${id}/${role}`, err))
-    component.on('error', (err) => console.error(`${id}/${role}`, err))
+
+  for (const [role, proc] of local) {
+    proc.on('error', (err) => console.error(`${id}/${role}`, err))
   }
 
   nodesById.set(id, gate)

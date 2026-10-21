@@ -229,6 +229,9 @@ test('genesis retry is attempted once and explicit rejection cancels it', (t) =>
       code: Err.REPL_BACKTRACK, message: 'missing', logSeq: -1n })
     const root = page(r)
     t.equal(root.seqP, -1n)
+    t.deepEqual(f.diagnostics.map(({ role, type, error }) => [role, type, error.code]),
+      f.procs.map(({ role }) => [role, 'warn', Err.REPL_BACKTRACK]),
+      'each Proc warns about ordinary backtracking before retrying')
     const rejected = f.rpc({ type: 'err', cid: root.cid, term: root.term,
       code: Err.REPL_BACKTRACK, message: 'genesis rejected', logSeq: -1n })
     t.equal(page(rejected), undefined)

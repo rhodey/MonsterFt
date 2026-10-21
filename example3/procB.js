@@ -7,8 +7,9 @@ const localSend = (to, frame) => {
   if (to !== 'gate') { throw new Error(`unexpected local destination: ${to}`) }
   socket.write(frame)
 }
+
 const proc = new MonsterProc('procB', id, nodeIds, localSend, databasePath)
-proc.on('warn', (err) => console.warn(`${id}/procB`, err.message, err))
+
 proc.on('error', (err) => {
   console.error(`${id}/procB`, err.message, err)
   if (err.code !== ErrorCodes.REPAIR_QUORUM_IMPOSSIBLE || !proc.isOpen) {

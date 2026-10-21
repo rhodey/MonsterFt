@@ -202,7 +202,7 @@ no findings
 ## `replicate`
 
 Replicates a bounded log page to a follower and handles progress,
-backtracking, and retries.
+backtracking, and retries. Warnings include ordinary backtracking replies.
 
 ### findings
 

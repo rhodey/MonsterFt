@@ -21,8 +21,8 @@ const nodeIds = ['1', '2', '3']
 const nodesById = new Map()
 
 function createNode(id) {
-  const send = (to, buf) => {
-    return nodesById.get(to).onReceive(id, buf)
+  const send = (to, frame) => {
+    return nodesById.get(to).onReceive(id, frame)
   }
 
   const apply = (db, data, term, seq, index) => {
@@ -52,8 +52,8 @@ function createNode(id) {
   }
 
   const local = new Map()
-  const localSend = (from) => (to, buf) => {
-    return local.get(to).onReceive(from, buf)
+  const localSend = (from) => (to, frame) => {
+    return local.get(to).onReceive(from, frame)
   }
 
   const gate = new Gate(id, nodeIds, send, localSend('gate'))
@@ -85,8 +85,8 @@ const [cmdSeq, value] = await nodes[0].append(command)
 console.log('count =', value)
 ```
 
-`send(to, buf)` carries Buffers and may be synchronous or async. A real
-deployment delivers each buf to `target.onReceive(senderId, buf)`. Await
+`send(to, frame)` carries Buffers and may be synchronous or async. A real
+deployment delivers each frame to `target.onReceive(senderId, frame)`. Await
 `open()` and `close()` on Gate, which coordinates the local components;
 shutdown waits for outstanding Apply work. Reopening uses fresh instances.
 

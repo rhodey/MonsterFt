@@ -1,19 +1,17 @@
 import { MonsterApply, udsClient } from '../src/index.js'
 
 const [id, socketPath, databasePath, serverUrl] = process.argv.slice(2)
-const socket = await udsClient(socketPath)
-const localSend = (to, frame) => {
-  if (to !== 'gate') { throw new Error(`unexpected local destination: ${to}`) }
-  socket.write(frame)
-}
+
 const requestJson = async (url, options) => {
   const response = await fetch(url, options)
   const value = await response.json()
   if (!response.ok) { throw new Error(value.error) }
   return value
 }
-async function apply(db, data, term, seq) {
+
+const apply = async (db, data, term, seq) => {
   if (seq === 0n) { return }
+
   const command = JSON.parse(data.toString())
   if (command.method === 'POST') {
     return requestJson(serverUrl, {
@@ -34,13 +32,20 @@ async function apply(db, data, term, seq) {
   throw new Error(`unknown method: ${command.method}`)
 }
 
-const component = new MonsterApply(id, localSend, databasePath, { apply })
-component.on('warn', (err) => console.warn(`${id}/apply`, err.message, err))
-component.on('error', (err) => {
+const socket = await udsClient(socketPath)
+const localSend = (to, frame) => {
+  if (to !== 'gate') { throw new Error(`unexpected local destination: ${to}`) }
+  socket.write(frame)
+}
+
+const opts = { apply }
+const proc = new MonsterApply(id, localSend, databasePath, opts)
+
+proc.on('error', (err) => {
   console.error(`${id}/apply`, err.message, err)
   process.exit(1)
 })
-socket.on('data', (frame) => component.onReceive('gate', frame))
+socket.on('data', (frame) => proc.onReceive('gate', frame))
 socket.on('error', (err) => {
   console.error(`${id}/apply/socket`, err.message, err)
   process.exit(1)
