@@ -29,6 +29,7 @@ const LOCAL_TIMEOUT = 10_024
 const APPLY_TIMEOUT = 10_025
 const LOCAL_DIVERGENCE = 10_026
 const FRAME_CORRUPT = 10_027
+const SUPERVISOR_ERROR = 10_028
 
 const ErrorCodes = Object.freeze({
   ARGUMENT_ILLEGAL,
@@ -59,6 +60,7 @@ const ErrorCodes = Object.freeze({
   APPLY_TIMEOUT,
   LOCAL_DIVERGENCE,
   FRAME_CORRUPT,
+  SUPERVISOR_ERROR,
 })
 
 class ErrorWithCode extends Error {
@@ -130,4 +132,5 @@ export {
   APPLY_TIMEOUT,
   LOCAL_DIVERGENCE,
   FRAME_CORRUPT,
+  SUPERVISOR_ERROR,
 }

@@ -1,8 +1,8 @@
 import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { Gate, MonsterProc, MonsterApply } from './src/index.js'
+import { Gate, MonsterProc, MonsterApply } from '../src/index.js'
 
-const directory = mkdtempSync(`${tmpdir()}/monsterft-example3-`)
+const directory = mkdtempSync(`${tmpdir()}/monsterft-example1-`)
 
 const nodeIds = ['1', '2', '3']
 const nodesById = new Map()

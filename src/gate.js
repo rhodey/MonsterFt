@@ -504,8 +504,12 @@ class Gate extends EventEmitter {
     return this._closeWork
   }
 
-  close() {
+  stop() {
     if (!this._closing) { this._stop(nodeClosed()) }
+  }
+
+  close() {
+    this.stop()
     return this._closeComponents()
   }
 }

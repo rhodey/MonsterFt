@@ -8,7 +8,7 @@ The minimal pattern uses two commands:
 1. POST the same fact from every member under one `requestId`.
 2. GET the fact under one `observationId` after a quorum has reported it.
 
-[example4.js](example4.js) is the complete runnable implementation.
+[example3/](example3/) is the complete runnable implementation.
 
 ## Protocol
 
@@ -26,7 +26,7 @@ The body contains only values shared by every node:
 
 The HTTP Server hashes the fact and stores one immutable `{ hash, fact }`
 report per `(requestId, nodeId)`. Repeating the same hash is idempotent; a
-different hash for that key is a conflict. Example 4 hashes `JSON.stringify(fact)`
+different hash for that key is a conflict. Example 3 hashes `JSON.stringify(fact)`
 with SHA-256. Use a canonical serialization if fact property order can vary.
 
 The response omits `nodeId` so matching reports produce the same result:
@@ -55,8 +55,8 @@ Without a quorum, the status is `pending` and `fact` is omitted. The first
 result for `(requestId, observationId)` is frozen, so every node evaluating
 that GET command receives the same response even if more reports arrive.
 
-Example 4 stores reports and observations in memory. A real remote must
-store them durably.
+Example 3 stores reports and observations in its HTTP server's `facts.db`.
+These must survive restarts, just like the MonsterFt databases.
 
 ## Apply callback
 

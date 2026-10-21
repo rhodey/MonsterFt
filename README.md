@@ -175,8 +175,13 @@ node/nodes.
 
 ### Examples
 
-- [example3.js](example3.js): in-process MonsterFt cluster.
-- [example4.js](example4.js): MonsterFt with HTTP side effects.
+- [example1/](example1/): in-process MonsterFt cluster.
+- [example2/](example2/): supervised child processes, Unix sockets, and TCP.
+- [example3/](example3/): supervised MonsterFt with HTTP side effects.
+
+Run `node example1/entry.js`, `bash example2/entry.sh`, or
+`bash example3/entry.sh`. The supervised examples retain their databases in
+their `data/` directories between runs.
 
 ### Protocol copies and deployment
 
@@ -195,8 +200,7 @@ Local transports deliver Buffers to `.onReceive(from, frame)` using destinations
 `gate`, `procA`, `procB`, `procC`, and `apply`. They must preserve send order and
 deliver without loss once ready. Gate retries startup hello; later local
 timeouts stop the component that detects them. Gate's configurable
-`applyTimeout` defaults to 5,000 ms per Apply execution request. Gate and Apply
-can share a process while each Proc runs separately.
+`applyTimeout` defaults to 5,000 ms per Apply execution request.
 
 An unexpected component failure reports locally and stops that component;
 Gate and runtime Procs detect missing progress through timeouts. Gate failure
@@ -204,10 +208,17 @@ or failed `open()` does not coordinate cleanup. Explicitly call `Gate.close()`
 or stop the owning processes before restarting; Gate emits `close` only after
 coordinated shutdown succeeds.
 
-The library does not spawn OS processes. For production, use a supervisor and
-wait for old database owners to exit before replacing them. All components
-share a local filesystem. The in-process arrangement remains useful for tests
-and examples; standalone RaftNode is no longer a supported public API.
+`Supervisor` can keep Gate in the parent process and launch each Proc and Apply
+in its own child process. Its setup factory supplies Gate, child scripts, and
+optional transport readiness/cleanup callbacks; transport plumbing stays in
+your code. Failed groups restart only after the old owners exit.
+`supervisor.close()` kills and awaits the children; `supervisor.drainCmd()`
+explicitly drains first. For production, an outer process manager must also
+stop remaining owners before replacing a failed parent.
+
+All components share a local filesystem. The in-process arrangement remains
+useful for tests and examples; standalone RaftNode is no longer a supported
+public API.
 
 ### Roadmap
 

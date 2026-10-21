@@ -208,6 +208,15 @@ after all close replies succeed. Failed attempts can be retried explicitly.
   failure in its request list. Each database owner reports its own close error
   locally, so additional owner diagnostics remain available.
 
+## `stop`
+
+Permanently stops Gate's local work without requesting owner shutdown or
+emitting `close`. Repeated calls preserve the original shutdown error.
+
+### findings
+
+no findings
+
 ## `close`
 
 Permanently stops Gate and waits for its local components to close, including

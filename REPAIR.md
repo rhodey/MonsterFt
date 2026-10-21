@@ -11,6 +11,9 @@ three belong to ProcA/B/C; the last belongs to Apply.
    ```js
    await donor.drainCmd()
    ```
+
+   With supervised nodes, call `supervisor.drainCmd()` to also stop and await
+   the donor's child processes.
 2. Certify the donor's base path:
 
    ```js
@@ -26,6 +29,8 @@ three belong to ProcA/B/C; the last belongs to Apply.
    certify(databasePath, true)
    ```
 3. Stop every component of each node to be repaired and await shutdown.
+   For supervised nodes, await `supervisor.close()`; disable automatic restarts
+   before replacing any files.
 4. Copy all four donor databases and their SQLite sidecars to the corresponding
    target paths, replacing the stopped target's files and stale sidecars. Copy
    DB1A, DB1B, and DB1C individually; do not duplicate DB1A into all three paths.

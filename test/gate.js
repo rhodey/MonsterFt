@@ -362,6 +362,50 @@ test('Gate cancels Apply timeout when reply arrives before queued delivery', asy
   t.end()
 })
 
+test('Gate stop cancels local work without coordinating owner shutdown', async (t) => {
+  const h = harness({
+    local({ message }) { return message.kind === 'append' },
+  })
+  try {
+    await h.gate.open()
+    const command = h.gate.append(Buffer.from('pending')).catch((err) => err)
+    const changed = h.gate.awaitEvent('change').catch((err) => err)
+    let closed = false
+    const closing = h.gate.awaitEvent('close').then(() => { closed = true })
+    await immediate()
+    h.gate.stop()
+    t.notOk(h.gate.isOpen, 'stopping is immediate')
+    t.equal((await command).code, Err.NODE_NOT_OPEN)
+    t.equal((await changed).code, Err.NODE_NOT_OPEN)
+    h.gate.stop()
+    t.notOk(closed, 'close wait still requires coordinated cleanup')
+    t.deepEqual(h.errors, [], 'explicit stop emits no error')
+    t.equal(h.requests.filter(({ message }) => message.type === 'close').length, 0,
+      'stop sends no close requests')
+    const reopened = await h.gate.open().catch((err) => err)
+    t.equal(reopened.code, Err.NODE_NOT_OPEN, 'stopped Gate cannot reopen')
+    await h.gate.close()
+    await closing
+    t.ok(closed, 'explicit coordinated close remains available')
+  } finally { await h.gate.close() }
+  t.end()
+})
+
+test('Gate stop preserves an earlier fatal error', async (t) => {
+  const h = harness()
+  await h.gate.open()
+  h.gate.onReceive('b', Buffer.alloc(33))
+  const failure = h.errors[0]
+  h.gate.stop()
+  h.gate.stop()
+  const rejected = await h.gate.append(Buffer.from('late')).catch((err) => err)
+  t.equal(rejected, failure)
+  t.equal(rejected.code, Err.FRAME_CORRUPT)
+  t.equal(h.errors.length, 1)
+  await h.gate.close()
+  t.end()
+})
+
 test('Gate rejects corrupt frames and closes pending public work', async (t) => {
   const h = harness()
   let closed = false
