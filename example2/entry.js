@@ -1,14 +1,13 @@
-import { mkdirSync, mkdtempSync, rmSync, writeSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, rmSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
-import { format } from 'node:util'
 import { Gate, Supervisor, udsServer } from '../src/index.js'
 import { clusterTransport, nodeIds } from '../example-shared/cluster.js'
 
 const id = process.argv[2]
 if (!nodeIds.includes(id)) { throw new Error('usage: node example2/entry.js 1|2|3') }
 const exitWithError = (err) => {
-  try { writeSync(2, format(`${id}/entry`, err.message, err) + '\n') }
-  finally { process.exit(1) }
+  console.error(`${id}/entry`, err.message, err)
+  process.exit(1)
 }
 const directory = process.env.MONSTERFT_DATA ?? fileURLToPath(new URL('data/', import.meta.url))
 mkdirSync(directory, { recursive: true })

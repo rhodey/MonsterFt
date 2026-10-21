@@ -1,6 +1,5 @@
-import { mkdirSync, mkdtempSync, rmSync, writeSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, rmSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
-import { format } from 'node:util'
 import { randomUUID } from 'node:crypto'
 import { Gate, Supervisor, udsServer } from '../src/index.js'
 import { clusterTransport, nodeIds } from '../example-shared/cluster.js'
@@ -8,8 +7,8 @@ import { clusterTransport, nodeIds } from '../example-shared/cluster.js'
 const id = process.argv[2]
 if (!nodeIds.includes(id)) { throw new Error('usage: node example3/entry.js 1|2|3') }
 const exitWithError = (err) => {
-  try { writeSync(2, format(`${id}/entry`, err.message, err) + '\n') }
-  finally { process.exit(1) }
+  console.error(`${id}/entry`, err.message, err)
+  process.exit(1)
 }
 const serverUrl = process.env.MONSTERFT_FACT_URL
 if (!serverUrl) { throw new Error('MONSTERFT_FACT_URL is required; use example3/entry.sh') }
