@@ -10,8 +10,10 @@ const exitWithError = (err) => {
   console.error(`${id}/entry`, err.message, err)
   process.exit(1)
 }
+
 const directory = process.env.MONSTERFT_DATA ?? fileURLToPath(new URL('data/', import.meta.url))
 mkdirSync(directory, { recursive: true })
+
 const basePort = Number(process.env.MONSTERFT_PORT ?? 41000)
 const peers = Object.fromEntries(nodeIds.map((nodeId, index) => [nodeId, {
   host: '127.0.0.1', basePort: basePort + index * nodeIds.length,

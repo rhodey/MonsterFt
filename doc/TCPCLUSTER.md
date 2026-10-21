@@ -5,7 +5,8 @@ Trivial getters and forwarding methods are omitted.
 
 ## `constructor`
 
-Validates cluster endpoints and transport options. Sorted membership determines each pair's listening port without exchanging node IDs.
+Validates cluster endpoints and transport options. Sorted membership determines
+each sender's listening port at every destination without exchanging node IDs.
 
 ### findings
 
@@ -13,7 +14,8 @@ no findings
 
 ## `_start`
 
-Opens the local peer-specific listeners and begins connecting to higher-ranked members. Startup does not wait for remote peers.
+Opens a listener and a separate outgoing connection for every other member.
+Startup does not wait for remote peers.
 
 ### findings
 
@@ -21,7 +23,10 @@ no findings
 
 ## `_install`
 
-Associates a duplex connection with its configured peer and replaces any previous connection. Stale callbacks cannot affect its replacement.
+Associates a connection with its peer and message direction, replacing any
+previous connection in that direction. Incoming connections deliver messages;
+outgoing connections reject unexpected received frames. Stale callbacks cannot
+affect the replacement or the opposite direction.
 
 ### findings
 
@@ -53,7 +58,8 @@ no findings
 
 ## `send`
 
-Sends an unchanged Buffer to a peer. Disconnected peers and full queues drop unsent frames for the protocol to retry.
+Sends an unchanged Buffer through a peer's outgoing connection. Disconnected
+peers and full queues drop unsent frames for the protocol to retry.
 
 ### findings
 
