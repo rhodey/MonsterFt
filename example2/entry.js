@@ -1,6 +1,6 @@
 import { mkdirSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
-import { Gate, Supervisor, TcpCluster, UdsRouter } from '../src/index.js'
+import { Gate, Supervisor, TcpCluster, UdxRouter } from '../src/index.js'
 
 const nodeIds = ['1', '2', '3']
 const roles = ['procA', 'procB', 'procC', 'apply']
@@ -21,7 +21,7 @@ const peers = Object.fromEntries(nodeIds.map((nodeId, index) => [nodeId, {
 
 const supervisor = new Supervisor(async () => {
   const cluster = new TcpCluster(id, peers)
-  const local = new UdsRouter(roles)
+  const local = new UdxRouter(roles)
   const send = (to, frame) => cluster.send(to, frame)
   const localSend = (to, frame) => local.send(to, frame)
   const gate = new Gate(id, nodeIds, send, localSend)
@@ -29,7 +29,7 @@ const supervisor = new Supervisor(async () => {
   cluster.on('message', (from, frame) => gate.onReceive(from, frame))
   local.on('message', (from, frame) => gate.onReceive(from, frame))
   cluster.on('error', (err) => console.error(`${id}/tcp`, err))
-  local.on('error', (err) => console.error(`${id}/uds`, err))
+  local.on('error', (err) => console.error(`${id}/udx`, err))
   gate.on('error', (err) => console.error(`${id}/gate`, err))
 
   const stop = () => { cluster.stop(); local.stop() }

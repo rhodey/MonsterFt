@@ -1,11 +1,11 @@
 import fs from 'node:fs'
 import { MonsterProc } from '../../src/proc.js'
 import { MonsterApply } from '../../src/apply.js'
-import { udsClient } from '../../src/net/uds.js'
+import { udxClient } from '../../src/net/udx.js'
 import { REPAIR_QUORUM_IMPOSSIBLE } from '../../src/error.js'
 
 const [role, id, base, socketPath] = process.argv.slice(2)
-const connection = await udsClient(socketPath)
+const connection = await udxClient(socketPath)
 const localSend = (to, frame) => {
   if (to !== 'gate') { throw new Error('unexpected owner destination') }
   connection.write(frame)

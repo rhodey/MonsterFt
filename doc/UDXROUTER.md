@@ -1,11 +1,12 @@
 # Local Unix socket router
 
-Function notes for [src/net/udsrouter.js](../src/net/udsrouter.js), in source order.
+Function notes for [src/net/udxrouter.js](../src/net/udxrouter.js), in source order.
 Trivial getters and forwarding methods are omitted.
 
 ## `constructor`
 
-Validates endpoint names and prepares private or explicitly configured socket paths and connection readiness.
+Validates endpoint names and the optional parent directory, and prepares
+connection readiness.
 
 ### findings
 
@@ -13,7 +14,8 @@ no findings
 
 ## `_start`
 
-Opens one listener per local endpoint without replacing existing paths. Default paths live in a private temporary directory.
+Creates a private temporary directory and opens one listener per local endpoint.
+The generated socket paths are available through `paths`.
 
 ### findings
 

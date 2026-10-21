@@ -3,8 +3,8 @@ import net from 'node:net'
 import { mkdtemp, rm, lstat, readdir, writeFile, readFile } from 'node:fs/promises'
 import { dirname, join } from 'node:path'
 import { TcpCluster } from '../src/net/tcpcluster.js'
-import { UdsRouter } from '../src/net/udsrouter.js'
-import { udsClient } from '../src/net/uds.js'
+import { UdxRouter } from '../src/net/udxrouter.js'
+import { udxClient } from '../src/net/udx.js'
 import * as Err from '../src/error.js'
 import { until, pause } from './helper.js'
 
@@ -86,12 +86,9 @@ test('router constructors validate endpoints, derived ports, and limits', (t) =>
   illegal(() => new TcpCluster('alpha', peers, { connectTimeout: 0 }))
   illegal(() => new TcpCluster('alpha', peers, { reconnectDelay: -1 }))
   illegal(() => new TcpCluster('alpha', peers, { maxFrameBytes: -1 }))
-  illegal(() => new UdsRouter([]))
-  illegal(() => new UdsRouter(['same', 'same']))
-  illegal(() => new UdsRouter(['a'], { directory: '/tmp', paths: { a: '/tmp/a' } }))
-  illegal(() => new UdsRouter(['a', 'b'], { paths: { a: '/tmp/a', b: '/tmp/a' } }))
-  illegal(() => new UdsRouter(['a'], { paths: {} }))
-  illegal(() => new UdsRouter(['a'], { maxQueuedBytes: 3 }))
+  illegal(() => new UdxRouter([]))
+  illegal(() => new UdxRouter(['same', 'same']))
+  illegal(() => new UdxRouter(['a'], { maxQueuedBytes: 3 }))
   t.end()
 })
 
@@ -391,9 +388,9 @@ test('TcpCluster connection deadlines retry once per peer and shutdown cancels p
   t.end()
 })
 
-test('UdsRouter manages private paths and waits for every named endpoint', async (t) => {
+test('UdxRouter manages private paths and waits for every named endpoint', async (t) => {
   const parent = await mkdtemp('/tmp/mft-router-parent-')
-  const router = new UdsRouter(['owner/A', 'user apply'], { directory: parent })
+  const router = new UdxRouter(['owner/A', 'user apply'], { directory: parent })
   const seen = watch(router)
   const clients = []
   let ready = false
@@ -403,18 +400,18 @@ test('UdsRouter manages private paths and waits for every named endpoint', async
     const directory = dirname(router.paths['owner/A'])
     t.equal(dirname(directory), parent, 'managed directory lives inside the custom parent')
     t.equal((await lstat(directory)).mode & 0o777, 0o700, 'managed directory is private')
-    clients.push(await udsClient(router.paths['owner/A']))
+    clients.push(await udxClient(router.paths['owner/A']))
     clients[0].resume()
     await pause(10)
     t.equal(ready, false, 'the first endpoint cannot satisfy all-owner readiness')
-    clients.push(await udsClient(router.paths['user apply']))
+    clients.push(await udxClient(router.paths['user apply']))
     const received = []
     clients[1].on('data', (bytes) => received.push(bytes))
     await timeout(router.ready())
     t.equal(ready, true)
     clients[0].write(Buffer.from([0xc1, 255]))
     router.send('user apply', Buffer.alloc(0))
-    await until(() => seen.messages.length === 1 && received.length === 1, 'named UDS routing')
+    await until(() => seen.messages.length === 1 && received.length === 1, 'named UDX routing')
     t.deepEqual(seen.messages, [{ from: 'owner/A', bytes: Buffer.from([0xc1, 255]) }])
     t.deepEqual(received, [Buffer.alloc(0)])
     t.deepEqual(seen.errors, [])
@@ -432,71 +429,46 @@ test('UdsRouter manages private paths and waits for every named endpoint', async
   t.end()
 })
 
-test('UdsRouter custom paths preserve existing files and clean partial startup', async (t) => {
-  const directory = await mkdtemp('/tmp/mft-router-custom-')
-  const paths = { first: join(directory, 'first.sock'), second: join(directory, 'second.sock') }
-  await writeFile(paths.second, 'owned by caller')
-  const router = new UdsRouter(['first', 'second'], { paths })
+test('UdxRouter cleans partial startup while preserving its parent directory', async (t) => {
+  const directory = await mkdtemp('/tmp/mft-router-partial-')
+  const callerFile = join(directory, 'keep.txt')
+  await writeFile(callerFile, 'owned by caller')
+  const router = new UdxRouter(['first', 'second'], { directory })
   const seen = watch(router)
+  const original = new Error('second listener failed')
+  const listen = router._listen.bind(router)
+  let firstServer
+  router._listen = async (...args) => {
+    if (firstServer) {
+      t.ok(firstServer.listening, 'the first listener is bound before the second fails')
+      throw original
+    }
+    firstServer = await listen(...args)
+    return firstServer
+  }
   try {
     const failure = await router.open().catch((err) => err)
-    t.equal(failure.code, Err.ARGUMENT_ILLEGAL)
-    t.match(failure.message, /already exists/)
+    t.equal(failure, original)
     await router.close()
-    t.equal(await readFile(paths.second, 'utf8'), 'owned by caller')
-    t.deepEqual(await readdir(directory), ['second.sock'], 'partial startup removes only its own socket')
+    t.notOk(firstServer.listening, 'cleanup closes the earlier listener')
+    t.equal(await readFile(callerFile, 'utf8'), 'owned by caller')
+    t.deepEqual(await readdir(directory), ['keep.txt'], 'cleanup removes only the owned attempt directory')
     t.deepEqual(seen.errors, [], 'startup failure is returned without an extra diagnostic')
   } finally { await router.close(); await rm(directory, { recursive: true, force: true }) }
   t.end()
 })
 
-test('UdsRouter preserves existing sockets and supports successful caller-owned paths', async (t) => {
-  const directory = await mkdtemp('/tmp/mft-router-existing-')
-  const path = join(directory, 'worker.sock')
-  const holder = net.createServer((socket) => socket.destroy())
-  await new Promise((resolve, reject) => {
-    holder.once('error', reject)
-    holder.listen(path, resolve)
-  })
-  const rejected = new UdsRouter(['worker'], { paths: { worker: path } })
-  let router
-  let client
-  try {
-    t.equal((await rejected.open().catch((err) => err)).code, Err.ARGUMENT_ILLEGAL)
-    await rejected.close()
-    t.ok(holder.listening, 'failed startup does not stop the preexisting listener')
-    t.ok((await lstat(path)).isSocket(), 'the existing socket path remains')
-    await closeServer(holder)
-    router = new UdsRouter(['worker'], { paths: { worker: path } })
-    await router.open()
-    t.equal(router.paths.worker, path)
-    client = await udsClient(path)
-    client.resume()
-    await router.ready()
-    await router.close()
-    t.ok((await lstat(directory)).isDirectory(), 'successful cleanup preserves the caller directory')
-    t.deepEqual(await readdir(directory), [], 'only the owned socket is removed')
-  } finally {
-    client?.destroy()
-    await rejected.close()
-    await router?.close()
-    await closeServer(holder)
-    await rm(directory, { recursive: true, force: true })
-  }
-  t.end()
-})
-
-test('UdsRouter rejects duplicate owners and makes established disconnect terminal', async (t) => {
-  const router = new UdsRouter(['worker'])
+test('UdxRouter rejects duplicate owners and makes established disconnect terminal', async (t) => {
+  const router = new UdxRouter(['worker'])
   const seen = watch(router)
   let first
   let duplicate
   try {
     await router.open()
-    first = await udsClient(router.paths.worker)
+    first = await udxClient(router.paths.worker)
     first.resume()
     await router.ready()
-    duplicate = await udsClient(router.paths.worker)
+    duplicate = await udxClient(router.paths.worker)
     duplicate.resume()
     await timeout(event(duplicate, 'close'))
     t.ok(router.isOpen, 'a duplicate cannot displace the accepted owner')
@@ -516,13 +488,13 @@ test('UdsRouter rejects duplicate owners and makes established disconnect termin
   t.end()
 })
 
-test('UdsRouter overload fails its attempt while invalid arguments remain caller errors', async (t) => {
-  const router = new UdsRouter(['worker'], { maxFrameBytes: 8, maxQueuedBytes: 12 })
+test('UdxRouter overload fails its attempt while invalid arguments remain caller errors', async (t) => {
+  const router = new UdxRouter(['worker'], { maxFrameBytes: 8, maxQueuedBytes: 12 })
   const seen = watch(router)
   let client
   try {
     await router.open()
-    client = await udsClient(router.paths.worker)
+    client = await udxClient(router.paths.worker)
     client.resume()
     await router.ready()
     for (const send of [() => router.send('absent', Buffer.alloc(0)),
@@ -540,11 +512,11 @@ test('UdsRouter overload fails its attempt while invalid arguments remain caller
   t.end()
 })
 
-for (const type of ['TCP', 'UDS']) {
+for (const type of ['TCP', 'UDX']) {
   test(`${type} message listener failure stops before error and contains diagnostic listener throws`, async (t) => {
     const peers = type === 'TCP' ? members(await freePorts()) : null
     const router = type === 'TCP'
-      ? new TcpCluster('zulu', peers, { bindHost: '127.0.0.1' }) : new UdsRouter(['worker'])
+      ? new TcpCluster('zulu', peers, { bindHost: '127.0.0.1' }) : new UdxRouter(['worker'])
     const original = new Error(`${type} receiver failed`)
     const reported = []
     let laterMessage = false
@@ -559,7 +531,7 @@ for (const type of ['TCP', 'UDS']) {
         socket = await rawConnect(peers.zulu.basePort)
         socket.write(frame(Buffer.from('trigger')))
       } else {
-        socket = await udsClient(router.paths.worker)
+        socket = await udxClient(router.paths.worker)
         await router.ready()
         socket.write(Buffer.from('trigger'))
       }
@@ -597,7 +569,7 @@ test('TcpCluster warning listener failure stops retries and retains its original
 test('router close cancels startup and leaves normal failure promises unsettled', async (t) => {
   const parent = await mkdtemp('/tmp/mft-router-cancel-')
   const peers = members(await freePorts())
-  const routers = [new UdsRouter(['one', 'two'], { directory: parent }),
+  const routers = [new UdxRouter(['one', 'two'], { directory: parent }),
     new TcpCluster('alpha', peers, { reconnectDelay: 10 })]
   try {
     for (const router of routers) {
@@ -612,7 +584,7 @@ test('router close cancels startup and leaves normal failure promises unsettled'
       t.equal(failed, false, 'intentional cancellation is not a runtime failure')
       t.equal((await router.open().catch((err) => err)).code, Err.NODE_NOT_OPEN)
     }
-    t.deepEqual(await readdir(parent), [], 'cancelled UDS startup leaves no attempt directory')
+    t.deepEqual(await readdir(parent), [], 'cancelled UDX startup leaves no attempt directory')
   } finally {
     await Promise.all(routers.map((router) => router.close()))
     await rm(parent, { recursive: true, force: true })

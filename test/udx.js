@@ -1,7 +1,7 @@
 import test from 'tape'
 import net from 'node:net'
 import { mkdtemp, rm, writeFile, readFile } from 'node:fs/promises'
-import { udsServer, udsClient } from '../src/net/uds.js'
+import { udxServer, udxClient } from '../src/net/udx.js'
 import * as Err from '../src/error.js'
 
 const noop = () => {}
@@ -12,7 +12,7 @@ const closeServer = (server) => !server?.listening ? Promise.resolve() :
 
 function timeout(work, ms = 5000) {
   return new Promise((resolve, reject) => {
-    const timer = setTimeout(() => reject(new Error('UDS test timeout')), ms)
+    const timer = setTimeout(() => reject(new Error('UDX test timeout')), ms)
     work.then((value) => { clearTimeout(timer); resolve(value) },
       (err) => { clearTimeout(timer); reject(err) })
   })
@@ -27,11 +27,11 @@ function framed(frames) {
 }
 
 async function fixture(onConnection = noop) {
-  const directory = await mkdtemp('/tmp/monsterft-uds-')
+  const directory = await mkdtemp('/tmp/monsterft-udx-')
   const path = `${directory}/socket`
   const errors = []
   const connections = []
-  const server = await udsServer(path, (connection) => {
+  const server = await udxServer(path, (connection) => {
     connections.push(connection)
     onConnection(connection)
   }, (err) => errors.push(err))
@@ -45,9 +45,9 @@ async function fixture(onConnection = noop) {
   }
 }
 
-test('UDS preserves Buffer frames, including empty and large messages', async (t) => {
+test('UDX preserves Buffer frames, including empty and large messages', async (t) => {
   const f = await fixture((connection) => connection.on('data', (frame) => connection.write(frame)))
-  const client = await udsClient(f.path)
+  const client = await udxClient(f.path)
   try {
     const frames = [Buffer.alloc(0), Buffer.from([0, 255, 128, 1]),
       Buffer.alloc(4 * 1024 * 1024, 0x7f)]
@@ -73,7 +73,7 @@ test('UDS preserves Buffer frames, including empty and large messages', async (t
 })
 
 for (const split of [false, true]) {
-  test(`UDS receives ${split ? 'fragmented' : 'combined'} length-prefixed messages`, async (t) => {
+  test(`UDX receives ${split ? 'fragmented' : 'combined'} length-prefixed messages`, async (t) => {
     const frames = [Buffer.alloc(0), Buffer.from('one'), Buffer.from('two'), Buffer.alloc(100_000, 77)]
     const received = []
     let finish
@@ -105,8 +105,8 @@ for (const split of [false, true]) {
   })
 }
 
-test('UDS writes only a uint32 length and original frame bytes', async (t) => {
-  const directory = await mkdtemp('/tmp/monsterft-uds-')
+test('UDX writes only a uint32 length and original frame bytes', async (t) => {
+  const directory = await mkdtemp('/tmp/monsterft-udx-')
   const path = `${directory}/socket`
   const chunks = []
   let finish
@@ -116,7 +116,7 @@ test('UDS writes only a uint32 length and original frame bytes', async (t) => {
     socket.on('end', finish)
   })
   await new Promise((resolve) => server.listen(path, resolve))
-  const client = await udsClient(path)
+  const client = await udxClient(path)
   client.resume()
   try {
     const frames = [Buffer.alloc(0), Buffer.from('raw bytes'), Buffer.from([0xc1, 0, 255])]
@@ -135,11 +135,11 @@ test('UDS writes only a uint32 length and original frame bytes', async (t) => {
   t.end()
 })
 
-test('UDS readable backpressure preserves buffered frame boundaries', async (t) => {
+test('UDX readable backpressure preserves buffered frame boundaries', async (t) => {
   let accept
   const accepted = new Promise((resolve) => { accept = resolve })
   const f = await fixture(accept)
-  const client = await udsClient(f.path)
+  const client = await udxClient(f.path)
   client.resume()
   try {
     const receiver = await accepted
@@ -164,7 +164,7 @@ test('UDS readable backpressure preserves buffered frame boundaries', async (t) 
 })
 
 for (const sender of ['client', 'server']) {
-  test(`UDS ${sender} end flushes its final large frame`, async (t) => {
+  test(`UDX ${sender} end flushes its final large frame`, async (t) => {
     const frames = [Buffer.from('first'), Buffer.alloc(16 * 1024 * 1024, 99)]
     const received = []
     const f = await fixture((connection) => {
@@ -173,7 +173,7 @@ for (const sender of ['client', 'server']) {
         else { connection.write(frames[0]); connection.end(frames[1]) }
       })
     })
-    const client = await udsClient(f.path)
+    const client = await udxClient(f.path)
     client.on('data', (frame) => received.push(frame))
     try {
       const closing = event(client, 'close')
@@ -191,7 +191,7 @@ for (const sender of ['client', 'server']) {
 }
 
 for (const bytes of [Buffer.from([0, 0]), Buffer.from([0, 0, 0, 2, 1])]) {
-  test('UDS rejects incomplete frames at end of input', async (t) => {
+  test('UDX rejects incomplete frames at end of input', async (t) => {
     const f = await fixture((connection) => connection.resume())
     const raw = net.connect(f.path)
     raw.on('error', noop)
@@ -213,9 +213,9 @@ for (const bytes of [Buffer.from([0, 0]), Buffer.from([0, 0, 0, 2, 1])]) {
   })
 }
 
-test('UDS rejects non-Buffer writes and cleans up without caller error listeners', async (t) => {
+test('UDX rejects non-Buffer writes and cleans up without caller error listeners', async (t) => {
   const f = await fixture((connection) => connection.resume())
-  const client = await udsClient(f.path)
+  const client = await udxClient(f.path)
   try {
     const failed = event(client, 'error')
     const closing = event(client, 'close')
@@ -224,7 +224,7 @@ test('UDS rejects non-Buffer writes and cleans up without caller error listeners
     await timeout(closing)
     t.equal(err.code, Err.ARGUMENT_ILLEGAL)
     t.ok(client.destroyed, 'invalid write closes connection')
-    const next = await udsClient(f.path)
+    const next = await udxClient(f.path)
     const nextClosing = event(next, 'close')
     next.write('invalid')
     await timeout(nextClosing)
@@ -236,14 +236,14 @@ test('UDS rejects non-Buffer writes and cleans up without caller error listeners
   t.end()
 })
 
-test('UDS reports receiver and connection callback errors with their original stacks', async (t) => {
+test('UDX reports receiver and connection callback errors with their original stacks', async (t) => {
   for (const source of ['connection', 'data']) {
     const original = new Error(`${source} failed`)
     const f = await fixture((connection) => {
       if (source === 'connection') { throw original }
       connection.on('data', () => { throw original })
     })
-    const client = await udsClient(f.path)
+    const client = await udxClient(f.path)
     client.resume()
     try {
       const closing = event(client, 'close')
@@ -261,14 +261,14 @@ test('UDS reports receiver and connection callback errors with their original st
   t.end()
 })
 
-test('UDS explicit destroy aborts queued output', async (t) => {
-  const directory = await mkdtemp('/tmp/monsterft-uds-')
+test('UDX explicit destroy aborts queued output', async (t) => {
+  const directory = await mkdtemp('/tmp/monsterft-udx-')
   const path = `${directory}/socket`
   let accept
   const accepted = new Promise((resolve) => { accept = resolve })
   const server = net.createServer((socket) => { socket.pause(); accept(socket) })
   await new Promise((resolve) => server.listen(path, resolve))
-  const client = await udsClient(path)
+  const client = await udxClient(path)
   const peer = await accepted
   peer.on('error', noop)
   try {
@@ -294,15 +294,15 @@ test('UDS explicit destroy aborts queued output', async (t) => {
   t.end()
 })
 
-test('UDS failures preserve existing paths and reject unavailable connections', async (t) => {
-  const directory = await mkdtemp('/tmp/monsterft-uds-')
+test('UDX failures preserve existing paths and reject unavailable connections', async (t) => {
+  const directory = await mkdtemp('/tmp/monsterft-udx-')
   const path = `${directory}/socket`
   try {
     await writeFile(path, 'do not replace')
-    const failure = await udsServer(path, noop, noop).then(() => null, (err) => err)
+    const failure = await udxServer(path, noop, noop).then(() => null, (err) => err)
     t.match(failure.message, /EADDRINUSE/, 'listen failure rejects')
     t.equal(await readFile(path, 'utf8'), 'do not replace', 'existing path is untouched')
-    const absent = await udsClient(`${directory}/missing`).then(() => null, (err) => err)
+    const absent = await udxClient(`${directory}/missing`).then(() => null, (err) => err)
     t.match(absent.message, /ENOENT/, 'connection failure rejects')
     t.match(absent.stack, /ENOENT/, 'original connect stack remains available')
   } finally {
@@ -311,12 +311,12 @@ test('UDS failures preserve existing paths and reject unavailable connections', 
   t.end()
 })
 
-test('UDS applies configurable frame limits before collecting payloads', async (t) => {
-  const directory = await mkdtemp('/tmp/monsterft-uds-')
+test('UDX applies configurable frame limits before collecting payloads', async (t) => {
+  const directory = await mkdtemp('/tmp/monsterft-udx-')
   const path = `${directory}/socket`
   let report
   const reported = new Promise((resolve) => { report = resolve })
-  const server = await udsServer(path, (connection) => connection.resume(),
+  const server = await udxServer(path, (connection) => connection.resume(),
     (err, connection) => report({ err, connection }), { maxFrameBytes: 2 })
   const socket = net.connect(path)
   socket.on('error', noop)
@@ -337,13 +337,13 @@ test('UDS applies configurable frame limits before collecting payloads', async (
   t.end()
 })
 
-test('UDS cancelled setup preserves the cancellation stack', async (t) => {
+test('UDX cancelled setup preserves the cancellation stack', async (t) => {
   const controller = new AbortController()
   const original = new Error('cancel local transport')
   controller.abort(original)
   const options = { signal: controller.signal }
-  const clientError = await udsClient('/tmp/monsterft-absent', options).then(() => null, (err) => err)
-  const serverError = await udsServer('/tmp/monsterft-absent', noop, noop, options).then(() => null, (err) => err)
+  const clientError = await udxClient('/tmp/monsterft-absent', options).then(() => null, (err) => err)
+  const serverError = await udxServer('/tmp/monsterft-absent', noop, noop, options).then(() => null, (err) => err)
   t.equal(clientError.stack, original.stack)
   t.equal(serverError.stack, original.stack)
   t.end()

@@ -4,8 +4,8 @@ import path from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
 import { Supervisor } from '../src/supervisor.js'
 import { Gate } from '../src/gate.js'
-import { udsServer } from '../src/net/uds.js'
-import { UdsRouter } from '../src/net/udsrouter.js'
+import { udxServer } from '../src/net/udx.js'
+import { UdxRouter } from '../src/net/udxrouter.js'
 import { decodeFrame, decodePayload } from '../src/wire.js'
 import { readApply, readMeta } from '../src/utils.js'
 import * as Err from '../src/error.js'
@@ -39,7 +39,7 @@ async function processCluster(options = {}) {
         throw new Error('replacement started before owners exited')
       }
       const attempt = fs.mkdtempSync(path.join(directory, `${id}-`))
-      const local = options.router ? new UdsRouter(allRoles, { directory: attempt }) : null
+      const local = options.router ? new UdxRouter(allRoles, { directory: attempt }) : null
       const sockets = local ? local._connections : new Map()
       const servers = []
       const ready = []
@@ -69,7 +69,7 @@ async function processCluster(options = {}) {
           ready.push(new Promise((resolve) => {
             run[`ready${role}`] = resolve
           }))
-          const server = await udsServer(path.join(attempt, role), (connection) => {
+          const server = await udxServer(path.join(attempt, role), (connection) => {
             if (sockets.has(role)) { throw new Error('duplicate owner connection') }
             sockets.set(role, connection)
             connection.on('data', (frame) => receive(role, frame))

@@ -213,7 +213,7 @@ database-owner processes must exit before replacement.
 `Supervisor` can keep Gate in the parent process and launch each Proc and Apply
 in its own child process. Its setup factory supplies Gate, child scripts, and
 transport lifecycle hooks. `TcpCluster` handles peer connections and reconnects;
-`UdsRouter` handles local sockets. Both are optional, configurable helpers, and
+`UdxRouter` handles local sockets. Both are optional, configurable helpers, and
 TCP is plaintext. The examples show the routing and restart failed groups only
 after the old owners exit.
 `supervisor.close()` kills and awaits the children; `supervisor.drainCmd()`

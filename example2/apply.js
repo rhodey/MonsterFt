@@ -1,4 +1,4 @@
-import { MonsterApply, udsClient } from '../src/index.js'
+import { MonsterApply, udxClient } from '../src/index.js'
 
 const [id, socketPath, databasePath] = process.argv.slice(2)
 
@@ -28,7 +28,7 @@ const apply = (db, data, term, seq) => {
   ).get(command.name).value
 }
 
-const socket = await udsClient(socketPath)
+const socket = await udxClient(socketPath)
 const localSend = (to, frame) => {
   if (to !== 'gate') { throw new Error(`unexpected local destination: ${to}`) }
   socket.write(frame)

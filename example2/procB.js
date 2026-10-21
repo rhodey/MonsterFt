@@ -1,8 +1,8 @@
-import { ErrorCodes, MonsterProc, udsClient } from '../src/index.js'
+import { ErrorCodes, MonsterProc, udxClient } from '../src/index.js'
 
 const nodeIds = ['1', '2', '3']
 const [id, socketPath, databasePath] = process.argv.slice(2)
-const socket = await udsClient(socketPath)
+const socket = await udxClient(socketPath)
 const localSend = (to, frame) => {
   if (to !== 'gate') { throw new Error(`unexpected local destination: ${to}`) }
   socket.write(frame)
