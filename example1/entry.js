@@ -1,8 +1,9 @@
-import { mkdtempSync, rmSync } from 'node:fs'
-import { tmpdir } from 'node:os'
+import { mkdirSync } from 'node:fs'
+import { fileURLToPath } from 'node:url'
 import { Gate, MonsterProc, MonsterApply } from '../src/index.js'
 
-const directory = mkdtempSync(`${tmpdir()}/monsterft-example1-`)
+const directory = process.env.MONSTERFT_DATA ?? fileURLToPath(new URL('data/', import.meta.url))
+mkdirSync(directory, { recursive: true })
 
 const nodeIds = ['1', '2', '3']
 const nodesById = new Map()
@@ -76,5 +77,4 @@ try {
   console.log('count =', value)
 } finally {
   await Promise.all(nodes.map((node) => node.close()))
-  rmSync(directory, { recursive: true, force: true })
 }

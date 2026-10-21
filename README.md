@@ -180,7 +180,7 @@ node/nodes.
 - [example3/](example3/): supervised MonsterFt with HTTP side effects.
 
 Run `node example1/entry.js`, `bash example2/entry.sh`, or
-`bash example3/entry.sh`. The supervised examples retain their databases in
+`bash example3/entry.sh`. All examples retain their databases in
 their `data/` directories between runs.
 
 ### Protocol copies and deployment

@@ -2,5 +2,6 @@
 *\.swp
 .DS_Store
 node_modules/
+example1/data/
 example2/data/
 example3/data/
