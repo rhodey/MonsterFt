@@ -8,7 +8,10 @@ const localSend = (to, frame) => {
   socket.write(frame)
 }
 
-const proc = new MonsterProc('procA', id, nodeIds, localSend, databasePath)
+const opts = { electionTimeout: 100 }
+const proc = new MonsterProc(
+  'procA', id, nodeIds, localSend, databasePath, opts
+)
 
 proc.on('error', (err) => {
   console.error(`${id}/procA`, err.message, err)
