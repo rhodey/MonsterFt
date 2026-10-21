@@ -45,10 +45,10 @@ supervisor = new Supervisor(async () => {
         if (local.has(role)) { socket.destroy(); return }
         local.set(role, socket)
         socket.on('data', (frame) => gate.onReceive(role, frame))
-        socket.on('error', (err) => console.error(`${id}/${role}/net`, err))
+        socket.on('error', (err) => console.error(`${id}/${role}/uds`, err))
         connected.resolve()
       }, (err) => {
-        console.error(`${id}/${role}/net`, err)
+        console.error(`${id}/${role}/uds`, err)
         connected.reject(err)
         for (const socket of local.values()) { socket.destroy() }
       }))
