@@ -1,564 +1,174 @@
-import { once } from 'node:events'
 import test from 'tape'
-import sodium from 'libsodium-wrappers'
-import { EncryptingStream, DecryptingStream } from '../src/index.js'
+import { Duplex } from 'node:stream'
+import { FrameSocket, frameOptions } from '../src/net/stream.js'
+import * as Err from '../src/error.js'
 
-const immediate = () => new Promise((res) => setImmediate(res))
+const event = (target, name) => new Promise((resolve) => target.once(name, resolve))
+const immediate = () => new Promise((resolve) => setImmediate(resolve))
 
-async function encryptChunks(key, input, opts) {
-  const encrypt = new EncryptingStream(key, opts)
-  const chunks = []
-  encrypt.on('data', (chunk) => chunks.push(Buffer.from(chunk)))
-  const ended = once(encrypt, 'end')
-  for (const chunk of input) {
-    if (!encrypt.write(chunk)) { await once(encrypt, 'drain') }
+class Socket extends Duplex {
+  constructor(delayed = false) {
+    super({ allowHalfOpen: true })
+    this.output = []
+    this.callbacks = []
+    this.delayed = delayed
   }
-  encrypt.end()
-  await ended
-  return chunks
-}
-
-function closeEvent(stream) {
-  return new Promise((res) => stream.once('close', res))
-}
-
-async function endResult(stream, input) {
-  let error = null
-  stream.once('error', (err) => { error = err })
-  const closed = closeEvent(stream)
-  stream.resume()
-  stream.end(input)
-  await closed
-  return error
-}
-
-async function faultResult(key, parts) {
-  const decrypt = new DecryptingStream(key)
-  const output = []
-  let error = null
-  let thrown = null
-  decrypt.on('data', (chunk) => output.push(chunk.toString()))
-  decrypt.once('error', (err) => { error = err })
-  const closed = closeEvent(decrypt)
-  for (const part of parts) {
-    try {
-      decrypt.write(part)
-    } catch (err) {
-      thrown = err
-      decrypt.destroy()
-      break
-    }
+  _read() {}
+  _write(bytes, encoding, done) {
+    this.output.push(bytes)
+    if (this.delayed) this.callbacks.push(done)
+    else done()
   }
-  await closed
-  return { output, error, thrown }
+  release() { this.callbacks.shift()?.() }
 }
 
-async function backpressuredFaultResult(key, parts) {
-  const decrypt = new DecryptingStream(key)
-  const output = []
-  let error = null
-  let closed = false
-  decrypt.once('error', (err) => { error = err })
-  const close = new Promise((res) => {
-    decrypt.once('close', () => {
-      closed = true
-      res()
-    })
-  })
-  for (const part of parts) { decrypt.write(part) }
-
-  await immediate()
-  decrypt.on('data', (chunk) => output.push(Buffer.from(chunk)))
-  for (let turn = 0; turn < 4 && !closed; turn++) { await immediate() }
-
-  const closedNaturally = closed
-  if (!closed) { decrypt.destroy() }
-  await close
-  return { output, error, closedNaturally }
+function framed(frames) {
+  return Buffer.concat(frames.flatMap((frame) => {
+    const header = Buffer.alloc(4)
+    header.writeUInt32BE(frame.length)
+    return [header, frame]
+  }))
 }
 
-test('encrypting and decrypting streams round trip messages', async (t) => {
-  t.plan(2)
-  await sodium.ready
-  const key = Buffer.from(sodium.crypto_secretstream_xchacha20poly1305_keygen())
-  const input = [
-    Buffer.from('one'),
-    Buffer.alloc(90 * 1024, 2),
-    Buffer.from('three'),
-  ]
-  const chunks = await encryptChunks(key, input)
-  const decrypt = new DecryptingStream(key)
-  const output = []
-  decrypt.on('data', (chunk) => output.push(chunk))
-  const ended = once(decrypt, 'end')
-  decrypt.end(Buffer.concat(chunks))
-  await ended
-  t.equal(output.length, input.length, 'preserves message boundaries')
-  t.ok(output.every((chunk, idx) => chunk.equals(input[idx])), 'preserves message data')
-})
-
-test('object-mode encrypted streams preserve buffered message boundaries and empty frames', async (t) => {
-  await sodium.ready
-  const key = Buffer.from(sodium.crypto_secretstream_xchacha20poly1305_keygen())
-  const input = Array.from({ length: 64 }, (_, index) => Buffer.alloc(index * 7, index))
-  const chunks = await encryptChunks(key, input, { writableObjectMode: true })
-  t.equal(chunks.length, input.length + 1, 'encryption emits a header and a record for every input')
-  const decrypt = new DecryptingStream(key, {
-    readableObjectMode: true,
-    readableHighWaterMark: 2,
-  })
-  let finished = false
-  decrypt.end(Buffer.concat(chunks), () => { finished = true })
-  await immediate()
-  t.equal(decrypt.readableLength, 2, 'readable backpressure counts messages')
-  t.notOk(finished, 'the coalesced write waits for buffered messages to be read')
-  const output = [decrypt.read(10_000)]
-  t.deepEqual(output[0], input[0], 'a buffered read returns exactly one empty message')
-  for await (const frame of decrypt) { output.push(frame) }
-  t.deepEqual(output, input, 'later reads preserve each message through repeated backpressure')
-  t.ok(finished, 'the write finishes after all encrypted records are consumed')
+test('framing options validate limits and preserve their defaults', (t) => {
+  t.deepEqual(frameOptions(), { maxFrameBytes: 128 * 1024 * 1024, maxQueuedBytes: 256 * 1024 * 1024 })
+  for (const value of [-1, 0x1_0000_0000, 1.5, NaN, Infinity, '1']) {
+    t.throws(() => frameOptions({ maxFrameBytes: value }), /illegal maxFrameBytes/)
+  }
+  for (const value of [0, 3, -1, 1.5, Infinity, Number.MAX_SAFE_INTEGER + 1]) {
+    t.throws(() => frameOptions({ maxQueuedBytes: value }), /illegal maxQueuedBytes/)
+  }
+  t.deepEqual(frameOptions({ maxFrameBytes: 0, maxQueuedBytes: 4 }), { maxFrameBytes: 0, maxQueuedBytes: 4 })
   t.end()
 })
 
-test('decrypted messages survive later pulls and stream destruction', async (t) => {
-  t.plan(4)
-  await sodium.ready
-  const key = Buffer.from(sodium.crypto_secretstream_xchacha20poly1305_keygen())
-  const input = [
-    Buffer.from('retained message'),
-    Buffer.alloc(96 * 1024, 42).subarray(7, -9),
-    Buffer.from('last message'),
-  ]
-  const chunks = await encryptChunks(key, input)
-  const decrypt = new DecryptingStream(key)
-  const output = []
-  decrypt.on('data', (chunk) => output.push(chunk))
-  decrypt.write(Buffer.concat(chunks.slice(0, 2)))
-  t.ok(output[0].equals(input[0]), 'delivers the first plaintext before later pulls')
-  decrypt.write(Buffer.concat(chunks.slice(2)))
-  t.ok(output.every((chunk, idx) => chunk.equals(input[idx])), 'later pulls preserve retained plaintext')
-  const closed = closeEvent(decrypt)
-  decrypt.destroy()
-  await closed
-  t.ok(output.every((chunk, idx) => chunk.equals(input[idx])), 'freeing native state preserves plaintext')
+for (const split of [false, true]) {
+  test(`framing reconstructs ${split ? 'bytewise' : 'combined'} frames`, async (t) => {
+    const socket = new Socket()
+    const connection = new FrameSocket(socket)
+    const frames = [Buffer.alloc(0), Buffer.from([0, 255, 128]), Buffer.alloc(200, 31)]
+    const received = []
+    connection.on('data', (frame) => received.push(frame))
+    const ended = event(connection, 'end')
+    const bytes = framed(frames)
+    if (split) {
+      for (const byte of bytes) { socket.push(Buffer.from([byte])); await immediate() }
+    } else socket.push(bytes)
+    socket.push(null)
+    await ended
+    t.deepEqual(received, frames, 'exact independent Buffers arrive, including empty payloads')
+    connection.destroy()
+    t.end()
+  })
+}
 
-  const another = new DecryptingStream(key)
-  another.on('data', (chunk) => chunk.fill(0))
-  const ended = once(another, 'end')
-  another.end(Buffer.concat(chunks))
-  await ended
-  t.ok(output.every((chunk, idx) => chunk.equals(input[idx])), 'new decryption and mutation cannot change retained plaintext')
-})
-
-test('decrypting stream drains coalesced output after backpressure', async (t) => {
-  t.plan(2)
-  await sodium.ready
-  const key = Buffer.from(sodium.crypto_secretstream_xchacha20poly1305_keygen())
-  const input = Array.from({ length: 100 }, (_, idx) => Buffer.alloc(1024, idx))
-  const chunks = await encryptChunks(key, input)
-  const decrypt = new DecryptingStream(key)
-  const output = []
-  const ended = once(decrypt, 'end')
-  decrypt.end(Buffer.concat(chunks))
+test('framing caps readable buffering and resumes without losing input', async (t) => {
+  const socket = new Socket()
+  const connection = new FrameSocket(socket)
+  const frames = Array.from({ length: 50 }, (_, i) => Buffer.alloc(i, i))
+  socket.push(framed(frames))
+  socket.push(null)
   await immediate()
-  decrypt.on('data', (chunk) => output.push(chunk))
-  await ended
-  t.equal(output.length, input.length, 'delivers every queued message')
-  t.ok(output.every((chunk, idx) => chunk.equals(input[idx])), 'preserves queued message data')
+  t.equal(connection.readableLength, connection.readableHighWaterMark, 'paused input stops at its high water mark')
+  const received = []
+  for await (const frame of connection) { received.push(frame) }
+  t.deepEqual(received, frames, 'draining preserves every boundary')
+  t.end()
 })
 
-test('decrypt errors use the stream callback and error event', async (t) => {
-  t.plan(4)
-  await sodium.ready
-  const key = Buffer.from(sodium.crypto_secretstream_xchacha20poly1305_keygen())
-  const chunks = await encryptChunks(key, [Buffer.from('message')])
-  const corrupt = Buffer.from(Buffer.concat(chunks))
-  corrupt[corrupt.length - 1] ^= 1
-  const decrypt = new DecryptingStream(key)
-  let emitted = null
-  let thrown = null
-  decrypt.once('error', (err) => { emitted = err })
-  const closed = closeEvent(decrypt)
-  const writeError = await new Promise((res) => {
-    try {
-      decrypt.write(corrupt, (err) => res(err))
-    } catch (err) {
-      thrown = err
-      decrypt.destroy()
-      res(null)
-    }
+test('framing rejects oversized lengths before collecting their payload', async (t) => {
+  const socket = new Socket()
+  const connection = new FrameSocket(socket, { maxFrameBytes: 10 })
+  const failed = event(connection, 'error')
+  const header = Buffer.alloc(4)
+  header.writeUInt32BE(11)
+  socket.push(header)
+  const err = await failed
+  t.equal(err.code, Err.FRAME_CORRUPT)
+  t.equal(connection.parts.length, 0, 'does not accumulate the oversized payload')
+  t.ok(connection.destroyed)
+  t.ok(socket.destroyed)
+  t.end()
+})
+
+for (const bytes of [Buffer.from([0]), Buffer.from([0, 0, 0]), Buffer.from([0, 0, 0, 2, 9])]) {
+  test('framing rejects incomplete input on EOF', async (t) => {
+    const socket = new Socket()
+    const connection = new FrameSocket(socket)
+    const failed = event(connection, 'error')
+    socket.push(bytes)
+    socket.push(null)
+    const err = await failed
+    t.equal(err.message, 'frame is incomplete')
+    t.equal(err.code, Err.FRAME_CORRUPT)
+    t.end()
   })
-  await closed
-  t.equal(thrown, null, 'write does not throw synchronously')
-  t.equal(writeError?.message, 'stream decrypt error', 'write callback receives the error')
-  t.equal(emitted?.message, 'stream decrypt error', 'stream emits the error')
-  t.ok(decrypt.destroyed, 'error destroys the stream')
-})
+}
 
-test('decrypting stream reports thrown data-handler values and stops coalesced frames', async (t) => {
-  t.plan(58)
-  await sodium.ready
-  const key = Buffer.from(sodium.crypto_secretstream_xchacha20poly1305_keygen())
-  const chunks = await encryptChunks(key, [Buffer.from('first'), Buffer.from('second')])
-  const originalError = new Error('data handler failed')
-  const originalStack = originalError.stack
-  const cases = [
-    ['undefined', undefined],
-    ['null', null],
-    ['false', false],
-    ['zero', 0],
-    ['bigint zero', 0n],
-    ['empty string', ''],
-    ['NaN', NaN],
-    ['Error', originalError],
-  ]
-  for (const [label, value] of cases) {
-    const decrypt = new DecryptingStream(key)
-    const output = []
-    let emitted = null
-    let callbackCalls = 0
-    let closedNaturally = false
-    decrypt.on('data', (chunk) => {
-      output.push(chunk.toString())
-      throw value
-    })
-    decrypt.once('error', (err) => { emitted = err })
-    const closed = closeEvent(decrypt)
-    decrypt.once('close', () => { closedNaturally = true })
-    const writeError = await new Promise((resolve) => {
-      decrypt.write(Buffer.concat(chunks), (err) => {
-        callbackCalls++
-        resolve(err)
-      })
-    })
-    await immediate()
-    const didClose = closedNaturally
-    if (!didClose) { decrypt.destroy() }
-    await closed
-
-    t.ok(writeError instanceof Error, `${label}: write callback receives an Error`)
-    t.equal(writeError?.message, value === originalError ? originalError.message : String(value),
-      `${label}: preserves the failure message`)
-    t.equal(emitted, writeError, `${label}: emits the write callback error`)
-    t.equal(callbackCalls, 1, `${label}: settles the write callback once`)
-    t.deepEqual(output, ['first'], `${label}: stops before the next coalesced frame`)
-    t.ok(didClose, `${label}: failure closes the stream`)
-    t.equal(decrypt.input.length, 0, `${label}: releases queued ciphertext`)
-    if (value === originalError) {
-      t.equal(writeError, originalError, 'preserves the original Error object')
-      t.equal(writeError.stack, originalStack, 'preserves the original error stack')
-    }
-  }
-})
-
-test('decrypting stream rejects incomplete input at EOF', async (t) => {
-  t.plan(4)
-  await sodium.ready
-  const key = Buffer.from(sodium.crypto_secretstream_xchacha20poly1305_keygen())
-  const chunks = await encryptChunks(key, [Buffer.from('message')])
-  const header = chunks[0]
-  const frame = chunks[1]
-  const cases = [
-    [header.subarray(0, header.length - 1), 'incomplete stream header'],
-    [Buffer.concat([header, frame.subarray(0, 3)]), 'incomplete stream frame length'],
-    [Buffer.concat([header, frame.subarray(0, frame.length - 1)]), 'incomplete stream frame'],
-  ]
-  for (const [input, message] of cases) {
-    const err = await endResult(new DecryptingStream(key), input)
-    t.equal(err?.message, message, message)
-  }
-  const err = await endResult(new DecryptingStream(key), header)
-  t.equal(err, null, 'accepts a complete header-only stream')
-})
-
-test('valid-prefix delivery does not depend on input segmentation', async (t) => {
-  t.plan(6)
-  await sodium.ready
-  const key = Buffer.from(sodium.crypto_secretstream_xchacha20poly1305_keygen())
-  const chunks = await encryptChunks(key, [Buffer.from('first'), Buffer.from('second')])
-  const [header, first, second] = chunks
-  const corrupt = Buffer.from(second)
-  corrupt[corrupt.length - 1] ^= 1
-  const combined = await faultResult(key, [Buffer.concat([header, first, corrupt])])
-  const split = await faultResult(key, [Buffer.concat([header, first]), corrupt])
-  t.deepEqual(combined.output, ['first'], 'combined input delivers its valid prefix')
-  t.deepEqual(split.output, ['first'], 'split input delivers the same valid prefix')
-  t.equal(combined.error?.message, 'stream decrypt error', 'combined input reports corruption')
-  t.equal(split.error?.message, 'stream decrypt error', 'split input reports corruption')
-  t.equal(combined.thrown, null, 'combined input does not throw')
-  t.equal(split.thrown, null, 'split input does not throw')
-})
-
-test('valid-prefix delivery survives backpressure independent of input segmentation', async (t) => {
-  t.plan(8)
-  await sodium.ready
-  const key = Buffer.from(sodium.crypto_secretstream_xchacha20poly1305_keygen())
-  const input = Array.from({ length: 80 }, (_, idx) => Buffer.alloc(1024, idx))
-  const chunks = await encryptChunks(key, [...input, Buffer.from('corrupt')])
-  const corrupt = Buffer.from(chunks.pop())
-  corrupt[corrupt.length - 1] ^= 1
-  const prefix = Buffer.concat(chunks)
-
-  const combined = await backpressuredFaultResult(key, [Buffer.concat([prefix, corrupt])])
-  const split = await backpressuredFaultResult(key, [prefix, corrupt])
-  t.equal(combined.output.length, input.length, 'combined input delivers its whole valid prefix')
-  t.equal(split.output.length, input.length, 'split input delivers its whole valid prefix')
-  t.ok(combined.output.every((chunk, idx) => chunk.equals(input[idx])), 'combined prefix is intact')
-  t.ok(split.output.every((chunk, idx) => chunk.equals(input[idx])), 'split prefix is intact')
-  t.equal(combined.error?.message, 'stream decrypt error', 'combined input reports corruption')
-  t.equal(split.error?.message, 'stream decrypt error', 'split input reports corruption')
-  t.ok(combined.closedNaturally, 'combined input closes after reporting corruption')
-  t.ok(split.closedNaturally, 'split input closes after reporting corruption')
-})
-
-test('decrypting fragmented frames copies input linearly', async (t) => {
-  t.plan(2)
-  await sodium.ready
-  const key = Buffer.from(sodium.crypto_secretstream_xchacha20poly1305_keygen())
-  const input = Buffer.alloc(8 * 1024, 7)
-  const [header, frame] = await encryptChunks(key, [input])
-  const decrypt = new DecryptingStream(key)
-  const output = []
-  decrypt.on('data', (chunk) => output.push(chunk))
-  decrypt.write(Buffer.concat([header, frame.subarray(0, 4)]))
-
-  const body = frame.subarray(4)
-  const fragmentCount = 512
-  const originalConcat = Buffer.concat
-  const originalFrom = Buffer.from
-  let copied = 0
-  Buffer.concat = function(chunks, length) {
-    copied += length ?? chunks.reduce((sum, chunk) => sum + chunk.byteLength, 0)
-    return originalConcat.apply(this, arguments)
-  }
-  Buffer.from = function(value) {
-    if (Buffer.isBuffer(value)) { copied += value.byteLength }
-    return originalFrom.apply(this, arguments)
-  }
-  try {
-    for (let idx = 0; idx < fragmentCount; idx++) {
-      decrypt.write(body.subarray(idx, idx + 1))
-    }
-  } finally {
-    Buffer.concat = originalConcat
-    Buffer.from = originalFrom
-  }
-
-  const ended = once(decrypt, 'end')
-  decrypt.end(body.subarray(fragmentCount))
-  await ended
-  t.ok(copied <= fragmentCount * 4, 'copy volume grows linearly with fragment count')
-  t.ok(output[0].equals(input), 'fragmented frame decrypts correctly')
-})
-
-test('destroy settles a backpressured transform callback', async (t) => {
-  t.plan(5)
-  await sodium.ready
-  const key = Buffer.from(sodium.crypto_secretstream_xchacha20poly1305_keygen())
-  const input = Array.from({ length: 80 }, () => Buffer.alloc(1024))
-  const chunks = await encryptChunks(key, input)
-  const decrypt = new DecryptingStream(key)
-  let callbackCalls = 0
-  let callbackError = null
-  let emittedErrors = 0
-  decrypt.on('error', () => { emittedErrors++ })
-  decrypt.write(Buffer.concat(chunks), (err) => {
-    callbackCalls++
-    callbackError = err
-  })
+test('framing queue accounting includes in-flight writes and empty-frame headers', async (t) => {
+  const socket = new Socket(true)
+  const connection = new FrameSocket(socket, { maxFrameBytes: 8, maxQueuedBytes: 12 })
+  t.ok(connection.canSend(Buffer.alloc(8)), 'the exact queue boundary is admitted')
+  connection.write(Buffer.alloc(8))
+  t.equal(connection.queuedBytes, 12, 'counts payload and header before callback')
+  t.notOk(connection.canSend(Buffer.alloc(0)), 'even empty frames require queue capacity')
+  socket.release()
+  t.equal(connection.queuedBytes, 12, 'header completion does not release the payload reservation')
+  socket.release()
   await immediate()
-  t.equal(callbackCalls, 0, 'holds the write callback while output is backpressured')
-
-  const closed = closeEvent(decrypt)
-  decrypt.destroy()
-  await closed
-  t.equal(callbackCalls, 1, 'settles the write callback once')
-  t.equal(callbackError?.code, 'ERR_STREAM_DESTROYED', 'reports callback cancellation')
-  t.equal(emittedErrors, 0, 'clean destroy does not emit an error')
-  t.equal(decrypt.input.length, 0, 'releases queued ciphertext')
+  t.equal(connection.queuedBytes, 0, 'complete frame releases reservation')
+  connection.cork()
+  for (let i = 0; i < 3; i++) { connection.write(Buffer.alloc(0)) }
+  t.equal(connection.queuedBytes, 12, 'corked empty messages cannot evade limits')
+  t.notOk(connection.canSend(Buffer.alloc(0)))
+  connection.destroy()
+  await immediate()
+  t.equal(connection.queuedBytes, 0, 'destroy releases all queued reservations')
+  t.end()
 })
 
-test('destroy from a data handler stops decryption cleanly', async (t) => {
-  t.plan(4)
-  await sodium.ready
-  const key = Buffer.from(sodium.crypto_secretstream_xchacha20poly1305_keygen())
-  const chunks = await encryptChunks(key, [Buffer.from('one'), Buffer.from('two')])
-  const decrypt = new DecryptingStream(key)
-  let output = 0
-  let callbackCalls = 0
-  let callbackError = null
-  let emittedErrors = 0
-  decrypt.on('error', () => { emittedErrors++ })
-  decrypt.on('data', () => {
-    output++
-    decrypt.destroy()
-  })
-  const closed = closeEvent(decrypt)
-  decrypt.write(Buffer.concat(chunks), (err) => {
-    callbackCalls++
-    callbackError = err
-  })
-  await closed
-  t.equal(output, 1, 'stops after the handler destroys the stream')
-  t.equal(callbackCalls, 1, 'settles the active write callback once')
-  t.equal(callbackError?.code, 'ERR_STREAM_DESTROYED', 'reports callback cancellation')
-  t.equal(emittedErrors, 0, 'clean destroy does not emit an error')
+test('framing end includes its final payload in the queue limit', async (t) => {
+  const socket = new Socket(true)
+  const connection = new FrameSocket(socket, { maxQueuedBytes: 8 })
+  const failed = event(connection, 'error')
+  connection.write(Buffer.alloc(4))
+  connection.end(Buffer.alloc(0))
+  const err = await failed
+  t.equal(err.code, Err.SEND_ERROR)
+  t.equal(err.message, 'connection exceeds maxQueuedBytes')
+  t.ok(socket.destroyed)
+  t.end()
 })
 
-test('stream cleanup releases retained state and buffers', async (t) => {
-  t.plan(14)
-  await sodium.ready
-  const key = Buffer.from(sodium.crypto_secretstream_xchacha20poly1305_keygen())
-  const chunks = await encryptChunks(key, [Buffer.from('message')])
-  const complete = Buffer.concat(chunks)
-  const decrypt = new DecryptingStream(key)
-  decrypt.resume()
-  decrypt.write(complete)
-  t.equal(decrypt.key, null, 'releases the input key after initialization')
-  t.equal(decrypt.input.length, 0, 'clears consumed input')
-  t.equal(decrypt.input.chunks.length, 0, 'releases consumed input buffers')
-  const decryptClosed = closeEvent(decrypt)
-  decrypt.destroy()
-  await decryptClosed
-  t.equal(decrypt.state, null, 'clears decrypt state on destroy')
-  t.equal(decrypt.input.length, 0, 'leaves no queued input after destroy')
-
-  const partial = Buffer.concat([chunks[0], chunks[1].subarray(0, chunks[1].length - 1)])
-  const pending = new DecryptingStream(key)
-  pending.write(partial)
-  t.equal(pending.key, null, 'releases the key while a partial frame is pending')
-  t.ok(pending.input.length > 0, 'retains the required partial frame bytes')
-  const fragment = pending.input.chunks[pending.input.head]
-  const buffered = Buffer.from(fragment.subarray(pending.input.offset))
-  partial.fill(0)
-  t.ok(fragment.subarray(pending.input.offset).equals(buffered), 'detaches partial bytes from consumed input')
-  const pendingClosed = closeEvent(pending)
-  pending.destroy()
-  await pendingClosed
-  t.equal(pending.state, null, 'clears pending decrypt state')
-  t.equal(pending.len, null, 'clears the pending frame length')
-  t.equal(pending.input.length, 0, 'clears pending frame bytes')
-  t.equal(pending.input.chunks.length, 0, 'releases pending frame buffers')
-  t.equal(pending.transformCallback, null, 'clears the active transform callback')
-
-  const encrypt = new EncryptingStream(key)
-  encrypt.resume()
-  const encryptClosed = closeEvent(encrypt)
-  encrypt.end(Buffer.from('message'))
-  await encryptClosed
-  t.equal(encrypt.state, null, 'clears encrypt state on close')
+test('framing validates outbound records without changing retained Buffer ownership', async (t) => {
+  const socket = new Socket()
+  const connection = new FrameSocket(socket, { maxFrameBytes: 3 })
+  t.throws(() => connection.canSend('bad'), /message must be a Buffer/)
+  t.throws(() => connection.canSend(Buffer.alloc(4)), /message exceeds maxFrameBytes/)
+  const frame = Buffer.from([0, 255, 33])
+  await new Promise((resolve, reject) => connection.write(frame, (err) => err ? reject(err) : resolve()))
+  t.deepEqual(Buffer.concat(socket.output), framed([frame]), 'only length and exact payload are written')
+  t.equal(socket.output[1], frame, 'no payload copy is introduced')
+  connection.destroy()
+  t.end()
 })
 
-test('stream destruction frees each owned native state exactly once', async (t) => {
-  await sodium.ready
-  const key = Buffer.from(sodium.crypto_secretstream_xchacha20poly1305_keygen())
-  const [header, frame] = await encryptChunks(key, [Buffer.from('message')])
-  const native = sodium.libsodium
-  for (const Type of [EncryptingStream, DecryptingStream]) {
-    const modes = Type === EncryptingStream
-      ? ['end', 'destroy', 'error'] : ['end', 'destroy', 'error', 'corruption']
-    for (const mode of modes) {
-      const stream = new Type(key)
-      if (Type === DecryptingStream) { stream.write(header) }
-      const state = stream.state
-      const failure = new Error('connection aborted')
-      const free = native._free
-      let releases = 0
-      let emitted = null
-      stream.on('error', (err) => { emitted = err })
-      stream.resume()
-      native._free = (address) => {
-        if (address === state) { releases++ }
-        return free(address)
-      }
-      try {
-        const closed = closeEvent(stream)
-        if (mode === 'end') {
-          stream.end(Type === EncryptingStream ? Buffer.from('message') : frame)
-        } else if (mode === 'corruption') {
-          const corrupt = Buffer.from(frame)
-          corrupt[corrupt.length - 1] ^= 1
-          stream.end(corrupt)
-        } else {
-          stream.destroy(mode === 'error' ? failure : undefined)
-        }
-        await closed
-        stream.destroy()
-        await immediate()
-        const label = `${Type.name} ${mode}`
-        t.equal(releases, 1, `${label}: releases its allocation once, even after another destroy`)
-        if (mode === 'corruption') {
-          t.equal(emitted?.message, 'stream decrypt error', `${label}: reports corruption`)
-        } else {
-          t.equal(emitted, mode === 'error' ? failure : null,
-            `${label}: preserves the original destruction outcome`)
-        }
-      } finally {
-        stream.destroy()
-        native._free = free
-      }
-    }
-  }
-})
-
-test('decrypt destruction before initialization does not free a native state', async (t) => {
-  await sodium.ready
-  const key = Buffer.from(sodium.crypto_secretstream_xchacha20poly1305_keygen())
-  const native = sodium.libsodium
-  for (const partialHeader of [false, true]) {
-    const decrypt = new DecryptingStream(key)
-    const free = native._free
-    const releases = []
-    native._free = (address) => {
-      releases.push(address)
-      return free(address)
-    }
-    try {
-      if (partialHeader) { decrypt.write(Buffer.alloc(1)) }
-      const closed = closeEvent(decrypt)
-      decrypt.destroy()
-      await closed
-      decrypt.destroy()
-      t.deepEqual(releases, [], `${partialHeader ? 'partial' : 'absent'} header: owns no allocation to free`)
-    } finally {
-      decrypt.destroy()
-      native._free = free
-    }
-  }
-})
-
-test('repeated encrypted stream lifecycles leave no native allocations outstanding', async (t) => {
-  await sodium.ready
-  const key = Buffer.from(sodium.crypto_secretstream_xchacha20poly1305_keygen())
-  const native = sodium.libsodium
-  const malloc = native._malloc
-  const free = native._free
-  const live = new Map()
-  const streams = []
-  native._malloc = (size) => {
-    const address = malloc(size)
-    live.set(address, size)
-    return address
-  }
-  native._free = (address) => {
-    live.delete(address)
-    return free(address)
-  }
-  try {
-    for (let index = 0; index < 50; index++) {
-      const encrypt = new EncryptingStream(key)
-      const decrypt = new DecryptingStream(key)
-      streams.push(encrypt, decrypt)
-      decrypt.write(encrypt.read())
-      const closed = Promise.all([closeEvent(encrypt), closeEvent(decrypt)])
-      encrypt.destroy()
-      decrypt.destroy()
-      await closed
-    }
-    t.equal(live.size, 0, 'releases states and temporary allocations across repeated initialization')
-  } finally {
-    streams.forEach((stream) => stream.destroy())
-    native._malloc = malloc
-    native._free = free
-  }
+test('framing retains external lifecycle listeners during teardown', async (t) => {
+  const socket = new Socket()
+  const external = () => {}
+  socket.on('error', external)
+  socket.on('close', external)
+  const connection = new FrameSocket(socket)
+  connection.on('error', external)
+  connection.on('close', external)
+  const closing = event(connection, 'close')
+  connection.destroy()
+  await closing
+  await immediate()
+  t.ok(socket.listeners('error').includes(external))
+  t.ok(socket.listeners('close').includes(external))
+  t.ok(connection.listeners('error').includes(external))
+  t.ok(connection.listeners('close').includes(external))
+  t.equal(socket.listenerCount('readable'), 0, 'detaches its own socket input listener')
+  t.end()
 })

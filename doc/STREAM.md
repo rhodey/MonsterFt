@@ -1,111 +1,90 @@
-# Encrypted streams
+# Framed streams
 
-Function notes for [src/stream.js](../src/stream.js), in source order.
-Trivial initialization and reset helpers are omitted.
+Function notes for [src/net/stream.js](../src/net/stream.js), in source order.
+Trivial forwarding methods are omitted.
 
-## `EncryptingStream.constructor`
+## `frameOptions`
 
-Initializes an encryption stream and emits its header. Accepts standard stream
-options; TCP uses object mode for incoming messages.
-
-### findings
-
-no findings
-
-## `EncryptingStream._transform`
-
-Encrypts an input chunk into a framed message and reports encryption failures.
+Validates the configurable frame and outgoing queue limits and supplies their
+defaults. Queue limits count payloads and four-byte headers.
 
 ### findings
 
 no findings
 
-## `EncryptingStream._destroy`
+## `FrameSocket.constructor`
 
-Releases the encryption state when the stream is destroyed.
-
-### findings
-
-no findings
-
-## `ByteQueue.append`
-
-Adds input bytes to the queue with independent ownership of their storage.
+Creates a duplex connection that sends and receives individual Buffer frames.
+Connects socket progress, failures, and closure to the framed stream.
 
 ### findings
 
 no findings
 
-## `ByteQueue.take`
+## `FrameSocket.canSend`
 
-Consumes the requested number of bytes in order, or returns null when the
-queue has insufficient data.
-
-### findings
-
-no findings
-
-## `ByteQueue._advance`
-
-Advances the read position and releases consumed queue storage.
+Validates a proposed frame and reports whether the connection can accept it
+within its outgoing queue limit.
 
 ### findings
 
 no findings
 
-## `DecryptingStream.constructor`
+## `FrameSocket.write`
 
-Initializes a decryption stream awaiting its header and encrypted input.
-Accepts standard stream options; TCP uses object mode for decrypted messages.
-
-### findings
-
-no findings
-
-## `DecryptingStream._transform`
-
-Accepts incoming bytes for decryption and reports failures to the stream caller.
+Accepts an outgoing frame and retains its queue reservation until transmission
+completes. Invalid or excessive writes fail the connection.
 
 ### findings
 
 no findings
 
-## `DecryptingStream._drain`
+## `FrameSocket.end`
 
-Decrypts complete buffered frames while respecting incomplete input,
-backpressure, and stream destruction.
-
-### findings
-
-no findings
-
-## `DecryptingStream._finishTransform`
-
-Completes the current input chunk exactly once with success or an error.
+Sends an optional final frame under the same queue limits, then ends output.
 
 ### findings
 
 no findings
 
-## `DecryptingStream._read`
+## `FrameSocket._receive`
 
-Resumes decryption when the consumer is ready for more output.
-
-### findings
-
-no findings
-
-## `DecryptingStream._flush`
-
-Rejects end-of-stream when an incomplete header or frame remains.
+Reconstructs frames from incoming bytes while respecting readable backpressure.
+Rejects oversized frame lengths and incomplete input.
 
 ### findings
 
 no findings
 
-## `DecryptingStream._destroy`
+## `FrameSocket._write`
 
-Releases decryption resources and terminates any pending input operation.
+Sends an unchanged Buffer with its four-byte big-endian length.
+
+### findings
+
+no findings
+
+## `FrameSocket._destroy`
+
+Discards buffered input and closes the underlying socket.
+
+### findings
+
+no findings
+
+## `connectFrames`
+
+Connects a socket and returns a framed duplex connection. Supports cancellation
+and an optional deadline for connection establishment.
+
+### findings
+
+no findings
+
+## `listenFrames`
+
+Starts a listener that delivers framed connections. Distinguishes listener
+failures from connection failures and supports cancellation during startup.
 
 ### findings
 

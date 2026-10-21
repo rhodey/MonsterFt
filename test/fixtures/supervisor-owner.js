@@ -1,7 +1,7 @@
 import fs from 'node:fs'
 import { MonsterProc } from '../../src/proc.js'
 import { MonsterApply } from '../../src/apply.js'
-import { udsClient } from '../../src/uds.js'
+import { udsClient } from '../../src/net/uds.js'
 import { REPAIR_QUORUM_IMPOSSIBLE } from '../../src/error.js'
 
 const [role, id, base, socketPath] = process.argv.slice(2)

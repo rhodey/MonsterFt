@@ -1,8 +1,9 @@
-import { mkdirSync, mkdtempSync, rmSync } from 'node:fs'
+import { mkdirSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
-import { Gate, Supervisor, udsServer } from '../src/index.js'
-import { clusterTransport, nodeIds } from '../example-shared/cluster.js'
+import { Gate, Supervisor, TcpCluster, UdsRouter } from '../src/index.js'
 
+const nodeIds = ['1', '2', '3']
+const roles = ['procA', 'procB', 'procC', 'apply']
 const id = process.argv[2]
 if (!nodeIds.includes(id)) { throw new Error('usage: node example2/entry.js 1|2|3') }
 const exitWithError = (err) => {
@@ -11,62 +12,49 @@ const exitWithError = (err) => {
 }
 const directory = process.env.MONSTERFT_DATA ?? fileURLToPath(new URL('data/', import.meta.url))
 mkdirSync(directory, { recursive: true })
-let supervisor
-const cluster = await clusterTransport(id, Number(process.env.MONSTERFT_PORT ?? 41000),
-  (from, frame) => supervisor?.gate?.onReceive(from, frame))
+const basePort = Number(process.env.MONSTERFT_PORT ?? 41000)
+const peers = Object.fromEntries(nodeIds.map((nodeId, index) => [nodeId, {
+  host: '127.0.0.1', basePort: basePort + index * nodeIds.length,
+}]))
 
-supervisor = new Supervisor(async () => {
-  // Short paths also fit macOS's Unix socket path limit.
-  const socketDirectory = mkdtempSync('/tmp/mft-')
-  const local = new Map()
-  const servers = []
-  const children = {}
-  const connections = []
-  let gate
+const supervisor = new Supervisor(async () => {
+  const cluster = new TcpCluster(id, peers)
+  const local = new UdsRouter(roles)
+  const send = (to, frame) => cluster.send(to, frame)
+  const localSend = (to, frame) => local.send(to, frame)
+  const gate = new Gate(id, nodeIds, send, localSend)
+
+  cluster.on('message', (from, frame) => gate.onReceive(from, frame))
+  local.on('message', (from, frame) => gate.onReceive(from, frame))
+  cluster.on('error', (err) => console.error(`${id}/tcp`, err))
+  local.on('error', (err) => console.error(`${id}/uds`, err))
+  gate.on('error', (err) => console.error(`${id}/gate`, err))
+
+  const stop = () => { cluster.stop(); local.stop() }
   const cleanup = async () => {
-    for (const socket of local.values()) { socket.destroy() }
-    await Promise.all(servers.map((server) => new Promise((resolve, reject) => {
-      if (!server.listening) { resolve(); return }
-      server.close((err) => err ? reject(err) : resolve())
-    })))
-    rmSync(socketDirectory, { recursive: true, force: true })
+    const results = await Promise.allSettled([cluster.close(), local.close()])
+    const failure = results.find((result) => result.status === 'rejected')
+    if (failure) { throw failure.reason }
   }
+
   try {
+    await Promise.all([cluster.open(), local.open()])
     const databasePath = `${directory}/node-${id}.db`
-    for (const role of ['procA', 'procB', 'procC', 'apply']) {
-      const socketPath = `${socketDirectory}/${role}`
-      const connected = Promise.withResolvers()
-      connected.promise.catch(() => {})
-      connections.push(connected.promise)
-      servers.push(await udsServer(socketPath, (socket) => {
-        if (local.has(role)) { socket.destroy(); return }
-        local.set(role, socket)
-        socket.on('data', (frame) => gate.onReceive(role, frame))
-        socket.on('error', (err) => console.error(`${id}/${role}/uds`, err))
-        connected.resolve()
-      }, (err) => {
-        console.error(`${id}/${role}/uds`, err)
-        connected.reject(err)
-        for (const socket of local.values()) { socket.destroy() }
-      }))
-      children[role] = {
-        file: new URL(`${role}.js`, import.meta.url),
-        args: [id, socketPath, databasePath],
-      }
+    const children = Object.fromEntries(roles.map((role) => [role, {
+      file: new URL(`${role}.js`, import.meta.url),
+      args: [id, local.paths[role], databasePath],
+    }]))
+
+    return {
+      gate, children,
+      ready: () => local.ready(),
+      failed: Promise.race([cluster.failed, local.failed]),
+      stop, cleanup,
     }
-
-    const localSend = (to, frame) => {
-      const socket = local.get(to)
-      if (!socket || socket.destroyed) { throw new Error(`${to} is disconnected`) }
-      socket.write(frame)
-    }
-
-    gate = new Gate(id, nodeIds, cluster.send, localSend)
-
-    gate.on('error', (err) => console.error(`${id}/gate`, err))
-    return { gate, children, ready: () => Promise.all(connections), cleanup }
   } catch (err) {
-    await cleanup()
+    gate.stop()
+    stop()
+    await cleanup().catch(exitWithError)
     throw err
   }
 })
@@ -81,9 +69,7 @@ const stopped = Promise.withResolvers()
 const close = () => {
   if (closeWork) { return closeWork }
   stopping = true
-  closeWork = (async () => {
-    try { await supervisor.close() } finally { await cluster.close() }
-  })().finally(() => stopped.resolve())
+  closeWork = supervisor.close().finally(() => stopped.resolve())
   return closeWork
 }
 for (const signal of ['SIGINT', 'SIGTERM']) {

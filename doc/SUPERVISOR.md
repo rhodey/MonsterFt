@@ -43,7 +43,8 @@ no findings
 ## `_fail`
 
 Stops Gate after the current attempt's first failure and wakes supervision.
-Reports only failures owned by Supervisor, leaving Gate diagnostics on Gate.
+Reports only failures owned by Supervisor, leaving Gate and transport diagnostics
+with their owners.
 
 ### findings
 
@@ -70,7 +71,8 @@ no findings
 ## `_loop`
 
 Runs successive startup and execution attempts until explicitly stopped.
-Replacements require successful owner termination and transport cleanup.
+The optional transport failure promise can end an attempt during startup or
+operation. Replacements require successful owner termination and transport cleanup.
 
 ### findings
 
@@ -86,9 +88,9 @@ no findings
 
 ## `_stopRun`
 
-Stops Gate, kills remaining children, and waits for their exits before calling
-host cleanup. Cleanup runs once per group; failure permanently stops supervision
-and prevents replacement.
+Stops Gate and calls the optional synchronous transport stop hook before killing
+children, then waits for their exits before host cleanup. A failed stop hook still
+allows owner termination and cleanup; either hook's failure prevents replacement.
 
 ### findings
 

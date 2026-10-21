@@ -212,9 +212,10 @@ database-owner processes must exit before replacement.
 
 `Supervisor` can keep Gate in the parent process and launch each Proc and Apply
 in its own child process. Its setup factory supplies Gate, child scripts, and
-optional transport readiness/cleanup callbacks; transport plumbing stays in
-your code. The examples exit children on terminal errors; failed groups restart
-only after the old owners exit.
+transport lifecycle hooks. `TcpCluster` handles peer connections and reconnects;
+`UdsRouter` handles local sockets. Both are optional, configurable helpers, and
+TCP is plaintext. The examples show the routing and restart failed groups only
+after the old owners exit.
 `supervisor.close()` kills and awaits the children; `supervisor.drainCmd()`
 explicitly drains first. Cleanup failure stops supervision (`isStopped`) and the
 examples exit the parent. For production, an outer process manager must also

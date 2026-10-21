@@ -1,7 +1,7 @@
 import test from 'tape'
 import net from 'node:net'
 import { mkdtemp, rm, writeFile, readFile } from 'node:fs/promises'
-import { udsServer, udsClient } from '../src/uds.js'
+import { udsServer, udsClient } from '../src/net/uds.js'
 import * as Err from '../src/error.js'
 
 const noop = () => {}
@@ -203,7 +203,7 @@ for (const bytes of [Buffer.from([0, 0]), Buffer.from([0, 0, 0, 2, 1])]) {
       await timeout(closing)
       t.equal(f.errors.length, 1, 'incomplete frame reports one error')
       t.equal(f.errors[0].code, Err.FRAME_CORRUPT)
-      t.equal(f.errors[0].message, 'UDS frame is incomplete')
+      t.equal(f.errors[0].message, 'frame is incomplete')
       t.ok(f.connections[0].destroyed, 'receiver closes after invalid framing')
     } finally {
       raw.destroy()
@@ -308,5 +308,43 @@ test('UDS failures preserve existing paths and reject unavailable connections', 
   } finally {
     await rm(directory, { recursive: true, force: true })
   }
+  t.end()
+})
+
+test('UDS applies configurable frame limits before collecting payloads', async (t) => {
+  const directory = await mkdtemp('/tmp/monsterft-uds-')
+  const path = `${directory}/socket`
+  let report
+  const reported = new Promise((resolve) => { report = resolve })
+  const server = await udsServer(path, (connection) => connection.resume(),
+    (err, connection) => report({ err, connection }), { maxFrameBytes: 2 })
+  const socket = net.connect(path)
+  socket.on('error', noop)
+  socket.resume()
+  try {
+    await event(socket, 'connect')
+    const closing = event(socket, 'close')
+    socket.write(Buffer.from([0, 0, 0, 3]))
+    const { err, connection } = await timeout(reported)
+    await timeout(closing)
+    t.equal(err.code, Err.FRAME_CORRUPT)
+    t.ok(connection.destroyed, 'reports the offending connection')
+  } finally {
+    socket.destroy()
+    await closeServer(server)
+    await rm(directory, { recursive: true, force: true })
+  }
+  t.end()
+})
+
+test('UDS cancelled setup preserves the cancellation stack', async (t) => {
+  const controller = new AbortController()
+  const original = new Error('cancel local transport')
+  controller.abort(original)
+  const options = { signal: controller.signal }
+  const clientError = await udsClient('/tmp/monsterft-absent', options).then(() => null, (err) => err)
+  const serverError = await udsServer('/tmp/monsterft-absent', noop, noop, options).then(() => null, (err) => err)
+  t.equal(clientError.stack, original.stack)
+  t.equal(serverError.stack, original.stack)
   t.end()
 })

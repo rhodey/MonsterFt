@@ -26,7 +26,7 @@ function harness(options = {}) {
     await options.before?.(number)
     const run = {
       number, requests: [], diagnostics: [], children: null,
-      cleaned: 0, gateClosed: 0,
+      cleaned: 0, stopped: 0, gateClosed: 0, transportFailed: deferred(),
     }
     let gate
     const reply = (from, message) => gate.onReceive(from, wire.encodeFrame(message))
@@ -79,6 +79,14 @@ function harness(options = {}) {
       ready: async (children) => {
         run.children = children
         await options.ready?.(run)
+      },
+      failed: run.transportFailed.promise,
+      stop: () => {
+        run.stopped += 1
+        run.gateStoppedAtStop = !gate.isOpen
+        run.ownersAliveAtStop = run.children !== null &&
+          [...run.children.values()].some((child) => !exited(child))
+        options.stop?.(run)
       },
       cleanup: async () => {
         run.cleaned += 1
@@ -140,6 +148,9 @@ test('Supervisor launches four children with a transport-independent Gate and fo
     t.ok(children.every((child) => child.signalCode === 'SIGKILL'),
       'forced shutdown kills and awaits every child')
     t.ok(run.exitedAtCleanup, 'cleanup runs after all owners exit')
+    t.ok(run.gateStoppedAtStop, 'Gate stops before the transport stop hook')
+    t.ok(run.ownersAliveAtStop, 'transport stops before owners are killed')
+    t.equal(run.stopped, 1, 'transport stop hook runs once')
     t.equal(run.cleaned, 1)
     t.equal(run.gateClosed, 0, 'forced shutdown is not coordinated Gate close')
     t.equal(run.requests.filter(({ message }) => message.type === 'close').length, 0)
@@ -197,6 +208,122 @@ test('Supervisor restarts a fatal Gate without mirroring its diagnostic', async 
     t.notOk(h.errors.some((err) => err.code === Err.FRAME_CORRUPT),
       'Gate remains the owner of the original fatal diagnostic')
   } finally { await h.supervisor.close() }
+  t.end()
+})
+
+test('Supervisor replaces a failed transport without mirroring its diagnostic or replaying commands', async (t) => {
+  const h = harness({
+    local(run, to, message) { return run.number === 0 && message.kind === 'append' },
+  })
+  try {
+    await h.supervisor.open()
+    const first = h.runs[0]
+    const pending = first.gate.append(Buffer.from('uncertain')).catch((err) => err)
+    await until(() => first.requests.some(({ message }) => message.kind === 'append'),
+      'command awaiting transport progress')
+    first.transportFailed.reject(new Error('host transport failed'))
+    t.equal((await pending).code, Err.NODE_NOT_OPEN)
+    await until(() => h.opens.length === 2, 'replacement after transport failure')
+    t.ok([...first.children.values()].every(exited), 'old owners have all exited')
+    t.ok(first.gateStoppedAtStop, 'Gate stops before transport cancellation')
+    t.ok(first.ownersAliveAtStop, 'transport cancellation precedes child termination')
+    t.equal(first.stopped, 1)
+    t.equal(first.cleaned, 1)
+    t.ok(first.exitedAtCleanup)
+    t.deepEqual(h.errors, [], 'the transport owns its diagnostic')
+    t.notOk(h.runs[1].requests.some(({ message }) => message.kind === 'append'),
+      'transport restart does not replay the pending command')
+    t.deepEqual(await h.supervisor.gate.append(Buffer.from('continued')), [1n, 'continued'])
+  } finally { await h.supervisor.close() }
+  t.end()
+})
+
+test('Supervisor observes transport failure throughout startup and ignores late readiness', async (t) => {
+  for (const phase of ['ready', 'hello']) {
+    const waiting = deferred()
+    const h = harness({
+      ready(run) {
+        if (phase !== 'ready' || run.number !== 0) { return }
+        run.transportFailed.reject(new Error('transport failed before readiness'))
+        return waiting.promise
+      },
+      local(run, to, message) {
+        if (phase !== 'hello' || run.number !== 0 || message.type !== 'hello') { return }
+        run.transportFailed.reject(new Error('transport failed while opening Gate'))
+        return true
+      },
+    })
+    try {
+      await h.supervisor.open()
+      const first = h.runs[0]
+      t.equal(h.runs.length, 2, `${phase}: failed transport is replaced`)
+      t.equal(h.opens.length, 1)
+      if (phase === 'ready') { t.equal(first.requests.length, 0, 'failed readiness cannot start Gate') }
+      else { t.ok(first.requests.some(({ message }) => message.type === 'hello')) }
+      t.equal(first.stopped, 1)
+      t.ok(first.exitedAtCleanup)
+      t.deepEqual(h.errors, [], 'startup transport diagnostic is not forwarded')
+      t.deepEqual(first.diagnostics, [], 'stopping Gate does not invent another diagnostic')
+      waiting.resolve()
+      await pause(20)
+      if (phase === 'ready') {
+        t.equal(first.requests.length, 0, 'late readiness cannot start an obsolete Gate')
+      }
+      t.equal(h.runs.length, 2)
+    } finally { await h.supervisor.close() }
+  }
+  t.end()
+})
+
+test('Supervisor ignores obsolete failure promises and cancellation diagnostics', async (t) => {
+  const h = harness({
+    stop(run) {
+      if (run.number > 0) { run.transportFailed.reject(new Error('intentional transport cancellation')) }
+    },
+  })
+  try {
+    await h.supervisor.open()
+    const first = h.runs[0]
+    first.children.get('procA').kill('SIGKILL')
+    await until(() => h.opens.length === 2, 'replacement before old failure promise rejects')
+    const errorCount = h.errors.length
+    first.transportFailed.reject(new Error('obsolete transport failed'))
+    await pause(20)
+    t.equal(h.runs.length, 2)
+    t.ok(h.supervisor.gate.isOpen)
+    t.equal(h.errors.length, errorCount, 'superseded failure causes no diagnostic')
+    await h.supervisor.close()
+    t.equal(h.errors.length, errorCount, 'shutdown failure promise cannot restart or report')
+    t.equal(h.runs[1].stopped, 1)
+    t.equal(h.closes, 1)
+  } finally { await h.supervisor.close() }
+  t.end()
+})
+
+test('Supervisor stop hook failure still reaps owners and cleans up without replacement', async (t) => {
+  const failure = new Error('transport cancellation failed')
+  const h = harness({ stop() { throw failure } })
+  try {
+    await h.supervisor.open()
+    const first = h.runs[0]
+    first.transportFailed.reject(new Error('transport stopped working'))
+    await until(() => h.supervisor.isStopped, 'stop hook failure terminates supervision')
+    const result = await h.supervisor.close().catch((err) => err)
+    t.equal(result.message, failure.message)
+    t.equal(result.stack, failure.stack)
+    t.equal(result.code, Err.SUPERVISOR_ERROR)
+    t.ok([...first.children.values()].every(exited), 'throwing stop cannot leave children running')
+    t.ok(first.exitedAtCleanup, 'cleanup still follows owner exit')
+    t.equal(first.cleaned, 1, 'cleanup runs despite stop hook failure')
+    t.equal(first.stopped, 1)
+    t.equal(h.closes, 0, 'failed cancellation cannot advertise successful cleanup')
+    t.equal(await h.supervisor.close().catch((err) => err), result,
+      'later close retains the original failure')
+    await pause(20)
+    t.equal(h.runs.length, 1, 'failed stop prevents replacement')
+    t.equal(h.errors.length, 1)
+    t.equal(h.errors[0], result)
+  } finally { await h.supervisor.close().catch(() => {}) }
   t.end()
 })
 

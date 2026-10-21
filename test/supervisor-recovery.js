@@ -4,7 +4,8 @@ import path from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
 import { Supervisor } from '../src/supervisor.js'
 import { Gate } from '../src/gate.js'
-import { udsServer } from '../src/uds.js'
+import { udsServer } from '../src/net/uds.js'
+import { UdsRouter } from '../src/net/udsrouter.js'
 import { decodeFrame, decodePayload } from '../src/wire.js'
 import { readApply, readMeta } from '../src/utils.js'
 import * as Err from '../src/error.js'
@@ -38,36 +39,47 @@ async function processCluster(options = {}) {
         throw new Error('replacement started before owners exited')
       }
       const attempt = fs.mkdtempSync(path.join(directory, `${id}-`))
-      const sockets = new Map()
+      const local = options.router ? new UdsRouter(allRoles, { directory: attempt }) : null
+      const sockets = local ? local._connections : new Map()
       const servers = []
       const ready = []
       const run = { base, sockets, attempt, children: null, gate: null, cleaned: false }
       let gate
       const cleanup = async () => {
-        for (const connection of sockets.values()) { connection.destroy() }
-        await Promise.all(servers.map(closeServer))
+        if (local) { await local.close() }
+        else {
+          for (const connection of sockets.values()) { connection.destroy() }
+          await Promise.all(servers.map(closeServer))
+        }
         fs.rmSync(attempt, { recursive: true, force: true })
         run.cleaned = true
       }
       try {
-        for (const role of allRoles) {
+        const receive = (role, frame) => {
+          if (options.receive?.({ id, role, frame, run }) === false) { return }
+          gate.onReceive(role, frame)
+        }
+        if (local) {
+          local.on('message', receive)
+          local.on('error', (error) => errors.push({ id, role: 'transport', error }))
+          await local.open()
+          ready.push(local.ready())
+        }
+        for (const role of local ? [] : allRoles) {
           ready.push(new Promise((resolve) => {
             run[`ready${role}`] = resolve
           }))
           const server = await udsServer(path.join(attempt, role), (connection) => {
             if (sockets.has(role)) { throw new Error('duplicate owner connection') }
             sockets.set(role, connection)
-            connection.on('data', (frame) => {
-              if (options.receive?.({ id, role, frame, run }) === false) { return }
-              gate.onReceive(role, frame)
-            })
+            connection.on('data', (frame) => receive(role, frame))
             run[`ready${role}`]()
           }, (error) => errors.push({ id, role: 'transport', error }))
           servers.push(server)
         }
         gate = new Gate(id, ids, (to, frame) => {
           if (!stopped) { supervisors.get(to)?.gate?.onReceive(id, frame) }
-        }, (to, frame) => sockets.get(to).write(frame), {
+        }, (to, frame) => local ? local.send(to, frame) : sockets.get(to).write(frame), {
           tickInterval: 5, localTimeout: 1_500, applyTimeout: 400,
         })
         gate.on('error', (error) => errors.push({ id, role: 'gate', error }))
@@ -76,12 +88,14 @@ async function processCluster(options = {}) {
         return {
           gate,
           children: Object.fromEntries(allRoles.map((role) => [role, {
-            file: owner, args: [role, id, base, path.join(attempt, role)],
+            file: owner, args: [role, id, base, local ? local.paths[role] : path.join(attempt, role)],
           }])),
           ready: async (children) => {
             run.children = children
             await Promise.all(ready)
           },
+          failed: local?.failed,
+          stop: () => local?.stop(),
           cleanup,
         }
       } catch (err) {
@@ -125,6 +139,7 @@ test('Supervisor restarts four owners and imports a committed Apply receipt with
   let target = null
   let held = null
   const c = await processCluster({
+    router: true,
     receive({ id, role, frame, run }) {
       if (id !== target || role !== 'apply') { return }
       const message = decodeFrame(frame)
@@ -181,6 +196,11 @@ test('Supervisor restarts four owners and imports a committed Apply receipt with
     'local socket loss replaces and reaps the entire previous group')
     t.equal(c.runs.get(supervisor.gate.id).length, 3,
       'the same Supervisor handles repeated recovery')
+    const transportError = c.errors.find(({ id, role, error }) => id === supervisor.gate.id &&
+      role === 'transport' && error.message.includes('disconnected'))?.error
+    t.ok(transportError, 'the router reports its own disconnection diagnostic')
+    t.notOk(c.errors.some(({ role, error }) => role === 'supervisor' && error === transportError),
+      'Supervisor restarts without forwarding the router diagnostic')
     const afterDisconnect = fs.readFileSync(`${base}.calls`, 'utf8').trim().split('\n')
     t.equal(afterDisconnect.filter((seq) => seq === continued[0].toString()).length, 1,
       'transport disconnection does not replay completed work')

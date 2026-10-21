@@ -1,23 +1,13 @@
 # TCP transport
 
-Function notes for [src/tcp.js](../src/tcp.js), in source order.
-Trivial constructors are omitted; nested callbacks are covered with their
-enclosing function.
-
-## `FrameStream._transform`
-
-Validates outgoing Buffer frames for transmission over TCP. Object mode
-preserves message boundaries while buffers wait for encryption.
-
-### findings
-
-no findings
+Function notes for [src/net/tcp.js](../src/net/tcp.js), in source order.
+Framing is shared with UDS and documented in [STREAM.md](STREAM.md).
 
 ## `tcpServer`
 
-Starts an encrypted TCP server that delivers received frames to the supplied
-callback. Encrypted-record lengths delimit messages without an outer codec.
-Provides a reply stream per connection and reports connection failures.
+Starts a plaintext TCP listener and delivers unchanged Buffer frames with their
+reply connections. Supports a bind host and an optional connection callback;
+error callbacks identify the connection, or use null for listener errors.
 
 ### findings
 
@@ -25,8 +15,8 @@ no findings
 
 ## `tcpClient`
 
-Connects to an encrypted TCP server and returns a stream for sending frames.
-Delivers received frames to the supplied callback and reports connection failures.
+Connects to a TCP listener and returns a framed stream for sending and receiving
+Buffers. Accepts frame limits, dial cancellation, and a connection timeout.
 
 ### findings
 

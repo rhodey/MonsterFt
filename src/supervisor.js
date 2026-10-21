@@ -62,8 +62,10 @@ class Supervisor extends EventEmitter {
   _validate(setup) {
     if (!(setup?.gate instanceof Gate) || setup.gate.isOpen ||
         (setup.ready !== undefined && typeof setup.ready !== 'function') ||
+        (setup.failed !== undefined && typeof setup.failed?.then !== 'function') ||
+        (setup.stop !== undefined && typeof setup.stop !== 'function') ||
         (setup.cleanup !== undefined && typeof setup.cleanup !== 'function')) {
-      throw failure('setup must provide a fresh Gate and optional ready/cleanup functions')
+      throw failure('setup requires a fresh Gate, optional ready/stop/cleanup functions and failed promise')
     }
     const entries = new Map()
     for (const role of ROLES) {
@@ -145,6 +147,9 @@ class Supervisor extends EventEmitter {
         error: null, stopping: false, stopWork: null, timer: null, onError: null,
       }
       this._run = run
+      if (setup?.failed !== undefined) {
+        Promise.resolve(setup.failed).catch((err) => this._fail(run, err, false))
+      }
       try {
         const entries = this._validate(setup)
         if (this._stopped) { continue }
@@ -213,6 +218,11 @@ class Supervisor extends EventEmitter {
         if (run.onError) { run.setup.gate.removeListener('error', run.onError) }
         run.setup.gate.stop()
       }
+      let stopError = null
+      try {
+        if (typeof run.setup?.stop === 'function') { run.setup.stop() }
+      }
+      catch (err) { stopError = Err.wrapError(err, Err.SUPERVISOR_ERROR) }
       for (const record of run.records.values()) {
         if (record.ended) { continue }
         try { record.child.kill('SIGKILL') }
@@ -223,6 +233,7 @@ class Supervisor extends EventEmitter {
       const err = results.find((result) => result !== null)
       if (err) { throw err }
       if (typeof run.setup?.cleanup === 'function') { await run.setup.cleanup() }
+      if (stopError !== null) { throw stopError }
       if (this._run === run) { this._run = null }
     }).catch((err) => {
       throw Err.wrapError(err, Err.SUPERVISOR_ERROR)

@@ -1,8 +1,6 @@
 import test from 'tape'
 import net from 'node:net'
-import sodium from 'libsodium-wrappers'
-import { tcpServer, tcpClient } from '../src/tcp.js'
-import { EncryptingStream } from '../src/stream.js'
+import { tcpServer, tcpClient } from '../src/net/tcp.js'
 import { encodeFrame, decodeFrame } from '../src/wire.js'
 import * as Err from '../src/error.js'
 
@@ -13,15 +11,12 @@ const closeServer = (server) => !server.listening ? Promise.resolve() :
   new Promise((resolve, reject) => server.close((err) => err ? reject(err) : resolve()))
 const immediate = () => new Promise((resolve) => setImmediate(resolve))
 
-async function encryptedFrames(key, frames) {
-  const encrypt = new EncryptingStream(key, { writableObjectMode: true })
-  const chunks = []
-  encrypt.on('data', (chunk) => chunks.push(chunk))
-  const ended = event(encrypt, 'end')
-  for (const frame of frames) { encrypt.write(frame) }
-  encrypt.end()
-  await ended
-  return Buffer.concat(chunks)
+function framed(frames) {
+  return Buffer.concat(frames.flatMap((frame) => {
+    const header = Buffer.alloc(4)
+    header.writeUInt32BE(frame.length)
+    return [header, frame]
+  }))
 }
 
 function timeout(work, ms = 3000) {
@@ -33,16 +28,14 @@ function timeout(work, ms = 3000) {
 }
 
 test('TCP transports exact checksummed Buffers including nested Raft and Apply records', async (t) => {
-  await sodium.ready
-  const key = Buffer.from(sodium.crypto_secretstream_xchacha20poly1305_keygen())
   const failures = []
   const incoming = []
-  const server = await tcpServer(key, 0, (reply, frame) => {
+  const server = await tcpServer(0, (reply, frame) => {
     incoming.push(frame)
     reply.write(frame)
   }, (err) => failures.push(err))
   let receive
-  const client = await tcpClient(key, server.address().port, '127.0.0.1', (frame) => receive(frame))
+  const client = await tcpClient(server.address().port, '127.0.0.1', (frame) => receive(frame))
   client.on('error', (err) => failures.push(err))
   try {
     const messages = [
@@ -80,8 +73,6 @@ test('TCP transports exact checksummed Buffers including nested Raft and Apply r
 
 for (const sender of ['client', 'server']) {
   test(`TCP ${sender} end flushes queued frames before closing`, async (t) => {
-    await sodium.ready
-    const key = Buffer.from(sodium.crypto_secretstream_xchacha20poly1305_keygen())
     const payload = Buffer.alloc(16 * 1024 * 1024, 0xc5)
     payload.write('final payload bytes', payload.length - 19)
     const frames = [encodeFrame({ order: 1 }), encodeFrame({ order: 2, payload })]
@@ -89,7 +80,7 @@ for (const sender of ['client', 'server']) {
     const failures = []
     let peer
     let peerClosing
-    const server = await tcpServer(key, 0, (reply, frame) => {
+    const server = await tcpServer(0, (reply, frame) => {
       if (sender === 'client') received.push(frame)
       else {
         reply.write(frames[0])
@@ -100,7 +91,7 @@ for (const sender of ['client', 'server']) {
       peer = socket
       peerClosing = event(socket, 'close')
     })
-    const client = await tcpClient(key, server.address().port, '127.0.0.1',
+    const client = await tcpClient(server.address().port, '127.0.0.1',
       (frame) => received.push(frame))
     client.on('error', (err) => failures.push(err))
     try {
@@ -131,8 +122,6 @@ for (const sender of ['client', 'server']) {
 }
 
 test('TCP explicit destroy aborts pending output', async (t) => {
-  await sodium.ready
-  const key = Buffer.from(sodium.crypto_secretstream_xchacha20poly1305_keygen())
   let accept
   const accepted = new Promise((resolve) => { accept = resolve })
   const server = net.createServer((socket) => {
@@ -144,7 +133,7 @@ test('TCP explicit destroy aborts pending output', async (t) => {
     server.once('error', reject)
     server.listen(0, '127.0.0.1', resolve)
   })
-  const client = await tcpClient(key, server.address().port, '127.0.0.1')
+  const client = await tcpClient(server.address().port, '127.0.0.1')
   client.on('error', noop)
   const peer = await accepted
   try {
@@ -171,10 +160,8 @@ test('TCP explicit destroy aborts pending output', async (t) => {
 })
 
 test('TCP rejects non-Buffer writes and closes the connection', async (t) => {
-  await sodium.ready
-  const key = Buffer.from(sodium.crypto_secretstream_xchacha20poly1305_keygen())
-  const server = await tcpServer(key, 0, () => t.fail('invalid request reached server'), noop)
-  const client = await tcpClient(key, server.address().port, '127.0.0.1')
+  const server = await tcpServer(0, () => t.fail('invalid request reached server'), noop)
+  const client = await tcpClient(server.address().port, '127.0.0.1')
   try {
     const failed = event(client, 'error')
     const closing = closed(client)
@@ -182,7 +169,7 @@ test('TCP rejects non-Buffer writes and closes the connection', async (t) => {
     const err = await timeout(failed)
     await timeout(closing)
     t.equal(err.code, Err.ARGUMENT_ILLEGAL)
-    t.equal(err.message, 'TCP message must be a Buffer')
+    t.equal(err.message, 'message must be a Buffer')
     t.ok(client.destroyed)
   } finally {
     client.destroy()
@@ -192,16 +179,14 @@ test('TCP rejects non-Buffer writes and closes the connection', async (t) => {
 })
 
 test('TCP closes on error without a caller error listener', async (t) => {
-  await sodium.ready
-  const key = Buffer.from(sodium.crypto_secretstream_xchacha20poly1305_keygen())
-  const server = await tcpServer(key, 0, noop, noop)
-  const client = await tcpClient(key, server.address().port, '127.0.0.1')
+  const server = await tcpServer(0, noop, noop)
+  const client = await tcpClient(server.address().port, '127.0.0.1')
   try {
     const closing = closed(client)
     client.write({ type: 'not a Buffer' })
     await timeout(closing)
     t.ok(client.destroyed, 'client closes without a caller error listener')
-    t.equal(client.eventNames().length, 0, 'cleanup removes client listeners')
+    t.equal(client.socket.destroyed, true, 'cleanup closes the underlying socket')
   } finally {
     client.destroy()
     await closeServer(server)
@@ -210,30 +195,28 @@ test('TCP closes on error without a caller error listener', async (t) => {
 })
 
 test('TCP reports callback errors before closing and preserves their stack', async (t) => {
-  await sodium.ready
-  const key = Buffer.from(sodium.crypto_secretstream_xchacha20poly1305_keygen())
   const original = new Error('receiver failed')
   let output
   let report
   let closedWhenReported
   const reported = new Promise((resolve) => { report = resolve })
-  const server = await tcpServer(key, 0, (reply) => {
+  const server = await tcpServer(0, (reply) => {
     output = reply
     throw original
   }, (err) => {
     closedWhenReported = output.destroyed
     report(err)
   })
-  const client = await tcpClient(key, server.address().port, '127.0.0.1')
+  const client = await tcpClient(server.address().port, '127.0.0.1')
   client.on('error', noop)
   try {
     const closing = closed(client)
     client.write(encodeFrame({ type: 'test' }))
     const err = await timeout(reported)
     await timeout(closing)
-    t.equal(err, original)
+    t.equal(err.message, original.message)
     t.equal(err.stack, original.stack)
-    t.equal(closedWhenReported, false)
+    t.equal(closedWhenReported, true, 'connection stops before reporting failure')
     t.ok(output.destroyed)
     t.ok(client.destroyed)
   } finally {
@@ -250,70 +233,30 @@ test('TCP server rejects listen failures and preserves runtime error stacks', as
     holder.listen(0, '0.0.0.0', resolve)
   })
   try {
-    const err = await tcpServer(Buffer.alloc(32), holder.address().port, noop, noop)
+    const err = await tcpServer(holder.address().port, noop, noop)
       .then(() => null, (error) => error)
     t.ok(err instanceof Err.ErrorWithCode)
     t.match(err.message, /listen EADDRINUSE/)
     t.match(err.stack, /^Error: listen EADDRINUSE/)
   } finally { await closeServer(holder) }
   let reported
-  const server = await tcpServer(Buffer.alloc(32), 0, noop, (err) => { reported = err })
+  const server = await tcpServer(0, noop, (err) => { reported = err })
   try {
     const original = new Error('server runtime failure')
     server.emit('error', original)
     t.equal(reported.stack, original.stack)
-    t.match(reported.message, /net error server runtime failure/)
+    t.match(reported.message, /listen error server runtime failure/)
   } finally { await closeServer(server) }
   t.end()
 })
 
-test('TCP client closes after decryption failure', async (t) => {
-  await sodium.ready
-  const key = Buffer.from(sodium.crypto_secretstream_xchacha20poly1305_keygen())
-  let accept
-  const accepted = new Promise((resolve) => { accept = resolve })
-  const server = net.createServer((socket) => {
-    socket.on('error', noop)
-    socket.resume()
-    accept(socket)
-  })
-  await new Promise((resolve, reject) => {
-    server.once('error', reject)
-    server.listen(0, '127.0.0.1', resolve)
-  })
-  const client = await tcpClient(key, server.address().port, '127.0.0.1')
-  const peer = await accepted
-  try {
-    const failed = event(client, 'error')
-    const closing = closed(client)
-    const length = Buffer.alloc(4)
-    length.writeUInt32BE(sodium.crypto_secretstream_xchacha20poly1305_ABYTES)
-    peer.write(Buffer.concat([
-      Buffer.alloc(sodium.crypto_secretstream_xchacha20poly1305_HEADERBYTES), length,
-      Buffer.alloc(sodium.crypto_secretstream_xchacha20poly1305_ABYTES),
-    ]))
-    const err = await timeout(failed)
-    await timeout(closing)
-    t.match(err.message, /decrypt error/)
-    t.match(err.stack, /DecryptingStream/)
-    t.equal(client.eventNames().length, 0)
-    t.equal(client._readableState.pipes.length, 0)
-  } finally {
-    client.destroy()
-    peer.destroy()
-    await closeServer(server)
-  }
-  t.end()
-})
 
 for (const receiver of ['server', 'client']) {
   for (const split of [false, true]) {
-    test(`TCP ${receiver} receives direct encrypted records with ${split ? 'split' : 'coalesced'} bytes`, async (t) => {
-      await sodium.ready
-      const key = Buffer.from(sodium.crypto_secretstream_xchacha20poly1305_keygen())
+    test(`TCP ${receiver} receives plain length-prefixed records with ${split ? 'split' : 'coalesced'} bytes`, async (t) => {
       const frames = [Buffer.alloc(0), Buffer.from([0xc1]),
         encodeFrame({ message: 'first' }), encodeFrame({ message: 'second', data: Buffer.alloc(96 * 1024, 7) })]
-      const ciphertext = await encryptedFrames(key, frames)
+      const bytes = framed(frames)
       const incoming = []
       const failures = []
       let finish
@@ -327,7 +270,7 @@ for (const receiver of ['server', 'client']) {
       let peer
       try {
         if (receiver === 'server') {
-          server = await tcpServer(key, 0, (reply, frame) => onFrame(frame), (err) => failures.push(err))
+          server = await tcpServer(0, (reply, frame) => onFrame(frame), (err) => failures.push(err))
           peer = net.connect(server.address().port, '127.0.0.1')
           peer.on('error', (err) => failures.push(err))
           peer.resume()
@@ -344,21 +287,20 @@ for (const receiver of ['server', 'client']) {
             server.once('error', reject)
             server.listen(0, '127.0.0.1', resolve)
           })
-          client = await tcpClient(key, server.address().port, '127.0.0.1', onFrame)
+          client = await tcpClient(server.address().port, '127.0.0.1', onFrame)
           client.on('error', (err) => failures.push(err))
           peer = await timeout(accepted)
         }
         if (split) {
-          // Split the encryption header, a frame length, and an encrypted body.
-          const header = sodium.crypto_secretstream_xchacha20poly1305_HEADERBYTES
-          const offsets = [0, 1, header + 2, header + 6, ciphertext.length]
+          // Split frame lengths and payloads across reads.
+          const offsets = [0, 1, 3, 7, 10, bytes.length]
           for (let index = 1; index < offsets.length; index++) {
-            peer.write(ciphertext.subarray(offsets[index - 1], offsets[index]))
+            peer.write(bytes.subarray(offsets[index - 1], offsets[index]))
             await immediate()
           }
-        } else peer.write(ciphertext)
+        } else peer.write(bytes)
         await timeout(received)
-        t.equal(incoming.length, frames.length, 'each encrypted record is one callback')
+        t.equal(incoming.length, frames.length, 'each frame is one callback')
         t.ok(incoming.every((frame) => Buffer.isBuffer(frame)), 'all records are Buffers')
         t.deepEqual(incoming, frames, 'exact bytes arrive, including empty and non-MessagePack records')
         t.deepEqual(failures, [], 'no transport errors')
@@ -373,15 +315,13 @@ for (const receiver of ['server', 'client']) {
 }
 
 test('TCP corked writes preserve individual Buffer frames through backpressure', async (t) => {
-  await sodium.ready
-  const key = Buffer.from(sodium.crypto_secretstream_xchacha20poly1305_keygen())
   const frames = Array.from({ length: 48 }, (_, index) => Buffer.alloc(index * 19, index))
   const incoming = []
   const failures = []
   let finish
   const received = new Promise((resolve) => { finish = resolve })
-  const server = await tcpServer(key, 0, (reply, frame) => reply.write(frame), (err) => failures.push(err))
-  const client = await tcpClient(key, server.address().port, '127.0.0.1', (frame) => {
+  const server = await tcpServer(0, (reply, frame) => reply.write(frame), (err) => failures.push(err))
+  const client = await tcpClient(server.address().port, '127.0.0.1', (frame) => {
     incoming.push(frame)
     if (incoming.length === frames.length) { finish() }
   })
