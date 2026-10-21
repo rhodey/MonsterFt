@@ -56,7 +56,7 @@ class Gate extends EventEmitter {
     this._localSend = localSend
     this._open = false
     this._opening = false
-    this._closing = false
+    this._stopped = false
     this._closed = false
     this._openWork = null
     this._closeWork = null
@@ -64,7 +64,8 @@ class Gate extends EventEmitter {
     this._shutdownError = null
     this._requests = new Map()
     this._clients = new Map()
-    this._shutdownWaiters = new Set()
+    this._eventWaiters = new Set()
+    this._closeWaiters = new Set()
     this._helloDone = new Set()
     this._queue = []
     this._current = null
@@ -74,20 +75,22 @@ class Gate extends EventEmitter {
     this._seed = null
   }
 
-  get isOpen() { return this._open && !this._closing }
+  get isOpen() { return this._open && !this._stopped }
 
   _emitSafe(type, value) {
     for (const listener of this.rawListeners(type)) {
       try {
         listener.call(this, value)
       } catch (err) {
-        if (type !== 'error') { this._emitSafe('error', err) }
+        if (type === 'error') { continue }
+        if (this._stopped) { this._emitSafe('error', Err.wrapError(err)) }
+        else { this._fatal(err) }
       }
     }
   }
 
   _request(to, message, timeout = this.localTimeout, allowClosing = false, frame = null) {
-    if (this._closing && !allowClosing) {
+    if (this._stopped && !allowClosing) {
       return Promise.reject(this._shutdownError ?? nodeClosed())
     }
     const cid = message.cid ?? crypto.randomUUID()
@@ -122,8 +125,8 @@ class Gate extends EventEmitter {
   }
 
   onReceive(from, frame) {
-    if (this._closing && this._requests.size === 0) { return }
-    if (!this._opening && !this._open && !this._closing) { return }
+    if (this._stopped && this._requests.size === 0) { return }
+    if (!this._opening && !this._open && !this._stopped) { return }
     try {
       if (COMPONENTS.includes(from)) {
         const message = wire.decodeFrame(frame)
@@ -139,7 +142,7 @@ class Gate extends EventEmitter {
         request.finish(message.type === 'err'
           ? wire.errorFromWire(message.error ?? message) : null, message)
       } else {
-        if (this._closing) { return }
+        if (this._stopped) { return }
         if (!this.nodes.includes(from) || from === this.id) {
           throw rpcIllegal('cluster frame has invalid sender')
         }
@@ -152,7 +155,7 @@ class Gate extends EventEmitter {
   }
 
   async _hello(to) {
-    while (!this._closing) {
+    while (!this._stopped) {
       try {
         const message = { type: 'hello' }
         if (to !== 'apply') { message.seed = this._seed }
@@ -160,7 +163,7 @@ class Gate extends EventEmitter {
         this._helloDone.add(to)
         return
       } catch (err) {
-        if (err.code !== Err.LOCAL_TIMEOUT || this._closing) { throw err }
+        if (err.code !== Err.LOCAL_TIMEOUT || this._stopped) { throw err }
       }
     }
     throw this._shutdownError ?? nodeClosed()
@@ -171,7 +174,7 @@ class Gate extends EventEmitter {
   }
 
   open() {
-    if (this._closing) { return Promise.reject(this._shutdownError ?? nodeClosed()) }
+    if (this._stopped) { return Promise.reject(this._shutdownError ?? nodeClosed()) }
     if (this._openWork !== null) { return this._openWork }
     this._opening = true
     do { this._seed = crypto.randomBytes(16) } while (this._seed.every((byte) => byte === 0))
@@ -195,13 +198,13 @@ class Gate extends EventEmitter {
       await this._phase('adopt')
       await this._phase('reconcile')
       await this._phase('ready', ['apply'])
-      if (this._closing) { throw this._shutdownError ?? nodeClosed() }
+      if (this._stopped) { throw this._shutdownError ?? nodeClosed() }
       this._open = true
       await new Promise((resolve, reject) => {
         this._queue.unshift({ input: { kind: 'start' }, resolve, reject })
         this._schedulePump()
       })
-      if (this._closing) { throw this._shutdownError ?? nodeClosed() }
+      if (this._stopped) { throw this._shutdownError ?? nodeClosed() }
       this._opening = false
       this._scheduleTick()
     })().catch((err) => {
@@ -225,7 +228,7 @@ class Gate extends EventEmitter {
   }
 
   _enqueue(input) {
-    if (this._closing) { return }
+    if (this._stopped) { return }
     this._queue.push({ input, resolve: noop, reject: noop })
     this._schedulePump()
   }
@@ -269,7 +272,7 @@ class Gate extends EventEmitter {
     await Promise.all(PROCS.map(async (to) => {
       try {
         const reply = await this._request(to, input, this.localTimeout, false, frame)
-        if (this._closing) { throw this._shutdownError ?? nodeClosed() }
+        if (this._stopped) { throw this._shutdownError ?? nodeClosed() }
         if (!Array.isArray(reply.outputs) || !reply.outputs.every((value) =>
           Buffer.isBuffer(value) && (to === 'procA' || value.length === 32))) {
           throw rpcIllegal('completion has invalid outputs')
@@ -287,7 +290,7 @@ class Gate extends EventEmitter {
           released = true
           const agreed = completed.get('procB') ?? completed.get('procC')
           for (let i = 0; i < a.outputs.length; i += 1) {
-            if (this._closing) { break }
+            if (this._stopped) { break }
             this._release(a.outputs[i], agreed.hashes[i])
           }
         }
@@ -312,7 +315,7 @@ class Gate extends EventEmitter {
       // The pending request exists before sending, including synchronous transports.
       this._request('apply', message, this.applyTimeout, false,
         wire.framePayload(payload, hash)).then((reply) => {
-        if (this._closing) { return }
+        if (this._stopped) { return }
         this._enqueue({ kind: 'apply', reply })
       }, (err) => this._fatal(err))
     } else if (to === 'client') {
@@ -434,13 +437,14 @@ class Gate extends EventEmitter {
     if (!isClose && !this.isOpen) {
       return Promise.reject(this._shutdownError ?? nodeClosed())
     }
+    const waiters = isClose ? this._closeWaiters : this._eventWaiters
     return new Promise((resolve, reject) => {
       let settled = false
       const finish = (settle, value) => {
         if (settled) { return }
         settled = true
         this.removeListener(type, listener)
-        this._shutdownWaiters.delete(fail)
+        waiters.delete(fail)
         settle(value)
       }
       const fail = (err) => finish(reject, err)
@@ -449,9 +453,10 @@ class Gate extends EventEmitter {
           if (matches(value)) { finish(resolve, value) }
         } catch (err) { fail(err) }
       }
-      if (!isClose) { this._shutdownWaiters.add(fail) }
+      waiters.add(fail)
       this.on(type, listener)
       if (isClose && this._closed) { listener() }
+      else if (isClose && this._closeWork !== null) { this._closeWork.catch(fail) }
     })
   }
 
@@ -465,7 +470,7 @@ class Gate extends EventEmitter {
   }
 
   _stop(err) {
-    this._closing = true
+    this._stopped = true
     this._open = false
     this._opening = false
     this._shutdownError = err
@@ -476,12 +481,12 @@ class Gate extends EventEmitter {
     }
     for (const pending of this._clients.values()) { pending.reject(err) }
     this._clients.clear()
-    for (const fail of [...this._shutdownWaiters]) { fail(err) }
+    for (const fail of [...this._eventWaiters]) { fail(err) }
     for (const work of this._queue.splice(0)) { work.reject(err) }
   }
 
   _fatal(error) {
-    if (this._closing) { return }
+    if (this._stopped) { return }
     const err = Err.wrapError(error)
     this._stop(err)
     this._emitSafe('error', err)
@@ -498,14 +503,14 @@ class Gate extends EventEmitter {
       this._closed = true
       this._emitSafe('close')
     }).catch((err) => {
-      this._closeWork = null
+      for (const fail of [...this._closeWaiters]) { fail(err) }
       throw err
     })
     return this._closeWork
   }
 
   stop() {
-    if (!this._closing) { this._stop(nodeClosed()) }
+    if (!this._stopped) { this._stop(nodeClosed()) }
   }
 
   close() {

@@ -14,8 +14,8 @@ no findings
 
 ## `_emitSafe`
 
-Delivers an event to listeners while containing listener failures and reporting
-them as errors where possible.
+Delivers events and stops Gate when a non-error listener throws. Reports errors
+before any resulting successful close notification, without repeating teardown.
 
 ### findings
 
@@ -162,7 +162,7 @@ no findings
 
 Waits for a matching event, rejecting if the condition throws. Shutdown rejects
 ordinary waits; close waits observe successful cleanup, including success before
-registration, without starting cleanup themselves.
+registration, or reject if cleanup fails. Waiting never starts cleanup.
 
 ### findings
 
@@ -189,8 +189,8 @@ no findings
 
 ## `_fatal`
 
-Reports an unrecoverable error and stops Gate without requesting component
-shutdown.
+Stops Gate's local work and reports an unrecoverable error without requesting
+component shutdown.
 
 ### findings
 
@@ -199,7 +199,8 @@ no findings
 ## `_closeComponents`
 
 Requests shutdown of components that completed hello and reports completion
-after all close replies succeed. Failed attempts can be retried explicitly.
+after all close replies succeed. Repeated calls share the same result, including
+failure, without retrying cleanup.
 
 ### findings
 

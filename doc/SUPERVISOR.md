@@ -7,6 +7,8 @@ Trivial getters and promise helpers are omitted.
 
 Validates supervision settings and prepares the lifecycle. The host supplies
 Gate instances, child entrypoints, and transport readiness and cleanup.
+`isStopped` reports permanently disabled retries, including during cleanup;
+ordinary startup and restart attempts leave it false.
 
 ### findings
 
@@ -85,7 +87,8 @@ no findings
 ## `_stopRun`
 
 Stops Gate, kills remaining children, and waits for their exits before calling
-host cleanup. Failed cleanup prevents replacement and can be retried by close.
+host cleanup. Cleanup runs once per group; failure permanently stops supervision
+and prevents replacement.
 
 ### findings
 
@@ -94,8 +97,8 @@ no findings
 ## `close`
 
 Permanently disables supervision and waits for owner termination and transport
-cleanup. Its close notification confirms process shutdown, not Gate's
-coordinated-close protocol.
+cleanup. Repeated calls retain the first result, including failure. Its close
+notification confirms successful cleanup, not Gate's coordinated-close protocol.
 
 ### findings
 

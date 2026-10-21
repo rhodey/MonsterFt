@@ -30,7 +30,8 @@ three belong to ProcA/B/C; the last belongs to Apply.
    ```
 3. Stop every component of each node to be repaired and await shutdown.
    For supervised nodes, await `supervisor.close()`; disable automatic restarts
-   before replacing any files.
+   before replacing any files. If cleanup fails, terminate all owning processes
+   and verify their exit before continuing.
 4. Copy all four donor databases and their SQLite sidecars to the corresponding
    target paths, replacing the stopped target's files and stale sidecars. Copy
    DB1A, DB1B, and DB1C individually; do not duplicate DB1A into all three paths.

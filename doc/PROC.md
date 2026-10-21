@@ -15,8 +15,8 @@ no findings
 
 ## `_emitSafe`
 
-Delivers events while containing listener failures and reporting them through
-error listeners where possible.
+Delivers events and stops the Proc when a non-error listener throws. Reports
+listener failures without recursively closing an already stopping Proc.
 
 ### findings
 
@@ -68,9 +68,9 @@ no findings
 ## `_input`
 
 Processes one ordered input and its runnable protocol work atomically in DB1,
-checking for a final status change before commit. Produces a completion and local
-diagnostics; intentional repair fences stop the Proc before its final completion
-is sent.
+checking for a final status change before commit. Fatal repair fences are durable
+but produce no input completion. Quorum-impossible decisions report a nonfatal
+error while allowing replication to continue.
 
 ### findings
 
@@ -89,7 +89,7 @@ no findings
 
 Stops the engine, executor, and watchdog and closes the Proc's protocol store,
 reporting any fatal error and shutdown failures before a successful close
-notification.
+notification. Cleanup runs once; later close calls preserve its result.
 
 ### findings
 

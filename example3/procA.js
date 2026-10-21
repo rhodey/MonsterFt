@@ -1,4 +1,6 @@
-import { MonsterProc, udsClient } from '../src/index.js'
+import { writeSync } from 'node:fs'
+import { format } from 'node:util'
+import { ErrorCodes, MonsterProc, udsClient } from '../src/index.js'
 
 const nodeIds = ['1', '2', '3']
 const [id, socketPath, databasePath] = process.argv.slice(2)
@@ -8,10 +10,18 @@ const localSend = (to, frame) => {
   socket.write(frame)
 }
 const proc = new MonsterProc('procA', id, nodeIds, localSend, databasePath)
-proc.on('warn', (err) => console.warn(`${id}/procA`, err))
-proc.on('error', (err) => console.error(`${id}/procA`, err))
+proc.on('warn', (err) => writeSync(2, format(`${id}/procA`, err.message, err) + '\n'))
+proc.on('error', (err) => {
+  try { writeSync(2, format(`${id}/procA`, err.message, err) + '\n') }
+  finally {
+    if (err.code !== ErrorCodes.REPAIR_QUORUM_IMPOSSIBLE || !proc.isOpen) {
+      process.exit(1)
+    }
+  }
+})
 socket.on('data', (frame) => proc.onReceive('gate', frame))
-socket.on('error', (err) => console.error(`${id}/procA/socket`, err))
-// Component diagnostics do not end this process: a repair completion may follow.
-// Losing the parent transport does; the next attempt must use a fresh process.
+socket.on('error', (err) => {
+  try { writeSync(2, format(`${id}/procA/socket`, err.message, err) + '\n') }
+  finally { process.exit(1) }
+})
 socket.on('close', () => process.exit(1))

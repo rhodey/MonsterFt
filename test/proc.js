@@ -53,8 +53,11 @@ function fixture(opts={}) {
         timems: procs[i].executor.timems, ...fields,
       })
     },
-    cleanup() {
-      for (const proc of procs) { proc.close() }
+    cleanup(failed = []) {
+      for (const proc of procs) {
+        if (failed.includes(proc)) { proc.store.close() }
+        else { proc.close() }
+      }
       fs.rmSync(dir, { recursive: true, force: true })
     },
   }
@@ -114,7 +117,7 @@ test('Proc reports fatal errors before close listeners can remove diagnostics', 
   t.end()
 })
 
-test('Proc preserves the original fatal error when database close fails or is retried', (t) => {
+test('Proc preserves the original fatal error and never retries failed cleanup', (t) => {
   for (const retryInListener of [false, true]) {
     const f = fixture().startup()
     const proc = f.procs[0]
@@ -134,14 +137,20 @@ test('Proc preserves the original fatal error when database close fails or is re
       t.equal(f.events[0][0].value.code, Err.FRAME_CORRUPT, 'the original failure is reported first')
       t.equal(f.events[0][1].value, failure, 'the cleanup failure is also reported')
       t.notOk(proc.isOpen, 'failed cleanup does not leave the Proc accepting work')
-      t.equal(proc.log.isOpen, !retryInListener, 'only successful cleanup closes the database')
-      t.deepEqual(f.events[0].map(({ type }) => type),
-        retryInListener ? ['error', 'error', 'close'] : ['error', 'error'],
-        'a listener retry cannot publish close before the original diagnostic')
-      proc.close()
-      t.deepEqual(f.events[0].map(({ type }) => type), ['error', 'error', 'close'],
-        'explicit retry finishes cleanup without repeating diagnostics or close')
-    } finally { proc.store.close = close; f.cleanup() }
+      t.ok(proc.log.isOpen, 'failed cleanup leaves the database open')
+      t.equal(attempts, 1, 'a listener cannot recursively retry the active close')
+      t.deepEqual(f.events[0].map(({ type }) => type), ['error', 'error'],
+        'failed cleanup cannot publish close')
+      t.throws(() => proc.close(), (err) => err === failure,
+        'later close preserves the original cleanup failure')
+      const reply = f.request(0, { type: 'close' })
+      t.equal(reply.type, 'err', 'later close requests cannot acknowledge failed cleanup')
+      t.equal(reply.message, failure.message)
+      t.equal(reply.stack, failure.stack)
+      t.equal(attempts, 1, 'later close calls do not retry cleanup')
+      t.deepEqual(f.events[0].map(({ type }) => type), ['error', 'error'],
+        'repeated close does not repeat diagnostics or emit close')
+    } finally { proc.store.close = close; f.cleanup([proc]) }
   }
   t.end()
 })
@@ -291,30 +300,26 @@ test('Proc treats CMD insert failures as fatal for local and forwarded commands'
   t.end()
 })
 
-test('Proc commits and reports intentional repair before final completion', (t) => {
+test('Proc commits and reports intentional repair without a final completion', (t) => {
   const f = fixture().startup()
   try {
     const proc = f.procs[0]
     const err = new Err.ErrorWithCode('repair required', Err.REPAIR_OUTSIDE_AGREEMENT)
+    err.stack = 'original local repair trace'
     proc.engine.start = () => {
       proc.db.prepare('UPDATE monsterft_meta SET repair_state = 2').run()
       proc.engine.output('client', { type: 'err', cid: 'caller', ...wire.errorToWire(err, false) })
       proc.engine.fatal(err)
     }
-    const send = proc._localSend
-    proc._localSend = (to, frame) => {
-      t.notOk(proc.log.isOpen, 'owner is closed before final completion is sent')
-      t.equal(f.events[0].find((event) => event.type === 'error').value, err,
-        'original repair diagnostic precedes send')
-      return send(to, frame)
-    }
+    let sends = 0
+    proc._localSend = () => { sends++; throw new Error('send must not run') }
     const reply = f.input(0, 'start')
-    t.equal(reply.type, 'ack', 'durable intended transition completes')
-    const output = wire.decodePayload(reply.outputs[0])
-    t.equal(output.to, 'client', 'buffered command result remains available')
-    t.equal(output.message.code, Err.REPAIR_OUTSIDE_AGREEMENT)
-    t.equal(wire.decodePayload(reply.outputs.at(-1)).message.type, 'change',
-      'intentional repair retains the final change output')
+    t.equal(reply, undefined, 'terminal input publishes no buffered results or events')
+    t.equal(sends, 0, 'fatal repair makes no transport attempt')
+    t.equal(f.events[0].find((event) => event.type === 'error').value, err)
+    t.equal(err.stack, 'original local repair trace')
+    t.deepEqual(f.events[0].map(({ type }) => type), ['error', 'close'],
+      'the local error precedes successful resource closure')
     t.equal(readDatabase(f.paths.procA, (db) => db.prepare('SELECT repair_state FROM monsterft_meta').get().repair_state),
       2n, 'repair fence retained through close')
     t.notOk(proc.isOpen)
@@ -336,40 +341,6 @@ test('Proc keeps local diagnostics outside agreed outputs', (t) => {
     t.equal(f.events[0].find((event) => event.type === 'warn').value.stack, err.stack,
       'local diagnostic retains original trace')
   } finally { f.cleanup() }
-  t.end()
-})
-
-test('Proc preserves committed repair diagnostics when final completion send fails', async (t) => {
-  for (const asynchronous of [false, true]) {
-    const f = fixture().startup()
-    try {
-      const proc = f.procs[0]
-      const repair = new Err.ErrorWithCode('repair required', Err.REPAIR_OUTSIDE_AGREEMENT)
-      repair.stack = 'original local repair trace'
-      proc.engine.start = () => {
-        proc.db.prepare('UPDATE monsterft_meta SET repair_state = 2').run()
-        proc.engine.fatal(repair)
-      }
-      let attempted = 0
-      proc._localSend = () => {
-        attempted++
-        t.equal(f.events[0].find((event) => event.type === 'error').value, repair,
-          'repair is reported before the failed send')
-        t.notOk(proc.log.isOpen, 'Proc stops before trying its final completion')
-        const err = new Error('completion send failed')
-        if (asynchronous) { return Promise.reject(err) }
-        throw err
-      }
-      t.equal(f.input(0, 'start'), undefined, 'transport failure delivers no reply')
-      await delay(0)
-      t.equal(attempted, 1, 'only the final completion was attempted')
-      const errors = f.events[0].filter((event) => event.type === 'error').map((event) => event.value)
-      t.deepEqual(errors, [repair], 'send failure cannot replace the original diagnostic')
-      t.equal(errors[0].stack, repair.stack)
-      t.equal(readDatabase(f.paths.procA, (db) => db.prepare('SELECT repair_state FROM monsterft_meta').get().repair_state),
-        2n, 'failed send leaves the repair fence durable')
-    } finally { f.cleanup() }
-  }
   t.end()
 })
 
@@ -421,19 +392,54 @@ test('Proc diagnostic listeners cannot hide later listeners or prevent teardown'
     const proc = f.procs[0]
     let warned = 0
     let errored = 0
-    proc.on('warn', () => { throw new Error('warning listener failed') })
+    const failure = new Err.ErrorWithCode('warning listener failed', Err.SQLITE_ERROR, 10)
+    proc.on('warn', () => { throw failure })
     proc.on('warn', () => { warned++ })
     proc.on('error', () => { throw new Error('error listener failed') })
-    proc.on('error', () => { errored++ })
+    proc.on('error', (err) => {
+      errored++
+      t.equal(err, failure, 'coded listener error is retained')
+      t.notOk(proc.isOpen, 'the component stops before reporting the listener failure')
+      proc.close()
+    })
     proc.engine.start = () => proc.engine.warn(new Error('original warning'))
     t.equal(f.input(0, 'start').type, 'ack')
     t.equal(warned, 1, 'later warning listener still runs')
     t.equal(errored, 1, 'later error listener still runs')
-    proc.engine.receive = () => { throw new Error('fatal work') }
+    let received = false
+    proc.engine.receive = () => { received = true }
     const frame = wire.encodeFrame({ to: 'a', message: { from: 'b', type: 'test' } })
     t.equal(f.input(0, 'rpc', { from: 'b', frame }), undefined)
-    t.equal(errored, 2, 'fatal error reaches remaining listeners')
+    t.equal(errored, 1, 'subsequent input does not restart the failure path')
+    t.notOk(received, 'subsequent protocol work is refused')
+    t.deepEqual(f.events[0].map(({ type }) => type), ['warn', 'error', 'close'])
     t.notOk(proc.log.isOpen, 'throwing error listener cannot prevent closing DB')
+  } finally { f.cleanup() }
+  t.end()
+})
+
+test('Proc reports close listener failures without recursive teardown', (t) => {
+  const f = fixture().startup()
+  const proc = f.procs[0]
+  const failure = new Error('close listener failed')
+  let later = 0
+  proc.on('close', () => { throw failure })
+  proc.on('close', () => { later++ })
+  proc.on('error', () => {
+    t.notOk(proc.isOpen)
+    proc.close()
+    throw new Error('error listener failed')
+  })
+  try {
+    proc.close()
+    const error = f.events[0].find(({ type }) => type === 'error').value
+    t.ok(error instanceof Err.ErrorWithCode)
+    t.equal(error.message, failure.message)
+    t.equal(error.stack, failure.stack)
+    t.deepEqual(f.events[0].map(({ type }) => type), ['close', 'error'])
+    t.equal(later, 1, 'the remaining close listener still runs')
+    proc.close()
+    t.equal(later, 1, 'repeated close does not emit another notification')
   } finally { f.cleanup() }
   t.end()
 })
@@ -442,16 +448,50 @@ test('Proc close failure reports an error and never confirms completed teardown'
   const f = fixture().startup()
   const proc = f.procs[0]
   const close = proc.store.close.bind(proc.store)
+  const failure = new Error('database close failed')
+  let attempts = 0
+  let repeated
   try {
-    proc.store.close = () => { throw new Error('database close failed') }
+    proc.store.close = () => { attempts++; throw failure }
+    proc.on('error', () => { repeated = f.request(0, { type: 'close' }) })
     const failed = f.request(0, { type: 'close' })
     t.equal(failed.type, 'err', 'cannot ACK an unfinished close')
     t.match(failed.message, /database close failed/)
+    t.equal(repeated.type, 'err', 'reentrant close request cannot ACK failed cleanup')
+    t.equal(repeated.stack, failure.stack, 'reentrant close retains the original stack')
     t.ok(proc.log.isOpen, 'failed close remains visible')
     proc.store.close = close
-    t.equal(f.request(0, { type: 'close' }).type, 'ack', 'later close can finish teardown')
-    t.notOk(proc.log.isOpen)
-  } finally { proc.store.close = close; f.cleanup() }
+    const again = f.request(0, { type: 'close' })
+    t.equal(again.type, 'err', 'removing the fault does not permit another cleanup attempt')
+    t.equal(again.message, failed.message)
+    t.equal(again.code, failed.code)
+    t.equal(again.stack, failed.stack)
+    t.equal(attempts, 1, 'cleanup executes once')
+    t.deepEqual(f.events[0].map(({ type }) => type), ['error'],
+      'failed and repeated close emit one diagnostic and no close event')
+    t.ok(proc.log.isOpen, 'failed cleanup requires stopping the owner process')
+  } finally { proc.store.close = close; f.cleanup([proc]) }
+  t.end()
+})
+
+test('Proc retains an engine cleanup failure even when the database closes', (t) => {
+  const f = fixture().startup()
+  const proc = f.procs[0]
+  const failure = new Err.ErrorWithCode('engine stop failed', Err.RAFT_ILLEGAL)
+  let attempts = 0
+  proc.engine.stop = () => { attempts++; throw failure }
+  try {
+    t.throws(() => proc.close(), (err) => err === failure)
+    t.notOk(proc.log.isOpen, 'database cleanup still completes')
+    t.throws(() => proc.close(), (err) => err === failure,
+      'closed database does not hide the earlier cleanup failure')
+    const reply = f.request(0, { type: 'close' })
+    t.equal(reply.type, 'err')
+    t.equal(reply.code, failure.code)
+    t.equal(reply.stack, failure.stack)
+    t.equal(attempts, 1)
+    t.deepEqual(f.events[0].map(({ type }) => type), ['error'])
+  } finally { f.cleanup([proc]) }
   t.end()
 })
 

@@ -170,6 +170,7 @@ test('public close shares its attempt with synchronous Proc close listeners', as
 
 test('public close shares a failed attempt with synchronous Proc error listeners', async (t) => {
   const requests = []
+  const failedOwners = []
   const c = cluster({
     local({ id, from, to, frame }) {
       if (id === 'a' && from === 'gate' && decodeFrame(frame).type === 'close') {
@@ -183,6 +184,7 @@ test('public close shares a failed attempt with synchronous Proc error listeners
     await c.open()
     await c.settled()
     const { gate, procA } = c.nodes.get('a')
+    failedOwners.push(procA)
     db = procA.db
     closeDatabase = db.close
     const failure = Object.assign(new Error('injected DB1 close failure'), {
@@ -209,36 +211,49 @@ test('public close shares a failed attempt with synchronous Proc error listeners
     })
     t.equal(reentrantClose, failedClose, 'the Proc error listener shares the failing attempt')
     t.equal(closeCalls, 1, 'the error listener does not retry the database close')
-    t.equal(procA.db, db, 'the failed database remains open for an explicit retry')
+    t.equal(procA.db, db, 'the failed owner retains its database until process exit')
     t.deepEqual(requests.sort(), ['apply', 'procA', 'procB', 'procC'],
       'the failing attempt sends one request to each owner')
     t.equal(closeEvents, 0, 'Gate reports no successful close during the failed attempt')
 
-    const retry = gate.close()
-    t.notEqual(retry, failedClose, 'a later explicit close starts a fresh attempt')
-    t.equal(gate.close(), retry, 'concurrent retries share the new attempt')
-    await retry
-    t.equal(closeCalls, 2, 'the later explicit retry closes the database once')
-    t.equal(procA.db, null, 'the retry releases the database')
-    t.equal(requests.length, 8, 'only the explicit retry sends another set of requests')
-    t.equal(closeEvents, 1, 'Gate emits close once after the successful retry')
-    t.equal(gate.close(), retry, 'successful retry remains idempotent')
+    const repeated = gate.close()
+    t.equal(repeated, failedClose, 'a later close retains the original failed attempt')
+    await assert.rejects(repeated, {
+      message: '(log close) injected DB1 close failure',
+      code: api.ErrorCodes.SQLITE_ERROR, sqlCode: 5, stack,
+    })
+    t.equal(closeCalls, 1, 'later calls do not retry the database close')
+    t.equal(procA.db, db, 'failed cleanup remains visible')
+    t.equal(requests.length, 4, 'later calls send no new requests')
+    t.equal(closeEvents, 0, 'failed cleanup never emits close')
+    t.equal(c.errors.filter(({ id, role }) => id === 'a' && role === 'procA').length, 1,
+      'the owning Proc reports its cleanup error once')
   } finally {
     if (db) { db.close = closeDatabase }
-    await c.close()
+    await c.close(failedOwners)
   }
   t.end()
 })
 
 for (const localDelay of [0, 2]) {
-  test(`public close retries after Apply database failure (${localDelay}ms local transport)`, async (t) => {
-    const c = cluster({ localDelay })
+  test(`public close retains Apply database failure (${localDelay}ms local transport)`, async (t) => {
+    const failedOwners = []
+    const requests = []
+    const c = cluster({
+      localDelay,
+      local({ id, from, to, frame }) {
+        if (id === 'a' && from === 'gate' && decodeFrame(frame).type === 'close') {
+          requests.push(to)
+        }
+      },
+    })
     let db
     let closeDatabase
     try {
       await c.open()
       await c.settled()
       const { gate, apply } = c.nodes.get('a')
+      failedOwners.push(apply)
       db = apply.db
       closeDatabase = db.close
       const failure = Object.assign(new Error('injected database close failure'), {
@@ -261,29 +276,39 @@ for (const localDelay of [0, 2]) {
       t.equal(db.prepare('SELECT 1 AS n').get().n, 1n, 'the failed close leaves the database open')
 
       db.close = closeDatabase
-      const retriedClose = gate.close()
-      t.notEqual(retriedClose, failedClose, 'an explicit retry starts a new attempt')
-      t.equal(gate.close(), retriedClose, 'concurrent retries share the new attempt')
-      await retriedClose
-      t.equal(apply.db, null, 'Gate waits for Apply to close after the failure is removed')
+      const repeatedClose = gate.close()
+      t.equal(repeatedClose, failedClose, 'later calls retain the original failed attempt')
+      await assert.rejects(repeatedClose, {
+        message: 'DB2 close injected database close failure',
+        code: api.ErrorCodes.SQLITE_ERROR, sqlCode: 5, stack,
+      })
+      t.equal(apply.db, db, 'removing the fault does not retry owner cleanup')
       t.ok(['procA', 'procB', 'procC'].every((role) => c.nodes.get('a')[role].db === null),
-        'all Proc databases are closed')
-      t.equal(closeEvents, 1, 'Gate emits close once after successful shutdown')
-      t.equal(gate.close(), retriedClose, 'successful close remains idempotent')
-      t.equal(closeEvents, 1, 'repeated successful close does not emit again')
+        'healthy Proc owners still close')
+      t.deepEqual(requests.sort(), ['apply', 'procA', 'procB', 'procC'],
+        'each owner receives one close request')
+      t.equal(closeEvents, 0, 'Gate never confirms failed coordinated cleanup')
+      t.equal(c.errors.filter(({ id, role }) => id === 'a' && role === 'apply').length, 1,
+        'Apply reports its cleanup error once')
     } finally {
       if (db) { db.close = closeDatabase }
-      await c.close()
+      await c.close(failedOwners)
     }
     t.end()
   })
 }
 
-test('public close retries after a busy Apply exceeds the close timeout', async (t) => {
+test('late Apply cleanup cannot change a failed coordinated close', async (t) => {
   let holdId
   let release
+  const requests = []
   const c = cluster({
     opts: { localTimeout: 250, applyTimeout: 2_000 },
+    local({ id, from, to, frame }) {
+      if (id === holdId && from === 'gate' && decodeFrame(frame).type === 'close') {
+        requests.push(to)
+      }
+    },
     apply(id, db, buffer, term, seq) {
       if (seq === 0n) {
         db.exec('CREATE TABLE items (value TEXT) STRICT')
@@ -308,17 +333,21 @@ test('public close retries after a busy Apply exceeds the close timeout', async 
     await until(() => release, 'Apply callback to start')
     let closeEvents = 0
     gate.on('close', () => { closeEvents++ })
-    await assert.rejects(gate.close(), { code: api.ErrorCodes.LOCAL_TIMEOUT })
+    const closing = gate.close()
+    await assert.rejects(closing, { code: api.ErrorCodes.LOCAL_TIMEOUT })
     await appendFailure
     t.equal(closeEvents, 0, 'timeout does not report successful owner shutdown')
     t.notEqual(node.apply.db, null, 'Apply still owns its database while the callback is pending')
 
     release()
     await until(() => node.apply.db === null, 'Apply to finish closing')
-    await gate.close()
+    t.equal(gate.close(), closing, 'late owner closure cannot replace the failed attempt')
+    await assert.rejects(gate.close(), { code: api.ErrorCodes.LOCAL_TIMEOUT })
     t.ok(['procA', 'procB', 'procC', 'apply'].every((role) => node[role].db === null),
-      'a later explicit close confirms all owners have stopped')
-    t.equal(closeEvents, 1, 'the successful retry emits close')
+      'owners may finish cleanup after Gate has already timed out')
+    t.deepEqual(requests.sort(), ['apply', 'procA', 'procB', 'procC'],
+      'no second set of close requests is sent')
+    t.equal(closeEvents, 0, 'late replies do not create a Gate close notification')
   } finally {
     release?.()
     await c.close()

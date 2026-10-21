@@ -202,18 +202,22 @@ deliver without loss once ready. Gate retries startup hello; later local
 timeouts stop the component that detects them. Gate's configurable
 `applyTimeout` defaults to 5,000 ms per Apply execution request.
 
-An unexpected component failure reports locally and stops that component;
-Gate and runtime Procs detect missing progress through timeouts. Gate failure
-or failed `open()` does not coordinate cleanup. Explicitly call `Gate.close()`
+A terminal failure stops component work before reporting its local error;
+a live Proc's quorum-impossible repair notice remains nonfatal. Gate and runtime
+Procs detect missing progress through timeouts. Gate failure or failed `open()`
+does not coordinate cleanup. Explicitly call `Gate.close()`
 or stop the owning processes before restarting; Gate emits `close` only after
-coordinated shutdown succeeds.
+coordinated shutdown succeeds. Cleanup is attempted once per component; failed
+database-owner processes must exit before replacement.
 
 `Supervisor` can keep Gate in the parent process and launch each Proc and Apply
 in its own child process. Its setup factory supplies Gate, child scripts, and
 optional transport readiness/cleanup callbacks; transport plumbing stays in
-your code. Failed groups restart only after the old owners exit.
+your code. The examples exit children on terminal errors; failed groups restart
+only after the old owners exit.
 `supervisor.close()` kills and awaits the children; `supervisor.drainCmd()`
-explicitly drains first. For production, an outer process manager must also
+explicitly drains first. Cleanup failure stops supervision (`isStopped`) and the
+examples exit the parent. For production, an outer process manager must also
 stop remaining owners before replacing a failed parent.
 
 All components share a local filesystem. The in-process arrangement remains

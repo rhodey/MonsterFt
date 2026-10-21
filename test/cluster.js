@@ -109,7 +109,7 @@ test('cluster leadership replacement catches up a stopped follower and resumes c
     await until(() => [...c.nodes.values()].every((node) =>
       node.apply.db.prepare('SELECT count(*) AS n FROM items').get().n === 7n), 'continued writes on all nodes')
     checkCopies(t, reopened)
-    t.ok(old.procA._closing, 'old Proc remains stopped')
+    t.ok(old.procA._stopped, 'old Proc remains stopped')
     t.equal(c.errors.length, 0)
   } finally { await c.close() }
   t.end()
@@ -206,6 +206,16 @@ test('cluster dissenting follower warns before its repair fence closes it', asyn
       t.equal(db.prepare('SELECT repair_state FROM monsterft_meta').get().repair_state, 2n,
         'repair fence is durable before shutdown')
     } finally { db.close() }
+    await c.nodes.get(dissenter).gate.close()
+    const before = c.calls.filter((call) => call.id === dissenter).length
+    const restarted = c.makeNode(dissenter)
+    const error = await restarted.gate.open().then(() => null, (err) => err)
+    t.equal(error.code, Err.LOCAL_TIMEOUT, 'reopening a repair-fenced node cannot complete startup')
+    t.equal(c.calls.filter((call) => call.id === dissenter).length, before,
+      'receipt recovery and the repair fence prevent completed setup and CMD work from repeating')
+    t.ok(roles.every((role) => !restarted[role].isOpen &&
+      restarted[role]._fatalError.code === Err.REPAIR_OUTSIDE_AGREEMENT),
+    'every restarted Proc reports its durable repair fence and stops')
   } finally { await c.close() }
   t.end()
 })

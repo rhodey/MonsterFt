@@ -302,8 +302,11 @@ test('idle drains, unapplied CMD suffixes, and commands received behind a repair
         const sync = pack({ type: 'sync', cmdSeq: 1n, quorum: false, agree: [], disagree: ['a', 'b', 'c'] })
         f.rpc(append({ seqP: 1n, termP: 1n, data: [record(1n, sync)], commitSeq: 2n }))
         const r2 = f.rpc(append({ seqP: 2n, termP: 1n, data: [record(1n, cmd())], commitSeq: 3n }))
+        t.equal(r2, undefined, 'a committed CMD behind the fence ends the input without a completion')
         t.equal(messages(r2, 'execute').length, 0, 'fenced node never executes a new CMD')
         t.notOk(f.proc.isOpen)
+        t.equal(f.diagnostics.filter(({ role, type }) => role === 'procA' && type === 'error').at(-1).error.code,
+          Err.REPAIR_QUORUM_IMPOSSIBLE, 'the same repair code is fatal when a later CMD reaches the fence')
         t.equal(f.state().meta.applied_seq, 2n)
         continue
       }
@@ -369,6 +372,8 @@ test('drain rejects on transaction loss, pending SYNC failure, and terminal clos
     let heldPage
     let dbClose
     let ownerDb
+    let closeCalls = 0
+    const failedOwners = []
     const c = cluster({
       opts: { localTimeout: 300, applyTimeout: 300 },
       async apply(id, db, data, term, seq) {
@@ -399,9 +404,13 @@ test('drain rejects on transaction loss, pending SYNC failure, and terminal clos
       node.gate.on('close', () => { closed++ })
       armed = true
       if (fault === 'close') {
+        failedOwners.push(node.apply)
         ownerDb = node.apply.db
         dbClose = ownerDb.close.bind(ownerDb)
-        ownerDb.close = () => { throw new Err.ErrorWithCode('terminal close failed', Err.SQLITE_ERROR, 10) }
+        ownerDb.close = () => {
+          closeCalls++
+          throw new Err.ErrorWithCode('terminal close failed', Err.SQLITE_ERROR, 10)
+        }
       } else {
         const work = c.leader().append(buf('during drain'))
         work.catch(() => {})
@@ -430,8 +439,19 @@ test('drain rejects on transaction loss, pending SYNC failure, and terminal clos
       'database owner reports the actual storage failure')
       armed = false
       if (dbClose) { ownerDb.close = dbClose }
-      await node.gate.close()
-      t.equal(closed, 1, 'explicit cleanup confirms closure after the fault is removed')
+      if (fault === 'close') {
+        t.equal(await rejection(node.gate.close()), err,
+          'close retains the cleanup failure discovered during drain')
+        t.equal(await rejection(node.gate.drainCmd()), err, 'repeated drain retains its failure')
+        t.equal(closeCalls, 1, 'cleanup is not retried after the fault is removed')
+        t.equal(closed, 0, 'terminal cleanup failure never reports successful close')
+        // Simulate the failed Apply process exiting before replacement.
+        ownerDb.close()
+        node.apply.db = null
+      } else {
+        await node.gate.close()
+        t.equal(closed, 1, 'first explicit cleanup succeeds after a protocol failure')
+      }
       if (fault === 'sync') {
         for (const suffix of ['a', 'b', 'c']) {
           const db = new DatabaseSync(`${c.directory}/${target}1${suffix}`)
@@ -452,7 +472,7 @@ test('drain rejects on transaction loss, pending SYNC failure, and terminal clos
       armed = false
       held.resolve()
       if (dbClose) { ownerDb.close = dbClose }
-      await c.close()
+      await c.close(failedOwners)
     }
   }
   t.end()

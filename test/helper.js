@@ -109,11 +109,18 @@ function cluster(options = {}) {
         node[role].engine.pendingCommand === null &&
         node[role].engine.appliedSeq === node[role].engine.commitSeq)), 'settled command protocol')
   }
-  const close = async () => {
+  const close = async (failedOwners = []) => {
     await Promise.all(gates().map((gate) => gate.close().catch(() => {})))
     for (const node of nodes.values()) {
-      for (const role of roles) { node[role].close() }
-      await node.apply.close()
+      // Release injected failed owners directly to simulate process exit.
+      for (const role of roles) {
+        if (failedOwners.includes(node[role])) { node[role].store.close() }
+        else { node[role].close() }
+      }
+      if (failedOwners.includes(node.apply)) {
+        node.apply.db?.close()
+        node.apply.db = null
+      } else { await node.apply.close() }
     }
     stopped = true
     for (const timer of timers) { clearTimeout(timer) }

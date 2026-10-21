@@ -38,11 +38,12 @@ class MonsterProc extends EventEmitter {
     this._outputs = null
     this._diagnostics = null
     this._watchdog = null
-    this._closing = false
+    this._stopped = false
+    this._closeError = null
     this._fatalError = null
   }
 
-  get isOpen() { return this._phase === 'runtime' && !this._closing }
+  get isOpen() { return this._phase === 'runtime' && !this._stopped }
   get log() { return this.store.log }
   get db() { return this.store.db }
 
@@ -51,13 +52,15 @@ class MonsterProc extends EventEmitter {
       try {
         listener.call(this, value)
       } catch (err) {
-        if (type !== 'error') { this._emitSafe('error', err) }
+        if (type === 'error') { continue }
+        if (this._stopped) { this._emitSafe('error', Err.wrapError(err)) }
+        else { this._fatal(err) }
       }
     }
   }
 
   _fatal(err) {
-    if (this._closing) { return }
+    if (this._stopped) { return }
     err = Err.wrapError(err)
     this._fatalError = err
     try { this._close(err) } catch { }
@@ -158,9 +161,12 @@ class MonsterProc extends EventEmitter {
     this._outputs = null
     this._diagnostics = null
     this._phase = 'runtime'
-    // Report and stop after committing a repair fence, before a fallible send.
-    if (fatalError) { this._fatal(fatalError) }
-    else { this._armWatchdog() }
+    // A repair fence is durable, but a terminal input publishes no outputs.
+    if (fatalError) {
+      this._fatal(fatalError)
+      return
+    }
+    this._armWatchdog()
     this._ack(message, { tickCount, outputs })
     for (const { type, error } of diagnostics) { this._emitSafe(type, error) }
   }
@@ -179,7 +185,7 @@ class MonsterProc extends EventEmitter {
         }
         return
       }
-      if (this._closing) { return }
+      if (this._stopped) { return }
       if (!isCid(message?.cid)) { throw illegal('Proc request cid is illegal') }
       if (message.type === 'hello') {
         if (this._pastHello) { throw illegal('Proc received hello after startup') }
@@ -228,7 +234,7 @@ class MonsterProc extends EventEmitter {
         throw illegal('Proc startup phase is illegal')
       }
     } catch (err) {
-      if (this._closing) { return }
+      if (this._stopped) { return }
       err = Err.wrapError(err)
       this._outputs = null
       this._diagnostics = null
@@ -239,8 +245,11 @@ class MonsterProc extends EventEmitter {
   close() { this._close() }
 
   _close(error = null) {
-    if (this._closing && !this.store.log.isOpen) { return }
-    this._closing = true
+    if (this._stopped) {
+      if (this._closeError !== null) { throw this._closeError }
+      return
+    }
+    this._stopped = true
     clearTimeout(this._watchdog)
     this._watchdog = null
     this._outputs = null
@@ -257,9 +266,10 @@ class MonsterProc extends EventEmitter {
     } catch (err) {
       failures.push(Err.wrapError(err))
     }
+    this._closeError = failures[0] ?? null
     if (error !== null) { this._emitSafe('error', error) }
     for (const failure of failures) { this._emitSafe('error', failure) }
-    if (failures.length > 0) { throw failures[0] }
+    if (this._closeError !== null) { throw this._closeError }
     this._emitSafe('close')
   }
 }

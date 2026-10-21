@@ -18,6 +18,9 @@ const read = (file, callback) => {
 }
 const closeServer = (server) => new Promise((resolve, reject) =>
   server.close((err) => err ? reject(err) : resolve()))
+const diagnostics = (base) => fs.existsSync(`${base}.diagnostics`)
+  ? fs.readFileSync(`${base}.diagnostics`, 'utf8').trim().split('\n').map(JSON.parse)
+  : []
 
 async function processCluster(options = {}) {
   const directory = fs.mkdtempSync('/tmp/mf-supervisor-')
@@ -228,7 +231,7 @@ test('Supervisor kills hung Apply, rolls back its transaction, and resumes commi
   t.end()
 })
 
-test('supervised owners deliver their final repair completion before process shutdown', async (t) => {
+test('supervised Proc errors exit before final repair completion and preserve the local fence', async (t) => {
   let target = null
   const completions = []
   const c = await processCluster({
@@ -248,45 +251,107 @@ test('supervised owners deliver their final repair completion before process shu
     const base = path.join(c.directory, target)
     const syncs = []
     run.gate.on('sync', (message) => syncs.push(message))
+    let stopped = null
+    supervisor.once('error', () => { stopped = supervisor.close() })
     fs.writeFileSync(`${base}.reject`, '')
     const result = await c.leader().append(Buffer.from('repair'))
     t.equal(result[1], 'repair', 'the healthy quorum still returns its accepted result')
-    const diagnostics = () => fs.existsSync(`${base}.diagnostics`)
-      ? fs.readFileSync(`${base}.diagnostics`, 'utf8').trim().split('\n').map(JSON.parse)
-      : []
-    await until(() => syncs.some((sync) => sync.cmdSeq === result[0]) &&
-      diagnostics().filter(({ role, code }) =>
-        roles.includes(role) && code === Err.REPAIR_OUTSIDE_AGREEMENT).length === 3,
-    'final repair SYNC and all local diagnostics')
+    await until(() => stopped, 'Supervisor detects immediate Proc exit')
+    await stopped
     const final = completions.find(({ role, message }) => role === 'procA' &&
       message.outputs.some((output) => {
         const envelope = decodePayload(output)
         return envelope.to === 'event' && envelope.message.type === 'sync' &&
           envelope.message.cmdSeq === result[0]
       }))
-    t.ok(final, 'ProcA sends the SYNC output despite closing its database')
-    await until(() => roles.every((role) => completions.some((completion) =>
-      completion.role === role && completion.message.cid === final.message.cid)),
-    'all final repair completions')
-    const local = diagnostics()
+    t.notOk(final, 'fatal repair sends no final completion')
+    t.notOk(syncs.some((sync) => sync.cmdSeq === result[0]),
+      'Gate cannot publish the unfinished repair input')
+    const local = diagnostics(base)
     t.deepEqual(local.filter(({ kind }) => kind === 'warn').map(({ role, code }) => [role, code]),
       [['apply', Err.APPLY_ERROR]], 'Apply keeps the dissent diagnostic local')
-    t.deepEqual(local.filter(({ code }) => code === Err.REPAIR_OUTSIDE_AGREEMENT)
-      .map(({ role }) => role).sort(), roles,
-    'each Proc reports its own repair fence')
-    t.ok(roles.every((role) =>
+    const repairs = local.filter(({ code }) => code === Err.REPAIR_OUTSIDE_AGREEMENT)
+    t.ok(repairs.length > 0, 'the failed Proc reports its own diagnostic before exit')
+    t.ok(repairs.every(({ open }) => open === false), 'fatal observers see a stopped Proc')
+    t.ok(repairs.every(({ role }) =>
       read(`${base}1${role.at(-1).toLowerCase()}`, readMeta).repair_state === 2n),
-    'all repair fences are durable before cleanup')
+    'each reported repair fence is durable before its process exits')
     t.ok([...run.children.values()].every((child) =>
-      child.exitCode === null && child.signalCode === null),
-    'component diagnostics and close notifications do not prematurely exit child scripts')
-    t.equal(supervisor.gate, run.gate, 'the final completion reaches the original Gate')
+      child.exitCode !== null || child.signalCode !== null),
+    'Supervisor reaps every old owner after the first Proc exits')
+    t.ok(repairs.some(({ role }) => run.children.get(role).exitCode === 1),
+      'the reporting child exits itself with failure')
     t.notOk(c.errors.some(({ id, role, error }) => id === target && role === 'gate' &&
       [Err.APPLY_ERROR, Err.REPAIR_OUTSIDE_AGREEMENT].includes(error.code)),
     'Gate does not mirror owner diagnostics')
-    await supervisor.close()
-    t.ok([...run.children.values()].every((child) => child.signalCode === 'SIGKILL'),
-      'explicit shutdown still kills and reaps all four owners')
+    t.equal(supervisor.gate, null)
+  } finally { await c.close() }
+  t.end()
+})
+
+test('supervised Apply warnings and live quorum-impossible diagnostics keep their owners running', async (t) => {
+  const c = await processCluster()
+  try {
+    await c.open()
+    const rejection = await c.leader().append(Buffer.from('reject')).catch((err) => err)
+    t.equal(rejection.message, 'agreed rejection')
+    await until(() => c.ids.every((id) => diagnostics(path.join(c.directory, id))
+      .some(({ role, kind, code }) => role === 'apply' && kind === 'warn' && code === Err.APPLY_ERROR)),
+    'ordinary warning on each Apply')
+    await c.settled()
+    t.ok(c.ids.every((id) => c.runs.get(id).length === 1),
+      'ordinary command rejection never restarts a child group')
+    t.ok(c.ids.every((id) => [...c.runs.get(id)[0].children.values()].every((child) =>
+      child.exitCode === null && child.signalCode === null)))
+
+    const impossible = await c.leader().append(Buffer.from('diverge')).catch((err) => err)
+    t.equal(impossible.code, Err.REPAIR_QUORUM_IMPOSSIBLE)
+    await until(() => c.ids.every((id) => diagnostics(path.join(c.directory, id))
+      .filter(({ role, code }) => roles.includes(role) && code === Err.REPAIR_QUORUM_IMPOSSIBLE)
+      .length === 3), 'live repair diagnostics from all nine Procs')
+    for (const id of c.ids) {
+      const base = path.join(c.directory, id)
+      const errors = diagnostics(base).filter(({ kind }) => kind === 'error')
+      t.ok(errors.every(({ code, open }) => code === Err.REPAIR_QUORUM_IMPOSSIBLE && open),
+        `${id}: only the live repair exception leaves its Proc open`)
+      t.ok(roles.every((role) =>
+        read(`${base}1${role.at(-1).toLowerCase()}`, readMeta).repair_state === 1n))
+    }
+    const ticks = new Map(c.gates().map((gate) => [gate, gate.tickCount]))
+    await until(() => [...ticks].every(([gate, tick]) => gate.isOpen && gate.tickCount > tick + 2n),
+      'continued protocol inputs after the nonfatal fence')
+    t.ok(c.ids.every((id) => c.runs.get(id).length === 1))
+    t.ok(c.ids.every((id) => [...c.runs.get(id)[0].children.values()].every((child) =>
+      child.exitCode === null && child.signalCode === null)))
+    t.deepEqual(c.errors, [], 'owner diagnostics stay local and cause no Supervisor restart')
+  } finally { await c.close() }
+  t.end()
+})
+
+test('a fatal Apply diagnostic exits its child and Supervisor replaces the group', async (t) => {
+  const c = await processCluster()
+  try {
+    await c.open()
+    const target = c.ids.find((id) => id !== c.leader().id)
+    const supervisor = c.supervisors.get(target)
+    const original = c.runs.get(target)[0]
+    const base = path.join(c.directory, target)
+    original.sockets.get('apply').write(Buffer.alloc(33))
+    await until(() => supervisor.gate?.isOpen && supervisor.gate !== original.gate,
+      'replacement after Apply exited', 10_000)
+    const reported = diagnostics(base).find(({ role, kind }) => role === 'apply' && kind === 'error')
+    t.equal(reported.code, Err.FRAME_CORRUPT)
+    t.equal(reported.open, false, 'Apply marks itself stopped before the child diagnostic')
+    t.equal(original.children.get('apply').exitCode, 1, 'Apply exits without waiting for Gate timeout')
+    t.ok([...original.children.values()].every((child) =>
+      child.exitCode !== null || child.signalCode !== null))
+    t.notOk(c.errors.some(({ role, error }) => role === 'gate' && error.code === Err.FRAME_CORRUPT),
+      'Gate does not mirror the Apply error')
+    t.equal(fs.readFileSync(`${base}.calls`, 'utf8').trim().split('\n')
+      .filter((seq) => seq === '0').length, 1, 'completed setup is not repeated')
+    await until(() => supervisor.gate.leader !== null, 'replacement learns its leader')
+    t.equal((await supervisor.gate.append(Buffer.from('after fatal')))[1], 'after fatal',
+      'Supervisor parent continues serving after child replacement')
   } finally { await c.close() }
   t.end()
 })

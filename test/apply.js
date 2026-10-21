@@ -58,8 +58,9 @@ function fixture(apply) {
         matchIndex: seq === 0n ? null : [-1n, 0n, seq - 1n], ...extra,
       })
     },
-    async close() {
-      await component.close()
+    async close(failed = false) {
+      if (failed) { component.db?.close() }
+      else { await component.close() }
       fs.rmSync(dir, { recursive: true, force: true })
     },
   }
@@ -121,15 +122,12 @@ test('Apply retains failed-item diagnostics, rolls back items, and preserves out
   try {
     await f.start()
     await f.execute(0n, null)
-    const listenerError = new Error('listener throw')
     const warnings = []
-    f.component.prependListener('error', () => { throw new Error('error listener throw') })
     f.component.on('warn', (warning) => {
       warnings.push({ message: warning.message, code: warning.code, stack: warning.stack })
       warning.message = 'listener mutation'
       warning.code = 999
       warning.stack = 'changed stack'
-      throw listenerError
     })
     let laterWarnings = 0
     f.component.on('warn', () => { laterWarnings++ })
@@ -137,10 +135,9 @@ test('Apply retains failed-item diagnostics, rolls back items, and preserves out
     t.equal(result.type, 'ack', 'ordinary failures are agreed outcomes')
     t.notOk(Object.hasOwn(result, 'warnings'), 'execution ACK carries no diagnostics')
     t.equal(warnings.length, 3)
-    t.equal(laterWarnings, 3, 'throwing listeners cannot hide warnings from later listeners')
-    t.equal(f.diagnostics.filter(({ type, err }) =>
-      type === 'error' && err === listenerError).length, 3,
-    'later error listeners receive the original exception even if an earlier one throws')
+    t.equal(laterWarnings, 3, 'every warning reaches later listeners')
+    t.equal(f.diagnostics.filter(({ type }) => type === 'error').length, 0)
+    t.ok(f.component.isOpen, 'ordinary rejected items leave Apply running')
     t.ok(warnings.every((warning) => warning.code === Err.APPLY_ERROR))
     t.deepEqual(result.outcomes[1], [1, 'rejected item', 123, 456, original.stack])
     t.equal(warnings[0].stack, original.stack)
@@ -183,6 +180,12 @@ test('Apply fatal transaction loss and rollback failures preserve the original e
     try {
       await f.start()
       await f.execute(0n, null)
+      const events = []
+      f.component.on('error', () => {
+        t.notOk(f.component.isOpen, 'Apply stops before reporting an error')
+        events.push('error')
+      })
+      f.component.on('close', () => { events.push('close') })
       if (mode === 'rollback failure') {
         const exec = f.component.db.exec.bind(f.component.db)
         f.component.db.exec = (sql) => {
@@ -196,9 +199,8 @@ test('Apply fatal transaction loss and rollback failures preserve the original e
       const fatal = f.diagnostics.filter(({ type }) => type === 'error').at(-1).err
       t.equal(fatal.code, Err.APPLY_ERROR)
       t.equal(f.diagnostics.filter(({ type }) => type === 'warn').length, 1)
-      const events = f.diagnostics.map((event) => event.type)
-      t.equal(events[0], 'warn', 'item warning precedes fatal reporting')
-      t.notOk(events.includes('fatal'), 'error is the only public fatal diagnostic')
+      t.equal(f.diagnostics[0].type, 'warn', 'item warning precedes fatal reporting')
+      t.deepEqual(events, ['error', 'close'], 'one terminal error precedes cleanup notification')
       if (mode === 'rollback failure') {
         t.ok(f.diagnostics.some(({ err }) => err.stack === original.stack),
           'rollback failure does not hide the original trace')
@@ -250,16 +252,24 @@ test('Apply close waits for callbacks and suppresses late completion', async (t)
   t.end()
 })
 
-test('Apply replies with the close error and acknowledges only successful teardown', async (t) => {
+test('Apply retains its failed close and never retries or acknowledges cleanup', async (t) => {
   const f = fixture(() => null)
   let db
   let close
   try {
     await f.start()
+    let closed = 0
+    let attempts = 0
+    let reentrant
+    f.component.on('close', () => { closed++ })
+    f.component.on('error', () => {
+      t.notOk(f.component.isOpen, 'failed cleanup reports after Apply stops')
+      reentrant = f.component.close()
+    })
     db = f.component.db
     close = db.close.bind(db)
     const original = new Err.ErrorWithCode('injected close failure', Err.SQLITE_ERROR, 10)
-    db.close = () => { throw original }
+    db.close = () => { attempts++; throw original }
     const reply = await f.request({ type: 'close', cid: 'failed-close' })
     t.equal(reply?.type, 'err', 'failed teardown returns ERR instead of timing out')
     t.equal(reply?.cid, 'failed-close', 'error refers to the close request')
@@ -267,15 +277,31 @@ test('Apply replies with the close error and acknowledges only successful teardo
     t.equal(reply?.code, Err.SQLITE_ERROR)
     t.equal(reply?.sqlCode, 10)
     t.equal(reply?.stack, original.stack, 'error keeps the original trace')
-    t.equal(f.component.db, db, 'failed close retains the connection for cleanup')
+    t.equal(f.component.db, db, 'failed close retains the unclosed connection')
     t.equal(f.diagnostics.filter(({ type }) => type === 'error').length, 1,
       'close failure is also reported locally once')
+    t.equal(closed, 0, 'failed cleanup cannot emit close')
+    const work = f.component.close()
+    t.equal(reentrant, work, 'reentrant close shares the original cleanup promise')
+    t.equal(f.component.close(), work, 'later close shares the original cleanup promise')
+    await work.then(() => t.fail('failed cleanup cannot resolve'), (err) => {
+      t.equal(err, original, 'later close preserves the original failure object')
+    })
     db.close = close
-    t.equal((await f.request({ type: 'close' })).type, 'ack', 'retry confirms successful teardown')
-    t.equal(f.component.db, null)
+    const repeated = await f.request({ type: 'close' })
+    t.equal(repeated.type, 'err', 'removing the fault cannot make a later close succeed')
+    t.equal(repeated.message, reply.message)
+    t.equal(repeated.code, reply.code)
+    t.equal(repeated.sqlCode, reply.sqlCode)
+    t.equal(repeated.stack, reply.stack)
+    t.equal(attempts, 1, 'cleanup executes once')
+    t.equal(f.component.db, db, 'later calls leave the failed owner unchanged')
+    t.equal(closed, 0)
+    t.equal(f.diagnostics.filter(({ type }) => type === 'error').length, 1,
+      'repeated close does not emit the cleanup diagnostic again')
   } finally {
     if (db && close) { db.close = close }
-    await f.close()
+    await f.close(true)
   }
   t.end()
 })
@@ -306,6 +332,102 @@ test('Apply warning listeners may close without subsequent item work', async (t)
   t.end()
 })
 
+test('Apply stops when a warning listener throws, including during reentrant close', async (t) => {
+  for (const closeFirst of [false, true]) {
+    let calls = 0
+    const f = fixture((db, data, term, seq) => {
+      if (seq === 0n) { db.exec(schema); return }
+      calls++
+      db.exec('INSERT INTO items VALUES (1, 2)')
+      throw new Error('rejected item')
+    })
+    try {
+      await f.start()
+      await f.execute(0n, null)
+      const original = new Err.ErrorWithCode('warning listener failed', 321, 654)
+      const events = []
+      const laterSql = []
+      let reported = false
+      let repeatedClose
+      let reentrantExecution
+      const exec = f.component.db.exec.bind(f.component.db)
+      f.component.db.exec = (sql) => {
+        if (reported) { laterSql.push(sql) }
+        return exec(sql)
+      }
+      f.component.prependListener('error', () => { throw new Error('error listener failed') })
+      f.component.on('error', (err) => {
+        reported = true
+        events.push('error')
+        t.notOk(f.component.isOpen, 'error listeners observe stopped Apply')
+        t.equal(err, original, 'existing ErrorWithCode is preserved')
+        repeatedClose = f.component.close()
+        reentrantExecution = f.execute(2n, [buf('reentrant')])
+      })
+      f.component.on('close', () => { events.push('close') })
+      f.component.on('warn', () => {
+        if (closeFirst) { f.component.close() }
+        throw original
+      })
+      let laterWarnings = 0
+      f.component.on('warn', () => { laterWarnings++ })
+      t.equal(await f.execute(1n, [buf('first'), buf('second')]), undefined)
+      await f.component.close()
+      t.equal(repeatedClose, f.component.close(), 'reentrant close reuses the same teardown')
+      t.equal(await reentrantExecution, undefined, 'reentrant execution is rejected quietly')
+      t.equal(calls, 1, 'no later item or reentrant callback runs')
+      t.equal(laterWarnings, 1, 'remaining warning listeners receive the current warning')
+      t.deepEqual(laterSql, [], 'no item SQL or commit follows the listener failure')
+      t.deepEqual(events, ['error', 'close'], 'error precedes a single cleanup notification')
+      const diagnostic = f.diagnostics.find(({ type }) => type === 'error').err
+      t.equal(diagnostic.code, 321)
+      t.equal(diagnostic.sqlCode, 654)
+      t.equal(diagnostic.stack, original.stack)
+      const db = new DatabaseSync(`${f.base}2`, { readOnly: true, readBigInts: true })
+      try {
+        t.equal(readApply(db).seq, 0n, 'the receipt remains at setup')
+        t.equal(db.prepare('SELECT count(*) AS n FROM items').get().n, 0n,
+          'shutdown rolls back all uncommitted item writes')
+      } finally { db.close() }
+    } finally { await f.close() }
+  }
+  t.end()
+})
+
+test('Apply reports close listener failures without repeating teardown', async (t) => {
+  const f = fixture(() => null)
+  try {
+    await f.start()
+    const original = Object.assign(new Error('close listener failed'), {
+      code: 'ERR_SQLITE_ERROR', errcode: 5,
+    })
+    const events = []
+    let closes = 0
+    let repeatedClose
+    const close = f.component.db.close.bind(f.component.db)
+    f.component.db.close = () => { closes++; close() }
+    f.component.prependListener('error', () => { throw new Error('error listener failed') })
+    f.component.on('error', (err) => {
+      events.push('error')
+      t.notOk(f.component.isOpen)
+      t.equal(f.component.db, null, 'cleanup succeeded before the close listener ran')
+      t.equal(err.code, Err.SQLITE_ERROR, 'listener errors are normalized')
+      t.equal(err.sqlCode, 5)
+      t.equal(err.stack, original.stack)
+      repeatedClose = f.component.close()
+    })
+    f.component.on('close', () => { events.push('close'); throw original })
+    f.component.on('close', () => { events.push('later close listener') })
+    const closing = f.component.close()
+    await closing
+    t.equal(repeatedClose, closing)
+    t.equal(closes, 1, 'an error from close cannot restart database teardown')
+    t.deepEqual(events, ['close', 'error', 'later close listener'])
+    t.equal(f.diagnostics.length, 1, 'a throwing error listener cannot hide the original error')
+  } finally { await f.close() }
+  t.end()
+})
+
 test('Apply setup errors stay fatal without per-item warnings and cannot commit ended transactions', async (t) => {
   for (const mode of ['throw', 'ended']) {
     const f = fixture((db) => {
@@ -315,8 +437,15 @@ test('Apply setup errors stay fatal without per-item warnings and cannot commit 
     })
     try {
       await f.start()
+      const events = []
+      f.component.on('error', () => {
+        t.notOk(f.component.isOpen, 'fatal setup error observes stopped Apply')
+        events.push('error')
+      })
+      f.component.on('close', () => { events.push('close') })
       const reply = await f.execute(0n, null)
       await f.component.close()
+      t.deepEqual(events, ['error', 'close'], 'setup failure reports before successful cleanup')
       t.equal(reply, undefined, 'fatal setup failure sends no reply')
       const diagnostic = f.diagnostics.find(({ type }) => type === 'error').err
       t.equal(diagnostic.code, Err.APPLY_ERROR)
@@ -567,7 +696,9 @@ test('session, receipt, disk-full and RELEASE failures abort the entire CMD', as
       const last = errors.at(-1)
       t.equal(last.code, Err.APPLY_ERROR)
       if (mode === 'release') {
-        t.ok(errors.some((err) => err.stack === original.stack), 'cleanup cannot hide original trace')
+        t.equal(errors.length, 1, 'rollback failure produces one terminal error')
+        t.ok(f.diagnostics.some(({ type, err }) => type === 'warn' && err.stack === original.stack),
+          'the original callback trace remains in its warning')
         t.match(last.message, /DB2 item rollback release failed/)
       } else if (mode === 'disk full') {
         t.ok(lostTransaction, 'real SQLITE_FULL ends the transaction')

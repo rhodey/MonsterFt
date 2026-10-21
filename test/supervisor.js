@@ -117,7 +117,10 @@ test('Supervisor launches four children with a transport-independent Gate and fo
   const h = harness()
   try {
     t.equal(h.supervisor.gate, null)
-    t.equal(await h.supervisor.open(), undefined)
+    t.equal(h.supervisor.isStopped, false, 'new supervisor can start')
+    const opening = h.supervisor.open()
+    t.equal(h.supervisor.isStopped, false, 'startup is not stopped')
+    t.equal(await opening, undefined)
     const run = h.runs[0]
     t.equal(h.supervisor.gate, run.gate)
     t.deepEqual(h.opens, [run.gate])
@@ -131,6 +134,7 @@ test('Supervisor launches four children with a transport-independent Gate and fo
     t.equal(await h.supervisor.open(), undefined)
     t.equal(h.runs.length, 1, 'repeated open retains the live attempt')
     const closing = h.supervisor.close()
+    t.equal(h.supervisor.isStopped, true, 'close disables retries immediately')
     t.equal(run.gate.isOpen, false, 'close stops command admission before returning')
     await Promise.all([closing, h.supervisor.close()])
     t.ok(children.every((child) => child.signalCode === 'SIGKILL'),
@@ -161,6 +165,7 @@ test('Supervisor reaps the old group before restarting after a child exits', asy
   })
   h.supervisor.on('error', () => {
     stoppedBeforeReport = h.supervisor.gate?.isOpen === false
+    t.equal(h.supervisor.isStopped, false, 'ordinary child failure still permits restart')
   })
   try {
     await h.supervisor.open()
@@ -180,22 +185,59 @@ test('Supervisor reaps the old group before restarting after a child exits', asy
   t.end()
 })
 
-test('Supervisor restarts a fatal Gate but leaves nonfatal diagnostics local', async (t) => {
+test('Supervisor restarts a fatal Gate without mirroring its diagnostic', async (t) => {
   const h = harness()
   try {
     await h.supervisor.open()
     const run = h.runs[0]
-    const nonfatal = new Err.ErrorWithCode('quorum impossible', Err.REPAIR_QUORUM_IMPOSSIBLE)
-    run.gate.emit('error', nonfatal)
-    await pause(20)
-    t.equal(h.runs.length, 1)
-    t.deepEqual(h.errors, [], 'Supervisor does not mirror Gate diagnostics')
     run.gate.onReceive('b', Buffer.alloc(33))
     await until(() => h.opens.length === 2, 'replacement after Gate fatal')
     t.equal(run.diagnostics.at(-1).code, Err.FRAME_CORRUPT)
     t.ok([...run.children.values()].every(exited))
     t.notOk(h.errors.some((err) => err.code === Err.FRAME_CORRUPT),
       'Gate remains the owner of the original fatal diagnostic')
+  } finally { await h.supervisor.close() }
+  t.end()
+})
+
+test('Gate listener failures restart its group while Supervisor diagnostics remain nonterminal', async (t) => {
+  const h = harness({
+    local(run, to, message, reply) {
+      if (run.number !== 0 || message.kind !== 'append') { return false }
+      const outputs = [wire.encodePayload({
+        to: 'event', message: { type: 'change', status: {} },
+      }), wire.encodePayload({
+        to: 'client', message: {
+          type: 'ack', cid: message.requestId, cmdSeq: 1n, results: [[0, 'must not escape']],
+        },
+      })]
+      reply(to, {
+        type: 'ack', cid: message.cid,
+        outputs: to === 'procA' ? outputs : outputs.map(wire.checksum),
+      })
+      return true
+    },
+  })
+  const supervisorFailure = new Error('Supervisor listener failed')
+  h.supervisor.once('open', () => { throw supervisorFailure })
+  try {
+    await h.supervisor.open()
+    const original = h.runs[0]
+    t.equal(h.errors[0].message, supervisorFailure.message)
+    t.ok(original.gate.isOpen, 'Supervisor listener diagnostic does not stop Gate')
+    t.equal(h.runs.length, 1)
+    const gateFailure = new Error('Gate listener failed')
+    let stoppedBeforeError = false
+    original.gate.on('error', () => { stoppedBeforeError = !original.gate.isOpen })
+    original.gate.once('change', () => { throw gateFailure })
+    const failure = await original.gate.append(Buffer.from('stopped')).catch((err) => err)
+    t.equal(failure.message, gateFailure.message, 'queued success cannot escape after listener failure')
+    t.equal(failure.stack, gateFailure.stack)
+    t.ok(stoppedBeforeError)
+    await until(() => h.opens.length === 2, 'replacement after Gate listener failed')
+    t.ok([...original.children.values()].every(exited))
+    t.equal(h.errors.length, 1, 'Gate retains its diagnostic without Supervisor forwarding')
+    t.deepEqual(await h.supervisor.gate.append(Buffer.from('continued')), [1n, 'continued'])
   } finally { await h.supervisor.close() }
   t.end()
 })
@@ -330,6 +372,7 @@ test('Supervisor close cancels restart delay and does not replace failed owners'
     h.runs[0].children.get('apply').kill('SIGKILL')
     await until(() => h.runs[0].cleaned === 1, 'old group cleanup')
     t.equal(h.supervisor.gate, null)
+    t.equal(h.supervisor.isStopped, false, 'waiting to restart is not permanently stopped')
     await h.supervisor.close()
     await pause(220)
     t.equal(h.runs.length, 1)
@@ -338,11 +381,19 @@ test('Supervisor close cancels restart delay and does not replace failed owners'
   t.end()
 })
 
-test('Supervisor cleanup failure prevents replacement and explicit close can retry', async (t) => {
+test('Supervisor cleanup failure prevents replacement and is never retried', async (t) => {
   const failure = new Error('transport cleanup failed')
-  let fail = true
   const h = harness({
-    cleanup() { if (fail) { throw failure } },
+    cleanup() { throw failure },
+  })
+  let diagnostic
+  let closing
+  h.supervisor.on('error', (err) => {
+    if (err.message !== failure.message) { return }
+    diagnostic = err
+    t.equal(h.supervisor.isStopped, true, 'terminal state precedes cleanup diagnostic')
+    closing = h.supervisor.close()
+    closing.catch(() => {})
   })
   try {
     await h.supervisor.open()
@@ -351,23 +402,24 @@ test('Supervisor cleanup failure prevents replacement and explicit close can ret
     await pause(30)
     t.equal(h.runs.length, 1, 'failed cleanup prohibits automatic replacement')
     t.ok([...h.runs[0].children.values()].every(exited))
-    const error = await h.supervisor.close().catch((err) => err)
+    t.equal(h.supervisor.close(), closing, 'reentrant close shares the cached operation')
+    const error = await closing.catch((err) => err)
+    t.equal(error, diagnostic, 'close retains the terminal cleanup diagnostic')
     t.equal(error.code, Err.SUPERVISOR_ERROR)
     t.match(error.message, /transport cleanup failed/)
     t.equal(h.closes, 0, 'failed cleanup cannot advertise successful close')
-    fail = false
-    await h.supervisor.close()
-    t.equal(h.closes, 1)
+    t.equal(await h.supervisor.close().catch((err) => err), error,
+      'later close returns the same failure')
+    t.equal(h.runs[0].cleaned, 1, 'cleanup is attempted only once')
     t.equal(h.runs.length, 1)
-  } finally { fail = false; await h.supervisor.close() }
+  } finally { await h.supervisor.close().catch(() => {}) }
   t.end()
 })
 
 test('Supervisor rejects initial open if failed startup cannot clean up', async (t) => {
-  let cleanupFails = true
   const h = harness({
     ready() { throw new Error('readiness failed') },
-    cleanup() { if (cleanupFails) { throw new Error('cannot remove transport') } },
+    cleanup() { throw new Error('cannot remove transport') },
   })
   try {
     const failure = await h.supervisor.open().catch((err) => err)
@@ -376,11 +428,81 @@ test('Supervisor rejects initial open if failed startup cannot clean up', async 
     t.equal(h.runs.length, 1)
     t.equal(h.opens.length, 0)
     t.ok(h.runs[0].exitedAtCleanup)
-    cleanupFails = false
-    await h.supervisor.close()
-    t.equal(h.runs.length, 1, 'cleanup retry never starts another owner')
-    t.equal(h.closes, 1)
-  } finally { cleanupFails = false; await h.supervisor.close() }
+    t.equal(h.supervisor.isStopped, true)
+    t.equal(await h.supervisor.close().catch((err) => err), failure)
+    t.equal(h.runs[0].cleaned, 1, 'close cannot repeat failed startup cleanup')
+    t.equal(h.runs.length, 1)
+    t.equal(h.closes, 0)
+  } finally { await h.supervisor.close().catch(() => {}) }
+  t.end()
+})
+
+test('Supervisor caches explicit close failure while supervision also awaits cleanup', async (t) => {
+  const cleanup = deferred()
+  const failure = new Error('delayed cleanup failure')
+  const h = harness({ cleanup: () => cleanup.promise })
+  let diagnostic
+  h.supervisor.on('error', (err) => {
+    diagnostic = err
+    t.equal(h.supervisor.isStopped, true, 'cleanup error observes permanent shutdown')
+  })
+  try {
+    await h.supervisor.open()
+    const closing = h.supervisor.close()
+    closing.catch(() => {})
+    t.equal(h.supervisor.close(), closing)
+    await until(() => h.runs[0].cleaned === 1, 'transport cleanup started')
+    t.ok(h.runs[0].exitedAtCleanup)
+    t.equal(h.supervisor.isStopped, true, 'stopped does not claim cleanup succeeded')
+    cleanup.reject(failure)
+    const error = await closing.catch((err) => err)
+    await until(() => diagnostic !== undefined, 'terminal cleanup diagnostic')
+    t.equal(error, diagnostic)
+    t.equal(error.stack, failure.stack)
+    t.equal(await h.supervisor.close().catch((err) => err), error)
+    t.equal(h.runs[0].cleaned, 1)
+    t.equal(h.closes, 0)
+  } finally {
+    cleanup.resolve()
+    await h.supervisor.close().catch(() => {})
+  }
+  t.end()
+})
+
+test('Supervisor never retries failed owner termination or replaces an unconfirmed owner', async (t) => {
+  const h = harness()
+  const failure = new Error('cannot kill owner')
+  let owner
+  let kill
+  let attempts = 0
+  try {
+    await h.supervisor.open()
+    const run = h.runs[0]
+    owner = run.children.get('procA')
+    kill = owner.kill.bind(owner)
+    owner.kill = () => { attempts += 1; throw failure }
+    run.children.get('procC').kill('SIGKILL')
+    await until(() => h.supervisor.isStopped, 'terminal owner cleanup failure')
+    t.notOk(exited(owner), 'failed termination leaves ownership unconfirmed')
+    t.ok([...run.children.values()].filter((child) => child !== owner).every(exited),
+      'remaining children are killed and reaped before failure returns')
+    const error = await h.supervisor.close().catch((err) => err)
+    t.equal(error.code, Err.SUPERVISOR_ERROR)
+    t.equal(error.stack, failure.stack)
+    t.equal(await h.supervisor.close().catch((err) => err), error)
+    t.equal(attempts, 1, 'explicit close cannot retry failed termination')
+    t.equal(run.cleaned, 0, 'transport cleanup cannot run before every owner exits')
+    t.equal(h.closes, 0)
+    await pause(20)
+    t.equal(h.runs.length, 1, 'no replacement can open databases still owned by a child')
+  } finally {
+    if (owner && !exited(owner)) {
+      const done = new Promise((resolve) => owner.once('exit', resolve))
+      kill('SIGKILL')
+      await done
+    }
+    await h.supervisor.close().catch(() => {})
+  }
   t.end()
 })
 
@@ -390,6 +512,7 @@ test('Supervisor explicit drain coordinates Gate close before reaping children',
     await h.supervisor.open()
     const run = h.runs[0]
     const draining = h.supervisor.drainCmd()
+    t.equal(h.supervisor.isStopped, true, 'drain disables retries before cleanup')
     const append = run.gate.append(Buffer.from('too late')).catch((err) => err)
     const batch = run.gate.appendBatch([Buffer.from('too late')]).catch((err) => err)
     t.equal((await append).code, Err.DRAINING, 'drain closes single-command admission immediately')

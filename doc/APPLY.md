@@ -15,8 +15,8 @@ no findings
 
 ## `_emitSafe`
 
-Delivers events while containing listener failures and reporting them as errors
-where possible.
+Delivers events and stops Apply when a non-error listener throws. Error-listener
+exceptions remain contained so later listeners receive the diagnostic.
 
 ### findings
 
@@ -24,8 +24,8 @@ no findings
 
 ## `_fatal`
 
-Begins closing Apply after an unrecoverable failure and reports its error
-locally.
+Stops new Apply work and reports an unrecoverable error locally before cleanup
+can emit close.
 
 ### findings
 
@@ -83,6 +83,7 @@ DB2 changes, preserving individual command failures as outcomes and local warnin
 ## `close`
 
 Stops accepting work, waits for any active execution to settle, and closes DB2.
+Repeated calls share the original cleanup result, including failure.
 
 ### findings
 

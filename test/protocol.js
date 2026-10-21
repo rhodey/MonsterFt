@@ -52,63 +52,65 @@ test('impossible command agreement persists a nonfatal fence on every node', asy
   t.end()
 })
 
-test('dissenting leader reports its original apply warning then fences before replacement leadership', async (t) => {
-  let dissenter = null
-  const c = cluster({
-    apply(id, db, data, term, seq) {
-      if (seq === 0n) { db.exec(schema); return null }
-      if (id === dissenter) {
-        const err = new Error('leader apply failed')
-        err.stack = 'original dissenting leader trace'
-        throw err
+for (const forwarded of [false, true]) {
+  test(`dissenting leader fences before its ${forwarded ? 'forwarded' : 'local'} caller learns of failure`, async (t) => {
+    let dissenter = null
+    const c = cluster({
+      apply(id, db, data, term, seq) {
+        if (seq === 0n) { db.exec(schema); return null }
+        if (id === dissenter) {
+          const err = new Error('leader apply failed')
+          err.stack = 'original dissenting leader trace'
+          throw err
+        }
+        db.prepare('INSERT INTO items (value) VALUES (?)').run(data)
+        return data.toString()
+      },
+    })
+    try {
+      await c.open()
+      dissenter = c.leader().id
+      const original = c.nodes.get(dissenter)
+      const events = []
+      original.apply.on('warn', (err) => events.push(['warn', err]))
+      original.procA.on('error', (err) => events.push(['error', err]))
+      const caller = forwarded ? c.gates().find((gate) => gate.id !== dissenter) : original.gate
+      const rejection = await caller.append(buffer('first')).then(() => null, (err) => err)
+      t.equal(rejection.code, forwarded ? Err.APPEND_TIMEOUT : Err.LOCAL_TIMEOUT,
+        'the caller learns of missing progress because fatal repair sends no final result')
+      await until(() => !original.gate.isOpen, 'dissenting leader closes')
+      t.equal(c.errors.find(({ id, role }) => id === dissenter && role === 'gate')?.error.code,
+        Err.LOCAL_TIMEOUT, 'Gate detects stopped Procs through its own completion timeout')
+      t.equal(c.warnings.filter(({ role }) => role === 'gate').length, 0,
+        'Apply warning is not mirrored at Gate')
+      await original.gate.close()
+      const relevant = events.filter(([, err]) =>
+        err.code === Err.APPLY_ERROR || err.code === Err.REPAIR_OUTSIDE_AGREEMENT)
+      t.equal(relevant[0][0], 'warn')
+      t.equal(relevant[0][1].stack, 'original dissenting leader trace')
+      t.equal(relevant[1][0], 'error')
+      t.equal(relevant[1][1].code, Err.REPAIR_OUTSIDE_AGREEMENT)
+      for (const suffix of ['a', 'b', 'c']) {
+        const db = new DatabaseSync(`${c.directory}/${dissenter}1${suffix}`, { readOnly: true, readBigInts: true })
+        try {
+          const meta = readMeta(db)
+          t.equal(meta.repair_state, 2n, 'intentional repair fence survives shutdown')
+          t.notEqual(meta.pending_cmd_seq, null, 'leader preserves the unresolved command for repair')
+        } finally { db.close() }
       }
-      db.prepare('INSERT INTO items (value) VALUES (?)').run(data)
-      return data.toString()
-    },
+      const replacement = await until(() => c.leader([dissenter]), 'healthy replacement leader')
+      await c.settled()
+      t.equal((await replacement.append(buffer('second')))[1], 'second')
+      await c.settled()
+      for (const node of [...c.nodes.values()].filter((node) => node.gate.isOpen)) {
+        t.deepEqual(writes(node.apply.db), ['first', 'second'])
+        t.equal(c.calls.filter((call) => call.id === node.gate.id && call.seq > 0n).length, 2,
+          'replacement resolves the first command without reapplying it')
+      }
+    } finally { await c.close() }
+    t.end()
   })
-  try {
-    await c.open()
-    dissenter = c.leader().id
-    const original = c.nodes.get(dissenter)
-    const events = []
-    original.apply.on('warn', (err) => events.push(['warn', err]))
-    original.procA.on('error', (err) => events.push(['error', err]))
-    const caller = c.gates().find((gate) => gate.id !== dissenter)
-    const rejection = await caller.append(buffer('first')).then(() => null, (err) => err)
-    t.equal(rejection.code, Err.REPAIR_OUTSIDE_AGREEMENT,
-      'forwarded caller receives the repair error before the leader shuts down')
-    await until(() => !original.gate.isOpen, 'dissenting leader closes')
-    t.equal(c.errors.find(({ id, role }) => id === dissenter && role === 'gate')?.error.code,
-      Err.LOCAL_TIMEOUT, 'Gate detects stopped Procs through its own completion timeout')
-    t.equal(c.warnings.filter(({ role }) => role === 'gate').length, 0,
-      'Apply warning is not mirrored at Gate')
-    await original.gate.close()
-    const relevant = events.filter(([, err]) =>
-      err.code === Err.APPLY_ERROR || err.code === Err.REPAIR_OUTSIDE_AGREEMENT)
-    t.equal(relevant[0][0], 'warn')
-    t.equal(relevant[0][1].stack, 'original dissenting leader trace')
-    t.equal(relevant[1][0], 'error')
-    t.equal(relevant[1][1].code, Err.REPAIR_OUTSIDE_AGREEMENT)
-    for (const suffix of ['a', 'b', 'c']) {
-      const db = new DatabaseSync(`${c.directory}/${dissenter}1${suffix}`, { readOnly: true, readBigInts: true })
-      try {
-        const meta = readMeta(db)
-        t.equal(meta.repair_state, 2n, 'intentional repair fence survives shutdown')
-        t.notEqual(meta.pending_cmd_seq, null, 'leader preserves the unresolved command for repair')
-      } finally { db.close() }
-    }
-    const replacement = await until(() => c.leader([dissenter]), 'healthy replacement leader')
-    await c.settled()
-    t.equal((await replacement.append(buffer('second')))[1], 'second')
-    await c.settled()
-    for (const node of [...c.nodes.values()].filter((node) => node.gate.isOpen)) {
-      t.deepEqual(writes(node.apply.db), ['first', 'second'])
-      t.equal(c.calls.filter((call) => call.id === node.gate.id && call.seq > 0n).length, 2,
-        'replacement resolves the first command without reapplying it')
-    }
-  } finally { await c.close() }
-  t.end()
-})
+}
 
 test('slow Apply preserves protocol order across leadership change and pending-command recovery', async (t) => {
   const held = deferred()

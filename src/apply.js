@@ -33,32 +33,35 @@ class MonsterApply extends EventEmitter {
     this._hello = false
     this._pastHello = false
     this._ready = false
-    this._closing = false
+    this._stopped = false
     this._closeWork = null
     this._work = null
     this._fatalError = null
   }
 
-  get isOpen() { return this.db !== null && !this._closing }
+  get isOpen() { return this.db !== null && !this._stopped }
 
   _emitSafe(type, value) {
     for (const listener of this.rawListeners(type)) {
       try {
         listener.call(this, value)
       } catch (err) {
-        if (type !== 'error') { this._emitSafe('error', err) }
+        if (type !== 'error') {
+          if (this._stopped) { this._emitSafe('error', Err.wrapError(err)) }
+          else { this._fatal(err) }
+        }
       }
     }
   }
 
-  _throwIfClosing() {
-    if (this._closing) {
-      throw new Err.ErrorWithCode('Apply is closing', Err.NODE_NOT_OPEN)
+  _throwIfStopped() {
+    if (this._stopped) {
+      throw new Err.ErrorWithCode('Apply is stopped', Err.NODE_NOT_OPEN)
     }
   }
 
   _fatal(err) {
-    if (this._closing) { return }
+    if (this._stopped) { return }
     err = Err.wrapError(err)
     this._fatalError = err
     const closing = this.close()
@@ -115,7 +118,7 @@ class MonsterApply extends EventEmitter {
         }
         return
       }
-      if (this._closing) { return }
+      if (this._stopped) { return }
       if (!msg || !isCid(msg.cid)) {
         throw new Err.ErrorWithCode('Apply request is illegal', Err.RPC_ILLEGAL)
       }
@@ -161,14 +164,14 @@ class MonsterApply extends EventEmitter {
       this._work = work
       try {
         const result = await work
-        this._throwIfClosing()
+        this._throwIfStopped()
         this._work = null
         this._ack(msg, result)
       } finally {
         if (this._work === work) { this._work = null }
       }
     } catch (err) {
-      if (this._closing) { return }
+      if (this._stopped) { return }
       this._fatal(err)
     }
   }
@@ -188,7 +191,7 @@ class MonsterApply extends EventEmitter {
   }
 
   async _execute(msg) {
-    this._throwIfClosing()
+    this._throwIfStopped()
     const db = this.db
     const receipt = {
       id: 1n,
@@ -200,7 +203,7 @@ class MonsterApply extends EventEmitter {
     db.exec('BEGIN IMMEDIATE')
     if (msg.seq === 0n) {
       await this._apply(db, null, msg.term, 0n, 0, null)
-      this._throwIfClosing()
+      this._throwIfStopped()
       if (!db.isTransaction) {
         throw new Err.ErrorWithCode('DB2 seq0 transaction ended', Err.SQLITE_ERROR)
       }
@@ -210,7 +213,7 @@ class MonsterApply extends EventEmitter {
       let patchset = null
       try {
         for (let index = 0; index < msg.items.length; index++) {
-          this._throwIfClosing()
+          this._throwIfStopped()
           db.exec('SAVEPOINT monsterft_item')
           let value = null
           try {
@@ -219,25 +222,24 @@ class MonsterApply extends EventEmitter {
             )
             assertEncodable(value)
           } catch (err) {
-            this._throwIfClosing()
+            this._throwIfStopped()
             err = Err.wrapError(err)
             const warning = Err.wrapError({
               message: err.message, sqlCode: err.sqlCode, stack: err.stack,
             }, Err.APPLY_ERROR)
             this._emitSafe('warn', warning)
-            this._throwIfClosing()
+            this._throwIfStopped()
             if (!db.isTransaction) { throw err }
             try {
               db.exec('ROLLBACK TO monsterft_item')
               db.exec('RELEASE monsterft_item')
             } catch (rollbackErr) {
-              this._emitSafe('error', err)
               throw Err.wrapError(rollbackErr, Err.SQLITE_ERROR, 'DB2 item rollback ')
             }
             outcomes.push({ status: 'rejected', error: err })
             continue
           }
-          this._throwIfClosing()
+          this._throwIfStopped()
           db.exec('RELEASE monsterft_item')
           outcomes.push({ status: 'fulfilled', result: value })
         }
@@ -247,16 +249,16 @@ class MonsterApply extends EventEmitter {
       }
       receipt.local_digest = digestCmd(msg.term, msg.seq, patchset, outcomes)
     }
-    this._throwIfClosing()
+    this._throwIfStopped()
     this._writeReceipt(receipt)
-    this._throwIfClosing()
+    this._throwIfStopped()
     db.exec('COMMIT')
     return { receipt, outcomes: outcomesWire(outcomes) }
   }
 
   close() {
     if (this._closeWork !== null) { return this._closeWork }
-    this._closing = true
+    this._stopped = true
     this._ready = false
     const active = this._work
     this._closeWork = Promise.resolve(active).catch(noop).then(() => {
@@ -267,7 +269,6 @@ class MonsterApply extends EventEmitter {
         } catch (err) {
           err = Err.wrapError(err, Err.SQLITE_ERROR, 'DB2 close ')
           this._emitSafe('error', err)
-          this._closeWork = null
           throw err
         }
       }

@@ -1,3 +1,5 @@
+import { writeSync } from 'node:fs'
+import { format } from 'node:util'
 import { MonsterApply, udsClient } from '../src/index.js'
 
 const [id, socketPath, databasePath, serverUrl] = process.argv.slice(2)
@@ -35,8 +37,14 @@ async function apply(db, data, term, seq) {
 }
 
 const component = new MonsterApply(id, localSend, databasePath, { apply })
-component.on('warn', (err) => console.warn(`${id}/apply`, err))
-component.on('error', (err) => console.error(`${id}/apply`, err))
+component.on('warn', (err) => writeSync(2, format(`${id}/apply`, err.message, err) + '\n'))
+component.on('error', (err) => {
+  try { writeSync(2, format(`${id}/apply`, err.message, err) + '\n') }
+  finally { process.exit(1) }
+})
 socket.on('data', (frame) => component.onReceive('gate', frame))
-socket.on('error', (err) => console.error(`${id}/apply/socket`, err))
+socket.on('error', (err) => {
+  try { writeSync(2, format(`${id}/apply/socket`, err.message, err) + '\n') }
+  finally { process.exit(1) }
+})
 socket.on('close', () => process.exit(1))

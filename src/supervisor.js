@@ -30,17 +30,17 @@ class Supervisor extends EventEmitter {
     this._setup = setup
     this._gate = null
     this._run = null
-    this._opening = null
+    this._openWait = null
     this._loopWork = null
     this._closeWork = null
     this._drainWork = null
-    this._closing = false
+    this._stopped = false
     this._closed = false
-    this._blockedError = null
     this._wake = null
   }
 
   get gate() { return this._gate }
+  get isStopped() { return this._stopped }
 
   _emitSafe(type, value) {
     for (const listener of this.rawListeners(type)) {
@@ -52,11 +52,11 @@ class Supervisor extends EventEmitter {
   }
 
   open() {
-    if (this._closing) { return Promise.reject(closed()) }
-    if (this._opening !== null) { return this._opening.promise }
-    this._opening = deferred()
+    if (this._stopped) { return Promise.reject(closed()) }
+    if (this._openWait !== null) { return this._openWait.promise }
+    this._openWait = deferred()
     this._loopWork = Promise.resolve().then(() => this._loop())
-    return this._opening.promise
+    return this._openWait.promise
   }
 
   _validate(setup) {
@@ -114,11 +114,11 @@ class Supervisor extends EventEmitter {
 
   async _start(run, entries) {
     for (const [role, entry] of entries) {
-      if (run.stopping || this._closing) { throw closed() }
+      if (run.stopping || this._stopped) { throw closed() }
       this._spawn(run, role, entry)
     }
     await run.setup.ready?.(run.children)
-    if (run.stopping || this._closing || run.error !== null) { throw run.error ?? closed() }
+    if (run.stopping || this._stopped || run.error !== null) { throw run.error ?? closed() }
     try {
       await run.setup.gate.open()
     } catch (err) {
@@ -129,12 +129,12 @@ class Supervisor extends EventEmitter {
   }
 
   async _loop() {
-    while (!this._closing) {
+    while (!this._stopped) {
       let setup
       try {
         setup = await this._setup()
       } catch (err) {
-        if (!this._closing) {
+        if (!this._stopped) {
           this._emitSafe('error', Err.wrapError(err, Err.SUPERVISOR_ERROR, 'Supervisor setup '))
         }
         await this._delay()
@@ -147,7 +147,7 @@ class Supervisor extends EventEmitter {
       this._run = run
       try {
         const entries = this._validate(setup)
-        if (this._closing) { continue }
+        if (this._stopped) { continue }
         this._gate = setup.gate
         run.onError = (err) => {
           if (run.opened && !setup.gate.isOpen) { this._fail(run, err, false) }
@@ -162,25 +162,24 @@ class Supervisor extends EventEmitter {
         ])
         clearTimeout(run.timer)
         if (err !== null) { throw err }
-        if (this._closing) { continue }
+        if (this._stopped) { continue }
         if (!setup.gate.isOpen) {
           const err = closed()
           this._fail(run, err, false)
           throw err
         }
         run.opened = true
-        this._opening.resolve()
+        this._openWait.resolve()
         this._emitSafe('open', setup.gate)
         await run.failed.promise
       } catch (err) {
-        if (!this._closing) { this._fail(run, err) }
+        if (!this._stopped) { this._fail(run, err) }
       } finally {
         try {
           await this._stopRun(run)
         } catch (err) {
-          this._blockedError = err
-          this._closing = true
-          this._opening.reject(err)
+          this._stopped = true
+          this._openWait.reject(err)
           this._emitSafe('error', err)
           return
         }
@@ -190,7 +189,7 @@ class Supervisor extends EventEmitter {
   }
 
   _delay() {
-    if (this._closing) { return Promise.resolve() }
+    if (this._stopped) { return Promise.resolve() }
     return new Promise((resolve) => {
       const finish = () => {
         clearTimeout(timer)
@@ -216,7 +215,6 @@ class Supervisor extends EventEmitter {
       }
       for (const record of run.records.values()) {
         if (record.ended) { continue }
-        record.killFailed = deferred()
         try { record.child.kill('SIGKILL') }
         catch (err) { record.killFailed.resolve(Err.wrapError(err, Err.SUPERVISOR_ERROR, 'child kill ')) }
       }
@@ -227,31 +225,24 @@ class Supervisor extends EventEmitter {
       if (typeof run.setup?.cleanup === 'function') { await run.setup.cleanup() }
       if (this._run === run) { this._run = null }
     }).catch((err) => {
-      run.stopWork = null
       throw Err.wrapError(err, Err.SUPERVISOR_ERROR)
     })
     return run.stopWork
   }
 
   close() {
-    this._closing = true
-    this._opening?.reject(closed())
+    this._stopped = true
+    this._openWait?.reject(closed())
     this._wake?.()
     this._gate?.stop()
     if (this._closed) { return Promise.resolve() }
     if (this._closeWork !== null) { return this._closeWork }
-    const retry = this._blockedError !== null
     this._closeWork = Promise.resolve().then(async () => {
       if (this._run !== null) { await this._stopRun(this._run) }
       await this._loopWork
-      if (this._blockedError !== null && !retry) { throw this._blockedError }
       if (this._run !== null) { await this._stopRun(this._run) }
-      this._blockedError = null
       this._closed = true
       this._emitSafe('close')
-    }).catch((err) => {
-      this._closeWork = null
-      throw err
     })
     return this._closeWork
   }
@@ -259,8 +250,8 @@ class Supervisor extends EventEmitter {
   drainCmd() {
     if (this._drainWork !== null) { return this._drainWork }
     const gate = this._gate
-    this._closing = true
-    this._opening?.reject(closed())
+    this._stopped = true
+    this._openWait?.reject(closed())
     this._wake?.()
     const draining = deferred()
     this._drainWork = draining.promise

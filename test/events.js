@@ -364,7 +364,7 @@ for (const delay of [0, 2]) {
   })
 }
 
-test('dissenting follower reports its final SYNC state before any final change', async (t) => {
+test('dissenting follower stops without publishing its fatal repair input', async (t) => {
   let dissenter = null
   const c = cluster({
     apply(id, db, buffer, term, seq) {
@@ -379,29 +379,23 @@ test('dissenting follower reports its final SYNC state before any final change',
     await c.settled()
     dissenter = c.ids.find((id) => id !== c.leader().id)
     const { gate } = c.nodes.get(dissenter)
-    let finalSync = null
-    const laterChanges = []
-    gate.on('sync', (event) => { finalSync = { event, commitSeq: gate.commitSeq } })
-    gate.on('change', (event) => { if (finalSync) { laterChanges.push(event) } })
+    const syncs = []
+    gate.on('sync', (event) => syncs.push(event))
     const waiting = gate.awaitEvent('sync', (event) => event.syncSeq > event.cmdSeq)
-      .then(() => true, () => false)
+      .then(() => null, (err) => err)
     t.equal((await c.leader().append(Buffer.from('item')))[1], 'accepted')
-    await until(() => finalSync, 'dissenting follower SYNC')
-    t.ok(finalSync.commitSeq >= finalSync.event.syncSeq,
-      'repair SYNC listeners observe the final decision and its committed state')
+    await until(() => !gate.isOpen, 'Gate detects its stopped Procs')
+    t.deepEqual(syncs, [], 'the repair SYNC is not published without a completion')
     t.notOk('appliedSeq' in gate)
-    t.ok(await Promise.race([waiting, pause(100).then(() => false)]),
-      'a progress wait observes the final SYNC before repair shutdown')
-    t.ok(laterChanges.length <= 1, 'repair permits at most one final change')
-    t.ok(laterChanges.every((event) => event.commitSeq === finalSync.commitSeq),
-      'any final change preserves the state already available to SYNC listeners')
+    t.equal((await waiting).code, Err.LOCAL_TIMEOUT,
+      'the progress wait rejects with Gate\'s missing-completion timeout')
     t.ok(c.errors.some(({ id, role, error }) => id === dissenter && role === 'procA' &&
       error.code === Err.REPAIR_OUTSIDE_AGREEMENT), 'the owner still reports its repair decision')
   } finally { await c.close() }
   t.end()
 })
 
-test('a committed repair decision retains its final change after SYNC', (t) => {
+test('a committed repair decision retains its fence without publishing any outputs', (t) => {
   const f = protocol().setup()
   try {
     const command = f.rpc(append({
@@ -413,15 +407,16 @@ test('a committed repair decision retains its final change after SYNC', (t) => {
       type: 'sync', cmdSeq: 1n, quorum: true, digest: Buffer.alloc(32),
       agree: ['b', 'c'], disagree: ['a'],
     })
+    const completions = []
+    f.onSend = (proc, reply) => completions.push(reply)
     const reply = f.rpc(append({
       seqP: 1n, termP: 1n, data: [record(1n, decision)], commitSeq: 2n,
     }))
-    const events = outputs(reply).filter(({ to }) => to === 'event').map(({ message }) => message)
-    t.deepEqual(events.map(({ type }) => type), ['commit', 'sync', 'change'],
-      'intentional repair preserves progress events and final status')
-    t.equal(events.at(-1).status.commitSeq, 2n)
-    t.equal(outputs(reply).at(-1).message.type, 'change')
+    t.equal(reply, undefined, 'fatal repair has no final completion')
+    t.deepEqual(completions, [], 'no Proc publishes replication ACKs or protocol events')
     t.equal(f.state().meta.repair_state, 2n, 'the repair fence is durable')
+    t.equal(f.state().meta.applied_seq, 2n, 'the repair decision remains applied')
+    t.equal(f.state().meta.pending_cmd_seq, null, 'the decision clears the pending command')
     t.ok(f.procs.every((proc) => !proc.isOpen), 'all three owners stop after committing the decision')
     t.equal(f.diagnostics.filter(({ type, error }) =>
       type === 'error' && error.code === Err.REPAIR_OUTSIDE_AGREEMENT).length, 3)
