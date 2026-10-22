@@ -76,6 +76,50 @@ test('framing caps readable buffering and resumes without losing input', async (
   t.end()
 })
 
+for (const action of ['throw', 'destroy']) {
+  test(`framing stops buffered delivery when a listener ${action === 'throw' ? 'throws' : 'destroys the stream'}`, async (t) => {
+    const socket = new Socket()
+    const connection = new FrameSocket(socket)
+    const original = new Err.ErrorWithCode('receiver failed', Err.APPLY_ERROR)
+    const received = []
+    const errors = []
+    const closing = Promise.all([event(connection, 'close'), event(socket, 'close')])
+    connection.on('error', (err) => errors.push(err))
+    connection.pause()
+    connection.on('data', (frame) => {
+      received.push(frame.toString())
+      if (action === 'throw') { throw original }
+      connection.destroy()
+    })
+    socket.push(framed(['first', 'second', 'third'].map((value) => Buffer.from(value))))
+    await immediate()
+    t.equal(connection.readableLength, 3, 'frames are buffered before delivery')
+    connection.resume()
+    await closing
+    t.deepEqual(received, ['first'], 'no later buffered frame reaches the listener')
+    t.deepEqual(errors, action === 'throw' ? [original] : [], 'retains the original diagnostic')
+    t.ok(connection.destroyed)
+    t.ok(socket.destroyed, 'the underlying socket closes too')
+    t.end()
+  })
+}
+
+test('framing preserves non-data event listener behavior', async (t) => {
+  const socket = new Socket()
+  const connection = new FrameSocket(socket)
+  const original = new Error('event listener failed')
+  for (const type of ['error', 'custom']) {
+    connection.once(type, () => { throw original })
+    t.throws(() => connection.emit(type, original), (err) => err === original,
+      `${type} listener exceptions still propagate`)
+  }
+  t.notOk(connection.destroyed, 'unrelated events do not trigger data-listener cleanup')
+  const closing = event(connection, 'close')
+  connection.destroy()
+  await closing
+  t.end()
+})
+
 test('framing rejects oversized lengths before collecting their payload', async (t) => {
   const socket = new Socket()
   const connection = new FrameSocket(socket, { maxFrameBytes: 10 })

@@ -50,6 +50,17 @@ class FrameSocket extends Duplex {
     })
   }
 
+  emit(type, ...args) {
+    if (type !== 'data') { return super.emit(type, ...args) }
+    if (this.destroyed) { return false }
+    // Buffered frames can be delivered after _receive() returns.
+    try { return super.emit(type, ...args) }
+    catch (err) {
+      this.destroy(Err.wrapError(err))
+      return false
+    }
+  }
+
   canSend(frame) {
     if (!Buffer.isBuffer(frame)) {
       throw new Err.ErrorWithCode('message must be a Buffer', Err.ARGUMENT_ILLEGAL)

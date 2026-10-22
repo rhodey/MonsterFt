@@ -21,6 +21,15 @@ Connects socket progress, failures, and closure to the framed stream.
 
 no findings
 
+## `FrameSocket.emit`
+
+Delivers received frames and closes the connection if a data listener throws,
+including during buffered delivery. Other events retain normal stream behavior.
+
+### findings
+
+no findings
+
 ## `FrameSocket.canSend`
 
 Validates a proposed frame and reports whether the connection can accept it

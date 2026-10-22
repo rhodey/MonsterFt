@@ -226,6 +226,63 @@ test('TCP reports callback errors before closing and preserves their stack', asy
   t.end()
 })
 
+for (const side of ['client', 'server']) {
+  test(`TCP ${side} closes after a buffered receive callback throws`, async (t) => {
+    const original = new Error('buffered receive failed')
+    original.code = Err.SEND_ERROR
+    const received = []
+    const failures = []
+    let receiver
+    let accept
+    let pause
+    const accepted = new Promise((resolve) => { accept = resolve })
+    const paused = new Promise((resolve) => { pause = resolve })
+    const receive = (frame) => {
+      received.push(frame)
+      if (received.length === 1) { receiver.pause(); pause(); return }
+      throw original
+    }
+    const server = await tcpServer(0, (reply, frame) => {
+      if (side === 'server') { receive(frame) }
+    }, (err) => failures.push(err), { onConnection: accept })
+    const client = await tcpClient(server.address().port, '127.0.0.1', (frame) => {
+      if (side === 'client') { receive(frame) }
+    })
+    client.on('error', (err) => failures.push(err))
+    const peer = await timeout(accepted)
+    receiver = side === 'client' ? client : peer
+    const sender = side === 'client' ? peer : client
+    try {
+      const closing = Promise.all([event(receiver, 'close'), event(sender, 'close'),
+        event(receiver.socket, 'close'), event(sender.socket, 'close')])
+      const failed = event(receiver, 'error')
+      sender.write(Buffer.from('first'))
+      await timeout(paused)
+      sender.write(Buffer.from('second'))
+      sender.write(Buffer.from('third'))
+      await timeout((async () => {
+        while (!receiver.destroyed && receiver.readableLength < 2) { await immediate() }
+      })())
+      t.equal(receiver.readableLength, 2, 'later frames wait in the paused readable buffer')
+      receiver.resume()
+      const err = await timeout(failed)
+      await timeout(closing)
+      t.equal(err.message, original.message)
+      t.equal(err.code, original.code)
+      t.equal(err.stack, original.stack)
+      t.deepEqual(failures, [err], 'reports the failure once through the public diagnostic')
+      t.deepEqual(received.map((frame) => frame.toString()), ['first', 'second'],
+        'does not deliver remaining buffered frames after failure')
+      t.ok(receiver.socket.closed && sender.socket.closed, 'both underlying sockets close')
+    } finally {
+      client.destroy()
+      peer.destroy()
+      await closeServer(server)
+    }
+    t.end()
+  })
+}
+
 test('TCP server rejects listen failures and preserves runtime error stacks', async (t) => {
   const holder = net.createServer()
   await new Promise((resolve, reject) => {

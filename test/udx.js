@@ -261,6 +261,49 @@ test('UDX reports receiver and connection callback errors with their original st
   t.end()
 })
 
+test('UDX closes after a buffered data listener throws', async (t) => {
+  const original = new Err.ErrorWithCode('buffered receive failed', Err.SEND_ERROR)
+  const received = []
+  let receiver
+  let pause
+  const paused = new Promise((resolve) => { pause = resolve })
+  const f = await fixture((connection) => {
+    receiver = connection
+    connection.on('data', (frame) => {
+      received.push(frame)
+      if (received.length === 1) { connection.pause(); pause(); return }
+      throw original
+    })
+  })
+  const client = await udxClient(f.path)
+  client.resume()
+  try {
+    client.write(Buffer.from('first'))
+    await timeout(paused)
+    const closing = Promise.all([event(receiver, 'close'), event(client, 'close'),
+      event(receiver.socket, 'close'), event(client.socket, 'close')])
+    client.write(Buffer.from('second'))
+    client.write(Buffer.from('third'))
+    await timeout((async () => {
+      while (!receiver.destroyed && receiver.readableLength < 2) { await immediate() }
+    })())
+    t.equal(receiver.readableLength, 2, 'later frames wait in the paused readable buffer')
+    receiver.resume()
+    await timeout(closing)
+    t.equal(f.errors.length, 1, 'reports the buffered listener failure once')
+    t.equal(f.errors[0].message, original.message)
+    t.equal(f.errors[0].code, original.code)
+    t.equal(f.errors[0].stack, original.stack)
+    t.deepEqual(received.map((frame) => frame.toString()), ['first', 'second'],
+      'does not deliver remaining buffered frames after failure')
+    t.ok(receiver.socket.closed && client.socket.closed, 'both underlying sockets close')
+  } finally {
+    client.destroy()
+    await f.close()
+  }
+  t.end()
+})
+
 test('UDX explicit destroy aborts queued output', async (t) => {
   const directory = await mkdtemp('/tmp/monsterft-udx-')
   const path = `${directory}/socket`
