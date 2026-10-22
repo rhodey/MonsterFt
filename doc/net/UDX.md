@@ -1,6 +1,6 @@
 # Unix-domain transport
 
-Function notes for [src/net/udx.js](../src/net/udx.js), in source order.
+Function notes for [src/net/udx.js](../../src/net/udx.js), in source order.
 Framing is shared with TCP and documented in [STREAM.md](STREAM.md).
 
 ## `udxServer`

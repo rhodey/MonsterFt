@@ -1,6 +1,6 @@
 # TCP cluster transport
 
-Function notes for [src/net/tcpcluster.js](../src/net/tcpcluster.js), in source order.
+Function notes for [src/net/tcpcluster.js](../../src/net/tcpcluster.js), in source order.
 Trivial getters and forwarding methods are omitted.
 
 ## `constructor`

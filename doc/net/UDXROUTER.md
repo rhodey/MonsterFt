@@ -1,6 +1,6 @@
 # Local Unix socket router
 
-Function notes for [src/net/udxrouter.js](../src/net/udxrouter.js), in source order.
+Function notes for [src/net/udxrouter.js](../../src/net/udxrouter.js), in source order.
 Trivial getters and forwarding methods are omitted.
 
 ## `constructor`

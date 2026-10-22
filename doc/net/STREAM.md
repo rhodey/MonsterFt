@@ -1,6 +1,6 @@
 # Framed streams
 
-Function notes for [src/net/stream.js](../src/net/stream.js), in source order.
+Function notes for [src/net/stream.js](../../src/net/stream.js), in source order.
 Trivial forwarding methods are omitted.
 
 ## `frameOptions`

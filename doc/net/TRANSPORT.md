@@ -1,6 +1,6 @@
 # Transport lifecycle
 
-Function notes for [src/net/transport.js](../src/net/transport.js), in source order.
+Function notes for [src/net/transport.js](../../src/net/transport.js), in source order.
 Trivial getters and forwarding methods are omitted.
 
 ## `constructor`

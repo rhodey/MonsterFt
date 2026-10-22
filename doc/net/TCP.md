@@ -1,6 +1,6 @@
 # TCP transport
 
-Function notes for [src/net/tcp.js](../src/net/tcp.js), in source order.
+Function notes for [src/net/tcp.js](../../src/net/tcp.js), in source order.
 Framing is shared with UDX and documented in [STREAM.md](STREAM.md).
 
 ## `tcpServer`
