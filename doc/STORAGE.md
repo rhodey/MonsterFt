@@ -114,7 +114,8 @@ no findings
 
 ## `ProtocolStore.checkGeneration`
 
-Rejects work when another startup has claimed this Proc's database.
+Rejects work when another startup has claimed this Proc's database. Reuses a
+prepared statement while reading the stored generation on every check.
 
 ### findings
 

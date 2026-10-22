@@ -206,6 +206,7 @@ class ProtocolStore {
     this._captured = null
     this._adopted = false
     this._generation = null
+    this._generationGet = null
   }
 
   get db() { return this.log.db }
@@ -222,12 +223,13 @@ class ProtocolStore {
     sql.readMeta(this.db)
     sql.claimGeneration(this.db, 'monsterft_meta', generation)
     this.log.readHead()
+    this._generationGet = this.db.prepare('SELECT generation FROM monsterft_meta WHERE id = 1')
     this.db.exec('COMMIT')
     this._generation = generation
   }
 
   checkGeneration() {
-    sql.checkGeneration(this.db, 'monsterft_meta', this._generation)
+    sql.checkGeneration(this.db, 'monsterft_meta', this._generation, this._generationGet)
   }
 
   capture() {
@@ -287,6 +289,7 @@ class ProtocolStore {
 
   close() {
     this.log.close()
+    this._generationGet = null
     this._captured = null
     this._adopted = false
   }

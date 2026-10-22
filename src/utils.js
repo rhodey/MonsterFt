@@ -23,8 +23,8 @@ function claimGeneration(db, table, generation) {
   }
 }
 
-function checkGeneration(db, table, generation) {
-  const row = db.prepare(`SELECT generation FROM ${table} WHERE id = 1`).get()
+function checkGeneration(db, table, generation, statement = null) {
+  const row = (statement ?? db.prepare(`SELECT generation FROM ${table} WHERE id = 1`)).get()
   const name = table === 'monsterft_meta' ? 'DB1' : 'DB2'
   if (!isGeneration(row?.generation)) {
     corrupt(`${name} generation is corrupt`)
