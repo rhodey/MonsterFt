@@ -175,7 +175,7 @@ test('new generation fences old voting, timer, command, and Apply execution path
     const callCount = f.calls.length
     fenced(t, old, 'apply', await old.request('apply', {
       type: 'execute', tickCount: 100n, term: 1n, seq: 1n,
-      entryHash: Buffer.alloc(32, 8), items: [Buffer.from('must not execute')],
+      entryHash: Buffer.alloc(16, 8), items: [Buffer.from('must not execute')],
       matchIndex: [0n, 0n, 0n],
     }), 'Apply command')
     t.equal(f.calls.length, callCount, 'stale Apply cannot enter the user callback')

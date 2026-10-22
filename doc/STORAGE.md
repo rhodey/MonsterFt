@@ -10,6 +10,10 @@ a different generation. The generation is excluded from protocol and receipt
 digests and survives donor adoption. Databases require the generation column;
 there is no migration.
 
+Digests use canonical 16-byte XXH3-128 values. The hash format change requires
+fresh databases and matching software on every local component and cluster
+member; existing hashes are not converted.
+
 Claims wait on SQLite's existing writer exclusion: an active write transaction
 can prevent replacement from opening. Concurrent startups can supersede one
 another, so normal supervision still stops and reaps owners before replacement.

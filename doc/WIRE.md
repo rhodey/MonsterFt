@@ -13,7 +13,7 @@ no findings
 
 ## `checksum`
 
-Computes the SHA-256 checksum of the exact payload bytes.
+Computes the 16-byte XXH3-128 checksum of the exact payload bytes.
 
 ### findings
 

@@ -1,9 +1,6 @@
-import crypto from 'node:crypto'
 import { pack } from 'msgpackr'
 import * as Err from './error.js'
-import { isCid, isSeq, isTerm } from './util.js'
-
-const DIGEST_BYTES = 32
+import { isCid, isSeq, isTerm, HASH_BYTES, hash, hashParts } from './util.js'
 
 const asBuffer = (value) => {
   if (value === null || value === undefined) { return value }
@@ -31,9 +28,7 @@ const outcomesPublic = (outcomes) => outcomes.map((item) => {
 })
 
 const digestCmd = (term, seq, patchset, outcomes) =>
-  crypto.createHash('sha256')
-    .update(pack([term, seq, patchset, outcomesWire(outcomes, false)]))
-    .digest()
+  hash(pack([term, seq, patchset, outcomesWire(outcomes, false)]))
 
 const assertEncodable = (value) => {
   try { pack(value) } catch {
@@ -44,14 +39,12 @@ const assertEncodable = (value) => {
 }
 
 const isDigest = (digest) => digest instanceof Uint8Array &&
-  digest.byteLength === DIGEST_BYTES
+  digest.byteLength === HASH_BYTES
 
 const digestEntry = (term, buffer) => {
   const prefix = Buffer.allocUnsafe(8)
   prefix.writeBigUInt64LE(term)
-  const hash = crypto.createHash('sha256').update(prefix)
-  if (buffer !== null) { hash.update(buffer) }
-  return hash.digest()
+  return buffer === null ? hash(prefix) : hashParts(prefix, buffer)
 }
 
 const validateOutcomeRequestMsg = (msg) => {

@@ -134,7 +134,7 @@ test('election no-op retries stay with their term and stop after commitment', (t
         if (pending) {
           f.setup()
           const r = f.rpc(append({ seqP: 0n, termP: 1n, data: [record(1n, cmd())], commitSeq: 1n }))
-          f.complete(messages(r, 'execute', 'apply')[0], [[0, 'ok']], Buffer.alloc(32, 7))
+          f.complete(messages(r, 'execute', 'apply')[0], [[0, 'ok']], Buffer.alloc(16, 7))
         }
         const r = f.elect()
         const head = f.proc.log.seq

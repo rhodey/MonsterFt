@@ -7,7 +7,7 @@ import { digestEntry } from '../src/utilm.js'
 import { protocol, append, record, cmd, messages } from './fixtures/protocol.js'
 import * as Err from '../src/error.js'
 
-const digest = Buffer.alloc(32, 7)
+const digest = Buffer.alloc(16, 7)
 const options = () => ({ keepTarget: 3, keepTrigger: 6 })
 function noops(f, count, commit = true) {
   const head = f.proc.log.seq
@@ -205,7 +205,7 @@ test('startup pruning rejects invalid checkpoints and survives cleanup failures'
           return readHead.call(this)
         }
       } else {
-        editAll(f, 'UPDATE monsterft_meta SET applied_entry_hash = zeroblob(32)')
+        editAll(f, 'UPDATE monsterft_meta SET applied_entry_hash = zeroblob(16)')
       }
       if (fault === 'checkpoint') {
         t.throws(() => f.reopen(), (err) => err.code === Err.MONSTER_CORRUPT)

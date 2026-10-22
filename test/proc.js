@@ -278,7 +278,7 @@ test('Proc treats CMD insert failures as fatal for local and forwarded commands'
         .find(({ to }) => to === 'apply').message
       f.input(0, 'apply', { reply: {
         type: 'ack', cid: execute.cid,
-        receipt: { seq: 0n, entry_hash: execute.entryHash, local_digest: Buffer.alloc(32) },
+        receipt: { seq: 0n, entry_hash: execute.entryHash, local_digest: Buffer.alloc(16) },
         outcomes: [],
       } })
       t.equal(proc.engine.appliedSeq, 0n, 'real election no-op and setup completed')
@@ -348,7 +348,7 @@ test('Proc reports quorum-impossible repair locally without stopping', (t) => {
   const f = fixture().startup()
   try {
     const proc = f.procs[0]
-    const digest = Buffer.alloc(32, 1)
+    const digest = Buffer.alloc(16, 1)
     proc.engine.start = () => {
       proc.db.prepare(`UPDATE monsterft_meta SET applied_seq = 1,
         applied_entry_hash = ?, pending_cmd_seq = 1, applied_local_digest = ?`).run(digest, digest)

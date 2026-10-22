@@ -43,7 +43,7 @@ function fixture() {
   }
 }
 
-function receipt(db2, seq, data, digest=Buffer.alloc(32)) {
+function receipt(db2, seq, data, digest=Buffer.alloc(16)) {
   db2.prepare(`
     UPDATE monsterft_meta_apply SET seq = ?, entry_hash = ?, local_digest = ? WHERE id = 1
   `).run(seq, digestEntry(data.term, data.entry), digest)
@@ -282,7 +282,7 @@ test('majority survives interruptions between each receipt import', (t) => {
       const metas = f.reconcile()
       t.ok(metas.every((meta) => meta.applied_seq === 0n), `completed setup restored after ${imported} imports`)
       t.ok(metas.every((meta) => meta.pending_cmd_seq === null), 'setup never becomes pending CMD')
-      t.ok(metas.every((meta) => Buffer.from(meta.applied_local_digest).equals(Buffer.alloc(32))),
+      t.ok(metas.every((meta) => Buffer.from(meta.applied_local_digest).equals(Buffer.alloc(16))),
         'zero setup digest retained')
       t.equal(sql.readApply(f.apply).seq, 0n, 'DB2 unchanged')
     } finally { f.cleanup() }
@@ -302,7 +302,7 @@ test('receipt is checked against adopted DB1 and the captured fixed receipt', (t
     f.stores.forEach((store) => store.adopt())
     // A later receipt cannot replace the already captured input. Startup normally
     // keeps Apply idle; this also verifies the reusable reconciliation primitive.
-    receipt(f.apply, 1n, record(2n, 'later'), Buffer.alloc(32, 3))
+    receipt(f.apply, 1n, record(2n, 'later'), Buffer.alloc(16, 3))
     const metas = f.stores.map((store) => store.reconcile())
     t.ok(metas.every((meta) => meta.applied_seq === 0n), 'all import fixed seq-zero receipt')
     t.equal(sql.readApply(f.apply).seq, 1n, 'DB2 is read-only during Proc reconciliation')
@@ -353,7 +353,7 @@ test('receipt validation retains hash, pending and gap protections', (t) => {
             'UPDATE monsterft_meta SET pending_cmd_seq = 0' :
             'UPDATE monsterft_meta SET repair_state = 1')
         })
-        receipt(f.apply, 1n, next, Buffer.alloc(32, 4))
+        receipt(f.apply, 1n, next, Buffer.alloc(16, 4))
       }
       f.capture()
       f.stores.forEach((store) => store.adopt())
@@ -370,7 +370,7 @@ test('retained digest permits reopening after the receipt entry was pruned', (t)
     const zero = record(1n, '')
     const cmd = record(1n, 'cmd')
     const tail = record(2n, '')
-    const localDigest = Buffer.alloc(32, 7)
+    const localDigest = Buffer.alloc(16, 7)
     f.stores.forEach((store) => store.log.append(zero))
     receipt(f.apply, 0n, zero)
     f.reconcile()
@@ -391,7 +391,7 @@ test('retained digest permits reopening after the receipt entry was pruned', (t)
     t.ok(metas.every((meta) => Buffer.from(meta.applied_local_digest).equals(localDigest)),
       'resolved CMD digest survives SYNC/noops/retention')
     t.ok(f.stores.every((store) => store.log.begin === 3n), 'old receipt entry not recreated')
-    f.apply.prepare('UPDATE monsterft_meta_apply SET local_digest = ?').run(Buffer.alloc(32, 8))
+    f.apply.prepare('UPDATE monsterft_meta_apply SET local_digest = ?').run(Buffer.alloc(16, 8))
     f.capture()
     f.stores.forEach((store) => store.adopt())
     t.throws(() => f.stores[0].reconcile(), /apply local digest does not match/,

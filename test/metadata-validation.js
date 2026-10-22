@@ -7,7 +7,7 @@ import { certify } from '../src/certify.js'
 import * as sql from '../src/utils.js'
 import * as Err from '../src/error.js'
 
-const digest = Buffer.alloc(32, 7)
+const digest = Buffer.alloc(16, 7)
 function command(f) {
   const r = f.rpc(append({ seqP: 0n, termP: 1n, data: [record(1n, cmd())], commitSeq: 1n }))
   f.complete(messages(r, 'execute', 'apply')[0], [[0, 'ok']], digest)
@@ -27,6 +27,20 @@ const loose = (db, table) => db.exec(`
   DROP TABLE saved;
 `)
 
+test('Apply receipts require 16-byte entry hashes and local digests', (t) => {
+  for (const makeDigest of [() => Buffer.alloc(16), () => new Uint8Array(16)]) {
+    const receipt = { seq: 0n, entry_hash: makeDigest(), local_digest: makeDigest() }
+    t.equal(sql.validateReceipt(receipt), receipt, '16-byte Buffer and SQLite byte arrays are accepted')
+    for (const field of ['entry_hash', 'local_digest']) {
+      for (const size of [8, 15, 17, 32]) {
+        t.throws(() => sql.validateReceipt({ ...receipt, [field]: Buffer.alloc(size) }),
+          (err) => err.code === Err.MONSTER_CORRUPT, `${field}: ${size}-byte hash is rejected`)
+      }
+    }
+  }
+  t.end()
+})
+
 test('startup and certification reject malformed protocol meta without executing Apply', (t) => {
   const cases = [
     ['repair_state = -1'], ['repair_state = 3'], ['pending_cmd_seq = -1'],
@@ -35,7 +49,7 @@ test('startup and certification reject malformed protocol meta without executing
     ['applied_local_digest = NULL'], ["applied_local_digest = 'bad'"],
     ['applied_seq = -2'], ["applied_seq = 'bad'"], ['applied_seq = -1'],
     ['id = 2'], ['repair_state = 1', true], ['repair_state = 2', true],
-    ...[0, 31, 33].flatMap((size) => [
+    ...[0, 8, 15, 17, 32].flatMap((size) => [
       [`applied_entry_hash = zeroblob(${size})`], [`applied_local_digest = zeroblob(${size})`],
     ]),
   ]
@@ -72,7 +86,7 @@ test('damaged Apply meta is never reseeded beside established user state', (t) =
         loose(f.db2, 'monsterft_meta_apply')
         if (damage === 'duplicate') f.db2.exec('INSERT INTO monsterft_meta_apply SELECT * FROM monsterft_meta_apply')
         if (damage === 'hash') f.db2.exec("UPDATE monsterft_meta_apply SET entry_hash = 'bad'")
-        if (damage === 'digest') f.db2.exec('UPDATE monsterft_meta_apply SET local_digest = zeroblob(31)')
+        if (damage === 'digest') f.db2.exec('UPDATE monsterft_meta_apply SET local_digest = zeroblob(15)')
         if (damage === 'seq') f.db2.exec('UPDATE monsterft_meta_apply SET seq = -1')
       }
       f.stop()
@@ -91,7 +105,7 @@ test('older retained receipts must match their own entry and pending sequence', 
     try {
       command(f)
       sync(f)
-      if (damage === 'hash') f.db2.exec('UPDATE monsterft_meta_apply SET entry_hash = zeroblob(32)')
+      if (damage === 'hash') f.db2.exec('UPDATE monsterft_meta_apply SET entry_hash = zeroblob(16)')
       if (damage === 'initial receipt') f.db2.exec(`
         UPDATE monsterft_meta_apply SET seq = -1, entry_hash = NULL, local_digest = NULL
       `)
@@ -124,7 +138,7 @@ test('runtime receipt copy failures preserve completed setup and CMD for restart
           BEGIN SELECT RAISE(${zeroRows ? 'IGNORE' : "ABORT, 'receipt copy failed'"}); END
         `)
         t.equal(f.complete(messages(r, 'execute', 'apply')[0],
-          setup ? [] : [[0, 'ok']], setup ? Buffer.alloc(32) : digest), undefined)
+          setup ? [] : [[0, 'ok']], setup ? Buffer.alloc(16) : digest), undefined)
         const err = f.diagnostics.find(({ type }) => type === 'error').error
         t.equal(err.code, Err.SQLITE_ERROR)
         t.match(err.message, /DB1 copy apply/)

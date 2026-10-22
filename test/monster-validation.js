@@ -4,7 +4,7 @@ import { protocol, append, record, cmd, messages, outputs } from './fixtures/pro
 import { isFwdCmdAck } from '../src/utilm.js'
 import * as Err from '../src/error.js'
 
-const digest = Buffer.alloc(32, 7)
+const digest = Buffer.alloc(16, 7)
 const sync = (fields={}) => ({
   type: 'sync', cmdSeq: 1n, quorum: true, digest, agree: ['a', 'b'], disagree: [], ...fields,
 })
@@ -30,7 +30,8 @@ test('committed malformed CMD and SYNC entries cannot advance Apply', (t) => {
   const syncs = [
     { cmdSeq: -1n }, { quorum: 'yes' }, { agree: ['a'] }, { agree: ['b', 'a'] },
     { agree: ['a', 'a'] }, { agree: ['a', 'foreign'] }, { disagree: ['c', 'c'] },
-    { disagree: ['foreign'] }, { digest: Buffer.alloc(31) }, { digest: null },
+    { disagree: ['foreign'] }, { digest: null },
+    ...[8, 15, 17, 32].map((size) => ({ digest: Buffer.alloc(size) })),
     { quorum: false, agree: ['a'] }, { cmdSeq: 99n },
   ].map(sync)
   for (const entry of [...cmds, ...syncs]) {
@@ -61,10 +62,10 @@ test('committed malformed CMD and SYNC entries cannot advance Apply', (t) => {
 
 test('SYNC membership takes precedence over the unlisted digest comparison', (t) => {
   for (const [fields, expected] of [
-    [{ agree: ['a', 'b'], disagree: ['a'], digest: Buffer.alloc(32, 9) }, 0],
+    [{ agree: ['a', 'b'], disagree: ['a'], digest: Buffer.alloc(16, 9) }, 0],
     [{ agree: ['b', 'c'], disagree: ['a'] }, 2],
     [{ agree: ['b', 'c'], disagree: [] }, 0],
-    [{ agree: ['b', 'c'], disagree: [], digest: Buffer.alloc(32, 9) }, 2],
+    [{ agree: ['b', 'c'], disagree: [], digest: Buffer.alloc(16, 9) }, 2],
   ]) {
     const f = protocol().setup()
     try {
@@ -87,12 +88,13 @@ test('early and stale reports remain isolated from later command decisions', (t)
     t.ok(messages(local, 'monster_outcome_request').length, 'missing report is requested again')
     for (const msg of [
       { type: 'monster_outcome', cmdSeq: -1n, digest },
-      { type: 'monster_outcome', cmdSeq: 1n, digest: Buffer.alloc(31) },
+      ...[8, 15, 17, 32].map((size) =>
+        ({ type: 'monster_outcome', cmdSeq: 1n, digest: Buffer.alloc(size) })),
       { type: 'monster_outcome_request', cmdSeq: -1n },
       { type: 'monster_outcome', cmdSeq: 99n, digest },
     ]) f.rpc(msg)
     t.equal(f.proc.log.seq, 1n)
-    t.equal(f.diagnostics.filter(({ role, type }) => role === 'procA' && type === 'warn').length, 3)
+    t.equal(f.diagnostics.filter(({ role, type }) => role === 'procA' && type === 'warn').length, 6)
     const decided = f.rpc({ type: 'monster_outcome', cmdSeq: 1n, digest })
     t.equal(f.proc.log.seq, 2n, 'decisive report appends SYNC in the same input')
     ack(f, page(decided))
@@ -115,12 +117,12 @@ test('five-member quorum remains possible until all matching groups are exhauste
       messages(submitted, 'append', from).find((msg) => msg.data), from)
     f.complete(messages(applied, 'execute', 'apply')[0], [[0, 'ok']], digest)
     for (const [from, byte] of [['b', 8], ['c', 9]]) {
-      f.rpc({ type: 'monster_outcome', cmdSeq: 1n, digest: Buffer.alloc(32, byte) }, from)
+      f.rpc({ type: 'monster_outcome', cmdSeq: 1n, digest: Buffer.alloc(16, byte) }, from)
       t.equal(f.proc.log.seq, 1n, 'remaining two members can still join an existing digest')
     }
-    f.rpc({ type: 'monster_outcome', cmdSeq: 1n, digest: Buffer.alloc(32, 8) }, 'b')
+    f.rpc({ type: 'monster_outcome', cmdSeq: 1n, digest: Buffer.alloc(16, 8) }, 'b')
     t.equal(f.proc.log.seq, 1n, 'duplicate report does not consume an absent member')
-    f.rpc({ type: 'monster_outcome', cmdSeq: 1n, digest: Buffer.alloc(32, 10) }, 'd')
+    f.rpc({ type: 'monster_outcome', cmdSeq: 1n, digest: Buffer.alloc(16, 10) }, 'd')
     t.equal(unpack(f.proc.log.head).quorum, false, 'four distinct reports make quorum impossible')
   } finally { f.close() }
   t.end()
@@ -199,9 +201,9 @@ test('leadership loss rejects queued work and recovery decides without replay', 
       const committed = ack(f, page(election))
       t.equal(messages(committed, 'execute', 'apply').length, 0, 'inherited CMD is not reapplied')
       t.equal(f.proc.engine.active.request, null, 'recovery has no old caller')
-      f.rpc({ type: 'monster_outcome', cmdSeq: 1n, digest: outcome === 'agree' ? digest : Buffer.alloc(32, 8) })
+      f.rpc({ type: 'monster_outcome', cmdSeq: 1n, digest: outcome === 'agree' ? digest : Buffer.alloc(16, 8) })
       if (outcome !== 'agree') f.rpc({ type: 'monster_outcome', cmdSeq: 1n,
-        digest: Buffer.alloc(32, outcome === 'outside' ? 8 : 9) }, 'c')
+        digest: Buffer.alloc(16, outcome === 'outside' ? 8 : 9) }, 'c')
       if (outcome === 'outside') {
         t.equal(f.state().meta.repair_state, 2n)
         t.notOk(f.proc.isOpen)
@@ -227,8 +229,8 @@ test('SYNC insertion failure discards buffered success; later timeout cannot rep
         BEGIN SELECT RAISE(ABORT, 'fence update failed'); END
       `)
       let r = f.rpc({ type: 'monster_outcome', cmdSeq: 1n,
-        digest: failure === 'fence' ? Buffer.alloc(32, 8) : digest })
-      if (failure === 'fence') r = f.rpc({ type: 'monster_outcome', cmdSeq: 1n, digest: Buffer.alloc(32, 8) }, 'c')
+        digest: failure === 'fence' ? Buffer.alloc(16, 8) : digest })
+      if (failure === 'fence') r = f.rpc({ type: 'monster_outcome', cmdSeq: 1n, digest: Buffer.alloc(16, 8) }, 'c')
       if (failure === 'timeout') {
         t.equal(outputs(r).filter(({ to }) => to === 'client').length, 1)
         const timed = f.tick(f.proc.executor.timems + 60)

@@ -2,6 +2,11 @@
 
 Function notes for [src/util.js](../src/util.js), in source order.
 
+All hashes use XXH3-128 with seed zero and canonical 16-byte big-endian
+output. The seed is fixed across nodes and restarts, independently of Gate's
+generation. Hashing is synchronous; byte views are passed to the native addon
+as Buffers without copying their contents.
+
 ## `isCid`
 
 Checks that a request identifier is a nonempty string.
@@ -30,6 +35,14 @@ no findings
 ## `isRpc`
 
 Checks the basic shape and type field of an RPC message.
+
+### findings
+
+no findings
+
+## `hashParts`
+
+Hashes consecutive byte sequences as one input without concatenating them.
 
 ### findings
 

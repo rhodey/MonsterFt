@@ -14,7 +14,7 @@ const roles = ['procA', 'procB', 'procC']
 const zero = { term: 1n, entry: Buffer.alloc(0) }
 const command = { term: 1n, entry: Buffer.from('CMD') }
 const sync = { term: 1n, entry: Buffer.from('SYNC') }
-const digest = Buffer.alloc(32, 7)
+const digest = Buffer.alloc(16, 7)
 
 function fixture() {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'monsterft-certify-'))
@@ -36,7 +36,7 @@ function fixture() {
     setup() {
       stores.forEach((store) => store.log.append(zero))
       db2.exec('CREATE TABLE items (id INTEGER PRIMARY KEY, value TEXT)')
-      receipt(0n, zero, Buffer.alloc(32))
+      receipt(0n, zero, Buffer.alloc(16))
       reconcile()
       return this
     },
@@ -175,7 +175,7 @@ test('certify validates corruption despite the unresolved-command override', (t)
     try {
       if (kind === 'receipt') {
         f.stores.forEach((store) => store.db.prepare('UPDATE monsterft_meta SET applied_local_digest = ?')
-          .run(Buffer.alloc(32, 9)))
+          .run(Buffer.alloc(16, 9)))
       } else if (kind === 'meta') {
         f.stores[2].db.exec('DELETE FROM monsterft_meta')
       } else {

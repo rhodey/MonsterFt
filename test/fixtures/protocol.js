@@ -87,7 +87,7 @@ function protocol(opts={}, nodes=['a', 'b', 'c'], id='a') {
       }
       return reply
     },
-    complete(execute, outcomes=execute.items?.map(() => [0, 'ok']) ?? [], digest=Buffer.alloc(32)) {
+    complete(execute, outcomes=execute.items?.map(() => [0, 'ok']) ?? [], digest=Buffer.alloc(16)) {
       const receipt = { seq: execute.seq, entry_hash: execute.entryHash, local_digest: digest }
       db2.prepare('UPDATE monsterft_meta_apply SET seq=?, entry_hash=?, local_digest=?')
         .run(receipt.seq, receipt.entry_hash, digest)

@@ -2,6 +2,7 @@ import crypto from 'node:crypto'
 import { EventEmitter } from 'node:events'
 import * as Err from './error.js'
 import * as wire from './wire.js'
+import { HASH_BYTES } from './util.js'
 
 const PROCS = ['procA', 'procB', 'procC']
 const COMPONENTS = [...PROCS, 'apply']
@@ -273,7 +274,7 @@ class Gate extends EventEmitter {
         const reply = await this._request(to, input, this.localTimeout, false, frame)
         if (this._stopped) { throw this._shutdownError ?? nodeClosed() }
         if (!Array.isArray(reply.outputs) || !reply.outputs.every((value) =>
-          Buffer.isBuffer(value) && (to === 'procA' || value.length === 32))) {
+          Buffer.isBuffer(value) && (to === 'procA' || value.length === HASH_BYTES))) {
           throw rpcIllegal('completion has invalid outputs')
         }
         const hashes = to === 'procA' ? reply.outputs.map(wire.checksum) : reply.outputs

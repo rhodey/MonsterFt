@@ -1,6 +1,6 @@
 import { EventEmitter } from 'node:events'
 import * as Err from './error.js'
-import { isCid, isSeq, isTerm, isSeed } from './util.js'
+import { isCid, isSeq, isTerm, isSeed, HASH_BYTES } from './util.js'
 import {
   asBuffer, assertEncodable, digestCmd, isDigest, outcomesWire,
 } from './utilm.js'
@@ -213,7 +213,7 @@ class MonsterApply extends EventEmitter {
       if (!db.isTransaction) {
         throw new Err.ErrorWithCode('DB2 seq0 transaction ended', Err.SQLITE_ERROR)
       }
-      receipt.local_digest = Buffer.alloc(32)
+      receipt.local_digest = Buffer.alloc(HASH_BYTES)
     } else {
       const session = db.createSession({ db: 'main' })
       let patchset = null

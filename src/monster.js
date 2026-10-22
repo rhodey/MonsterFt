@@ -130,7 +130,7 @@ class MonsterEngine extends RaftEngine {
     if (receipt.seq !== pending.seq || !utilm.asBuffer(receipt.entry_hash).equals(pending.hash) ||
         !Array.isArray(reply.outcomes) || reply.outcomes.length !== pending.count ||
         !reply.outcomes.every(utilm.isOutcomeTuple) ||
-        (receipt.seq === 0n && !utilm.asBuffer(receipt.local_digest).equals(Buffer.alloc(32)))) {
+        (receipt.seq === 0n && !utilm.asBuffer(receipt.local_digest).equals(Buffer.alloc(util.HASH_BYTES)))) {
       throw failure('Apply reply does not match execution', Err.MONSTER_CORRUPT)
     }
     sql.copyApply(this.store.db, receipt)

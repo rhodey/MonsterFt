@@ -38,7 +38,7 @@ function harness(options = {}) {
       if (message.type === 'capture') {
         reply(to, {
           type: 'ack', cid: message.cid,
-          selection: { state: Buffer.alloc(32), receipt: Buffer.alloc(32), donor: 'procA' },
+          selection: { state: Buffer.alloc(16), receipt: Buffer.alloc(16), donor: 'procA' },
         })
       } else if (message.type === 'input') {
         let outputs = []
@@ -201,7 +201,7 @@ test('Supervisor restarts a fatal Gate without mirroring its diagnostic', async 
   try {
     await h.supervisor.open()
     const run = h.runs[0]
-    run.gate.onReceive('b', Buffer.alloc(33))
+    run.gate.onReceive('b', Buffer.alloc(17))
     await until(() => h.opens.length === 2, 'replacement after Gate fatal')
     t.equal(run.diagnostics.at(-1).code, Err.FRAME_CORRUPT)
     t.ok([...run.children.values()].every(exited))

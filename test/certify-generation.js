@@ -80,7 +80,7 @@ test('certify preserves each generation while adopting an outlier and clearing r
     for (const store of f.stores) { store.log.append(setup) }
     f.db2.exec("CREATE TABLE items (value TEXT); INSERT INTO items VALUES ('preserved')")
     f.db2.prepare(`UPDATE monsterft_meta_apply SET seq = 0, entry_hash = ?, local_digest = ?`)
-      .run(digestEntry(setup.term, setup.entry), Buffer.alloc(32))
+      .run(digestEntry(setup.term, setup.entry), Buffer.alloc(16))
     for (const phase of ['capture', 'adopt', 'reconcile']) {
       for (const store of f.stores) { store[phase]() }
     }

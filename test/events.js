@@ -250,7 +250,7 @@ test('applying SYNC still pumps queued commands and reports the resulting append
       ['commit', 'change'], 'commit remains observable without a duplicate replication change')
     f.complete(messages(committed, 'execute', 'apply')[0])
     f.input('append', { requestId: 'second', items: [Buffer.from('second')] })
-    const decision = f.rpc({ type: 'monster_outcome', cmdSeq: 1n, digest: Buffer.alloc(32) }, 'b')
+    const decision = f.rpc({ type: 'monster_outcome', cmdSeq: 1n, digest: Buffer.alloc(16) }, 'b')
     const finished = ack(page(decision))
     t.equal(f.proc.engine.appliedSeq, 2n, 'SYNC advances internal applied progress')
     t.equal(f.proc.engine.active.cmdSeq, 3n, 'next command is started')
@@ -402,9 +402,9 @@ test('a committed repair decision retains its fence without publishing any outpu
       seqP: 0n, termP: 1n, data: [record(1n, cmd())], commitSeq: 1n,
     }))
     f.complete(messages(command, 'execute', 'apply')[0],
-      [[1, 'dissenting result', Err.APPLY_ERROR, null]], Buffer.alloc(32, 1))
+      [[1, 'dissenting result', Err.APPLY_ERROR, null]], Buffer.alloc(16, 1))
     const decision = pack({
-      type: 'sync', cmdSeq: 1n, quorum: true, digest: Buffer.alloc(32),
+      type: 'sync', cmdSeq: 1n, quorum: true, digest: Buffer.alloc(16),
       agree: ['b', 'c'], disagree: ['a'],
     })
     const completions = []

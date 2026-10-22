@@ -22,7 +22,7 @@ no findings
 
 ## `digestCmd`
 
-Produces the command agreement digest from the command identity, patchset,
+Produces the XXH3-128 command agreement digest from the command identity, patchset,
 and outcomes, excluding error stacks.
 
 ### findings
@@ -43,7 +43,7 @@ no findings
 
 ## `digestEntry`
 
-Produces the checkpoint hash identifying an entry's term and payload.
+Produces the XXH3-128 checkpoint hash identifying an entry's term and payload.
 
 ### findings
 

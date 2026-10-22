@@ -61,7 +61,7 @@ function fixture(id = 'a', nodes = ['a', 'b', 'c']) {
     },
     setup(reply) {
       const execute = outputs(reply).find(({ to }) => to === 'apply').message
-      const receipt = { seq: 0n, entry_hash: execute.entryHash, local_digest: Buffer.alloc(32) }
+      const receipt = { seq: 0n, entry_hash: execute.entryHash, local_digest: Buffer.alloc(16) }
       db2.prepare('UPDATE monsterft_meta_apply SET seq=?, entry_hash=?, local_digest=?')
         .run(receipt.seq, receipt.entry_hash, receipt.local_digest)
       return input('apply', { reply: { type: 'ack', cid: execute.cid, receipt, outcomes: [] } })

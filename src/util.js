@@ -1,7 +1,10 @@
 import fs from 'node:fs'
 import path from 'node:path'
+import xxhash from 'xxhash-addon'
 import * as Err from './error.js'
 
+const { XXHash128 } = xxhash
+const HASH_BYTES = 16
 const MAX_INT = 9_223_372_036_854_775_807n
 
 const isCid = (cid) => typeof cid === 'string' && cid.length > 0
@@ -13,6 +16,19 @@ const isSeed = (seed) => Buffer.isBuffer(seed) && seed.length === 16 &&
 const isRpc = (msg) => msg !== null && typeof msg === 'object' &&
   !Array.isArray(msg) && !(msg instanceof Uint8Array) &&
   typeof msg.type === 'string'
+
+// The native addon requires Buffers. Preserve the exact view without copying.
+const asBuffer = (bytes) => Buffer.isBuffer(bytes) ? bytes :
+  Buffer.from(bytes.buffer, bytes.byteOffset, bytes.byteLength)
+
+// XXH3-128, seed zero, canonical big-endian output.
+const hash = (bytes) => XXHash128.hash(asBuffer(bytes))
+
+function hashParts(...parts) {
+  const hasher = new XXHash128(Buffer.alloc(8))
+  for (const part of parts) { hasher.update(asBuffer(part)) }
+  return hasher.digest()
+}
 
 const createSQLiteDirectory = (databasePath) => {
   try {
@@ -41,6 +57,7 @@ const deleteSQLiteFiles = (databasePath) => {
 export {
   isCid, isTerm, isSeq, isSeed,
   isRpc,
+  HASH_BYTES, hash, hashParts,
   createSQLiteDirectory,
   deleteSQLiteFiles,
 }

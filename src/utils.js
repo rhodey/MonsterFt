@@ -197,8 +197,8 @@ function createMeta(db1, generation) {
         (applied_seq = -1 AND applied_entry_hash IS NULL AND
          applied_local_digest IS NULL) OR
         (applied_seq >= 0 AND applied_entry_hash IS NOT NULL AND
-         length(applied_entry_hash) = 32 AND applied_local_digest IS NOT NULL AND
-         length(applied_local_digest) = 32)
+         length(applied_entry_hash) = ${util.HASH_BYTES} AND applied_local_digest IS NOT NULL AND
+         length(applied_local_digest) = ${util.HASH_BYTES})
       ),
       CHECK (pending_cmd_seq IS NULL OR
              (pending_cmd_seq >= 0 AND pending_cmd_seq <= applied_seq))
@@ -222,8 +222,8 @@ function createApply(db2, generation) {
       local_digest BLOB,
       CHECK (
         (seq = -1 AND entry_hash IS NULL AND local_digest IS NULL) OR
-        (seq >= 0 AND entry_hash IS NOT NULL AND length(entry_hash) = 32 AND
-         local_digest IS NOT NULL AND length(local_digest) = 32)
+        (seq >= 0 AND entry_hash IS NOT NULL AND length(entry_hash) = ${util.HASH_BYTES} AND
+         local_digest IS NOT NULL AND length(local_digest) = ${util.HASH_BYTES})
       )
     ) STRICT;
   `)

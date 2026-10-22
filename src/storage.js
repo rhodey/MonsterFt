@@ -1,5 +1,4 @@
 import fs from 'node:fs'
-import crypto from 'node:crypto'
 import { DatabaseSync } from 'node:sqlite'
 import { pack } from 'msgpackr'
 import { SQLiteLog } from './log.js'
@@ -89,18 +88,18 @@ function readState(db) {
 
 function stateDigest(state) {
   const { election, meta, head } = state
-  return crypto.createHash('sha256').update(pack([
+  return util.hash(pack([
     election.term, election.votedFor,
     meta.applied_seq, asBuffer(meta.applied_entry_hash), meta.repair_state,
     meta.pending_cmd_seq, asBuffer(meta.applied_local_digest),
     head === null ? null : [head.seq, head.term, head.entry],
-  ])).digest()
+  ]))
 }
 
 function receiptDigest(receipt) {
-  return crypto.createHash('sha256').update(pack([
+  return util.hash(pack([
     receipt.seq, asBuffer(receipt.entry_hash), asBuffer(receipt.local_digest),
-  ])).digest()
+  ]))
 }
 
 function copyProtocolState(db1, donor, selected) {

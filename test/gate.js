@@ -27,7 +27,7 @@ function harness(options = {}) {
     if (message.type === 'capture') {
       reply(to, {
         type: 'ack', cid: message.cid,
-        selection: { state: Buffer.alloc(32), receipt: Buffer.alloc(32), donor: 'procA' },
+        selection: { state: Buffer.alloc(16), receipt: Buffer.alloc(16), donor: 'procA' },
       })
     } else if (message.type === 'input') {
       complete(to, message, options.outputs?.(message) ?? [])
@@ -216,7 +216,7 @@ test('Gate detects checksum-only disagreement without waiting for ProcA', async 
     local({ to, message, reply }) {
       if (message.kind !== 'append') { return false }
       if (to !== 'procA') {
-        reply(to, { type: 'ack', cid: message.cid, outputs: [Buffer.alloc(32, to === 'procB' ? 1 : 2)] })
+        reply(to, { type: 'ack', cid: message.cid, outputs: [Buffer.alloc(16, to === 'procB' ? 1 : 2)] })
       }
       return true
     },
@@ -304,7 +304,7 @@ test('Gate coalesces ticks while a Proc completion is delayed', async (t) => {
 test('Gate Apply watchdog expires while waiting for a third Proc', async (t) => {
   const execute = wire.encodePayload({ to: 'apply', message: {
     type: 'execute', cid: 'apply-timeout', term: 1n, seq: 1n, tickCount: 2n,
-    entryHash: Buffer.alloc(32), items: [Buffer.from('item')], matchIndex: [-1n, -1n, -1n],
+    entryHash: Buffer.alloc(16), items: [Buffer.from('item')], matchIndex: [-1n, -1n, -1n],
   } })
   const h = harness({
     opts: { applyTimeout: 15 },
@@ -317,7 +317,7 @@ test('Gate Apply watchdog expires while waiting for a third Proc', async (t) => 
   await assert.rejects(h.gate.append(Buffer.from('item')), { code: Err.APPLY_TIMEOUT })
   t.equal(h.errors[0].code, Err.APPLY_TIMEOUT, 'native watchdog runs independently of barrier')
   const request = h.requests.find((r) => r.message.type === 'execute')
-  t.ok(request.frame.subarray(32).equals(execute), 'Apply receives unchanged agreed bytes')
+  t.ok(request.frame.subarray(16).equals(execute), 'Apply receives unchanged agreed bytes')
   await h.gate.close()
   t.end()
 })
@@ -393,7 +393,7 @@ test('Gate stop cancels local work without coordinating owner shutdown', async (
 test('Gate stop preserves an earlier fatal error', async (t) => {
   const h = harness()
   await h.gate.open()
-  h.gate.onReceive('b', Buffer.alloc(33))
+  h.gate.onReceive('b', Buffer.alloc(17))
   const failure = h.errors[0]
   h.gate.stop()
   h.gate.stop()
@@ -672,7 +672,7 @@ test('Gate rejects differing startup selections before adoption', async (t) => {
     local({ to, message, reply }) {
       if (message.type !== 'capture') { return false }
       reply(to, { type: 'ack', cid: message.cid, selection: {
-        state: Buffer.alloc(32, to === 'procC' ? 1 : 0), receipt: Buffer.alloc(32), donor: 'procA',
+        state: Buffer.alloc(16, to === 'procC' ? 1 : 0), receipt: Buffer.alloc(16), donor: 'procA',
       } })
       return true
     },
@@ -913,18 +913,20 @@ test('both awaitLeader modes observe leader and commit changes without applied p
 })
 
 test('Gate malformed completion cannot satisfy an input', async (t) => {
-  const h = harness({
-    local({ to, message, reply }) {
-      if (to !== 'procB' || message.kind !== 'append') { return false }
-      reply(to, { type: 'ack', cid: message.cid, outputs: [Buffer.alloc(31)] })
-      return true
-    },
-  })
-  await assert.rejects(h.gate.drainCmd(), { code: Err.NODE_NOT_OPEN })
-  await h.gate.open()
-  await assert.rejects(h.gate.append(Buffer.alloc(0)), { code: Err.RPC_ILLEGAL })
-  t.equal(h.errors[0].code, Err.RPC_ILLEGAL)
-  await h.gate.close()
+  for (const size of [8, 15, 17, 32]) {
+    const h = harness({
+      local({ to, message, reply }) {
+        if (to !== 'procB' || message.kind !== 'append') { return false }
+        reply(to, { type: 'ack', cid: message.cid, outputs: [Buffer.alloc(size)] })
+        return true
+      },
+    })
+    await assert.rejects(h.gate.drainCmd(), { code: Err.NODE_NOT_OPEN })
+    await h.gate.open()
+    await assert.rejects(h.gate.append(Buffer.alloc(0)), { code: Err.RPC_ILLEGAL })
+    t.equal(h.errors[0].code, Err.RPC_ILLEGAL, `${size}-byte completion checksum is rejected`)
+    await h.gate.close()
+  }
   t.end()
 })
 
@@ -934,7 +936,7 @@ test('Gate does not release A/C outputs after synchronous A/B disagreement', asy
     local({ to, message, complete, reply }) {
       if (message.kind !== 'append') { return false }
       if (to === 'procB') {
-        reply(to, { type: 'ack', cid: message.cid, outputs: [Buffer.alloc(32)] })
+        reply(to, { type: 'ack', cid: message.cid, outputs: [Buffer.alloc(16)] })
       } else { complete(to, message, [output]) }
       return true
     },

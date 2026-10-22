@@ -1,13 +1,12 @@
-import { createHash } from 'node:crypto'
 import { Packr, Unpackr } from 'msgpackr'
 import { RESERVE_START_SPACE } from 'msgpackr/pack'
 import * as Err from './error.js'
+import { HASH_BYTES, hash as checksum } from './util.js'
 
 const encoder = new Packr({ useRecords: false, sequential: false })
 const decoder = new Unpackr({ useRecords: false, int64AsType: 'bigint' })
 
 const encodePayload = (value) => encoder.pack(value)
-const checksum = (payload) => createHash('sha256').update(payload).digest()
 
 function decodePayload(payload) {
   try {
@@ -24,17 +23,17 @@ function framePayload(payload, hash = checksum(payload)) {
 
 function encodeFrame(value) {
   // Encode directly after the space reserved for the checksum.
-  const frame = encoder.pack(value, RESERVE_START_SPACE | 32)
-  checksum(frame.subarray(32)).copy(frame, 0)
+  const frame = encoder.pack(value, RESERVE_START_SPACE | HASH_BYTES)
+  checksum(frame.subarray(HASH_BYTES)).copy(frame, 0)
   return frame
 }
 
 function verifyFrame(frame) {
-  if (!Buffer.isBuffer(frame) || frame.length <= 32) {
+  if (!Buffer.isBuffer(frame) || frame.length <= HASH_BYTES) {
     throw new Err.ErrorWithCode('frame is incomplete', Err.FRAME_CORRUPT)
   }
-  const payload = frame.subarray(32)
-  if (!checksum(payload).equals(frame.subarray(0, 32))) {
+  const payload = frame.subarray(HASH_BYTES)
+  if (!checksum(payload).equals(frame.subarray(0, HASH_BYTES))) {
     throw new Err.ErrorWithCode('frame checksum differs', Err.FRAME_CORRUPT)
   }
   return payload

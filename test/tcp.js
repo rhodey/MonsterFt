@@ -44,7 +44,7 @@ test('TCP transports exact checksummed Buffers including nested Raft and Apply r
         { term: 3n, entry: Buffer.from([0, 255, 128]) },
       ] },
       { type: 'ack', cid: 'apply', tickCount: 83n, receipt: {
-        id: 1n, seq: 15n, entry_hash: Buffer.alloc(32, 9), local_digest: Buffer.alloc(32, 4),
+        id: 1n, seq: 15n, entry_hash: Buffer.alloc(16, 9), local_digest: Buffer.alloc(16, 4),
       }, outcomes: [[0, { answer: 42 }], [1, 'failed', Err.APPLY_ERROR, 1555,
         'Error: failed\n    at userApply (/app.js:15:2)']] },
       { type: 'err', term: 3n, cid: 'hint', code: Err.REPL_BACKTRACK, logSeq: -1n },

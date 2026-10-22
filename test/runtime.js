@@ -1,5 +1,6 @@
 import test from 'tape'
 import crypto from 'node:crypto'
+import xxhash from 'xxhash-addon'
 import { Executor } from '../src/executor.js'
 import { Random } from '../src/random.js'
 import {
@@ -7,6 +8,8 @@ import {
   checksum, framePayload, errorToWire, errorFromWire,
 } from '../src/wire.js'
 import * as Err from '../src/error.js'
+
+const { XXHash128 } = xxhash
 
 test('executor drains input continuations before due timers', (t) => {
   const executor = new Executor()
@@ -132,7 +135,8 @@ test('frames decode independently and preserve nested records and shared errors'
   t.deepEqual(decodeFrame(frames[1]), messages[1])
   t.deepEqual(decodeFrame(frames[0]), messages[0])
   for (const [index, frame] of frames.entries()) {
-    t.deepEqual(frame.subarray(0, 32), crypto.createHash('sha256').update(frame.subarray(32)).digest())
+    t.deepEqual(frame.subarray(0, 16), XXHash128.hash(frame.subarray(16)),
+      'frame prefix is the canonical XXH3-128 checksum of the exact payload')
     t.deepEqual(decodePayload(encodePayload(messages[index])), messages[index])
     t.deepEqual(encodeFrame(messages[index]), frame, 'encoding does not depend on prior frames')
   }
@@ -180,15 +184,21 @@ test('encoded frames preserve their bytes across later encodes and delayed sends
 test('frames reject corrupt bytes and malformed payloads', (t) => {
   const frame = encodeFrame({ type: 'tick', tickCount: 1n })
   const payload = verifyFrame(frame)
-  t.deepEqual(payload, frame.subarray(32), 'verification returns the encoded payload')
+  t.deepEqual(payload, frame.subarray(16), 'verification returns the encoded payload')
   t.equal(payload.buffer, frame.buffer, 'verification does not copy the payload')
-  for (const offset of [0, 31, 32, frame.length - 1]) {
+  for (const offset of [0, 15, 16, frame.length - 1]) {
     const corrupt = Buffer.from(frame)
     corrupt[offset] ^= 1
     t.throws(() => decodeFrame(corrupt), (err) => err.code === Err.FRAME_CORRUPT)
   }
-  for (const incomplete of [null, 'frame', Buffer.alloc(0), Buffer.alloc(32)]) {
+  for (const incomplete of [null, 'frame', Buffer.alloc(0), Buffer.alloc(16)]) {
     t.throws(() => decodeFrame(incomplete), (err) => err.code === Err.FRAME_CORRUPT)
+  }
+  for (const size of [8, 32]) {
+    const wrongPrefix = Buffer.alloc(size)
+    checksum(payload).copy(wrongPrefix)
+    t.throws(() => decodeFrame(Buffer.concat([wrongPrefix, payload])),
+      (err) => err.code === Err.FRAME_CORRUPT, `${size}-byte checksum prefixes are rejected`)
   }
   const malformed = Buffer.from([0xdb, 0, 0, 0, 10, 65])
   const malformedFrame = framePayload(malformed, checksum(malformed))

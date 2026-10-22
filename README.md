@@ -188,7 +188,7 @@ their `data/` directories between runs.
 Each cluster node runs three protocol copies with separate SQLite logs. Gate
 supplies identical ordered inputs and logical time, compares their committed
 outputs, and passes agreed requests to the cluster or the single Apply owner.
-Frames carry SHA-256 checksums. Startup reconciles the local protocol copies
+Frames carry XXH3-128 checksums. Startup reconciles the local protocol copies
 by majority before recovering completed Apply work.
 
 For separate processes, construct each component in its intended process and

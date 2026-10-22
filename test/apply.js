@@ -1,5 +1,5 @@
 import test from 'tape'
-import crypto from 'node:crypto'
+import xxhash from 'xxhash-addon'
 import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
@@ -12,6 +12,7 @@ import { digestCmd, digestEntry, outcomesPublic } from '../src/utilm.js'
 import { encodeFrame, decodeFrame } from '../src/wire.js'
 import * as Err from '../src/error.js'
 
+const { XXHash128 } = xxhash
 const seed = Buffer.alloc(16, 1)
 const schema = 'CREATE TABLE items (id INTEGER PRIMARY KEY, value INTEGER NOT NULL)'
 const buf = (value) => Buffer.from(value)
@@ -80,7 +81,7 @@ test('Apply commits setup and CMD receipts without hashing receipt writes', asyn
     await f.start()
     const setup = await f.execute(0n, null)
     t.equal(setup.type, 'ack')
-    t.deepEqual(setup.receipt.local_digest, Buffer.alloc(32), 'setup uses zero digest')
+    t.deepEqual(setup.receipt.local_digest, Buffer.alloc(16), 'setup uses zero digest')
     t.deepEqual(setup.receipt.entry_hash, digestEntry(3n, buf('0')), 'setup keeps requested entry hash')
     t.deepEqual(calls[0], { data: null, term: 3n, seq: 0n, index: 0, matchIndex: null },
       'setup callback arguments remain unchanged')
@@ -99,10 +100,9 @@ test('Apply commits setup and CMD receipts without hashing receipt writes', asyn
       patchset = Buffer.from(session.patchset())
       session.close()
     } finally { control.close() }
-    const expected = crypto.createHash('sha256')
-      .update(pack([3n, 5n, patchset, [[0, 14], [0, 18]]])).digest()
+    const expected = XXHash128.hash(pack([3n, 5n, patchset, [[0, 14], [0, 18]]]))
     t.deepEqual(result.receipt.local_digest, expected,
-      'digest bytes match the original formula and exclude receipt metadata')
+      'XXH3-128 hashes the command tuple and excludes receipt metadata')
     t.deepEqual(f.diagnostics, [], 'success emits no diagnostics')
   } finally { await f.close() }
   t.end()
@@ -160,8 +160,7 @@ test('command digests exclude stacks while rejected result tuples preserve them'
     message: 'failure', code: 55, sqlCode: null, stack,
   } }]
   const patchset = buf('independent patch bytes')
-  const expected = crypto.createHash('sha256')
-    .update(pack([9n, 13n, patchset, [[1, 'failure', 55, null]]])).digest()
+  const expected = XXHash128.hash(pack([9n, 13n, patchset, [[1, 'failure', 55, null]]]))
   t.deepEqual(digestCmd(9n, 13n, patchset, outcome('A trace')), expected)
   t.deepEqual(digestCmd(9n, 13n, patchset, outcome('B trace')), expected)
   t.end()
@@ -573,13 +572,15 @@ test('Apply preserves the correct receipt on either side of COMMIT failure', asy
 })
 
 test('Apply validates execution and frame checksums before invoking user code', async (t) => {
-  for (const kind of ['invalid items', 'corrupt frame']) {
+  for (const kind of ['invalid items', 'corrupt frame', 8, 15, 17, 32]) {
     let calls = 0
     const f = fixture(() => { calls++ })
     try {
       await f.start()
-      if (kind === 'invalid items') {
-        const reply = await f.execute(0n, [buf('not setup')])
+      if (kind !== 'corrupt frame') {
+        const reply = kind === 'invalid items'
+          ? await f.execute(0n, [buf('not setup')])
+          : await f.execute(0n, null, { entryHash: Buffer.alloc(kind) })
         t.equal(reply, undefined)
         t.equal(f.diagnostics.find(({ type }) => type === 'error').err.code, Err.RPC_ILLEGAL)
       } else {
