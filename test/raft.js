@@ -28,7 +28,7 @@ function fixture() {
   const seed = Buffer.from('10111213202122233031323340414243', 'hex')
   for (const proc of procs) { request(proc, { type: 'hello', seed }) }
   for (const proc of procs) { request(proc, { type: 'open' }) }
-  const db2 = openApplyDatabase(base)
+  const db2 = openApplyDatabase(base, seed)
   for (const type of ['capture', 'adopt', 'reconcile']) {
     for (const proc of procs) {
       const reply = request(proc, { type })

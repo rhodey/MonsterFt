@@ -4,6 +4,7 @@ Function notes for [src/error.js](../src/error.js), in source order.
 
 `MONSTER_CORRUPT` covers invalid Monster records and protocol or Apply metadata.
 `LOG_CORRUPT` covers invalid log rows, sequences, terms, and election fields.
+`GENERATION_DIFF` stops an owner superseded by another startup.
 
 ## `ErrorWithCode.constructor`
 

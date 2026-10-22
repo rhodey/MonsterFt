@@ -9,6 +9,7 @@ import * as sql from '../src/utils.js'
 import { digestEntry } from '../src/utilm.js'
 import * as Err from '../src/error.js'
 
+const seed = Buffer.alloc(16, 1)
 const roles = ['procA', 'procB', 'procC']
 const record = (term=1n, entry='entry') => ({ term, entry: Buffer.from(entry) })
 
@@ -27,8 +28,8 @@ function fixture() {
     get apply() { return apply },
     open() {
       stores = roles.map((role) => new ProtocolStore(role, base))
-      stores.forEach((store) => store.open())
-      apply = openApplyDatabase(base)
+      stores.forEach((store) => store.open(seed))
+      apply = openApplyDatabase(base, seed)
       return this
     },
     capture() { return stores.map((store) => store.capture()) },
@@ -108,7 +109,7 @@ test('all DB1 schema creation rolls back together', (t) => {
   const log = new SQLiteLog(f.paths.procA)
   try {
     t.throws(() => log.open({ initialize(db) {
-      sql.createMeta(db)
+      sql.createMeta(db, seed)
       throw new Error('injected creation')
     } }), /injected creation/)
     t.equal(readDatabase(f.paths.procA, (db) => db.prepare('SELECT name FROM sqlite_schema').all().length),
@@ -149,10 +150,10 @@ test('fresh metadata can resume after each creation boundary', (t) => {
     try {
       for (let i = 0; i < Math.min(3, completed); i++) {
         const store = new ProtocolStore(roles[i], f.base)
-        store.open()
+        store.open(seed)
         store.close()
       }
-      if (completed === 4) { openApplyDatabase(f.base).close() }
+      if (completed === 4) { openApplyDatabase(f.base, seed).close() }
       f.open()
       const metas = f.reconcile()
       t.ok(metas.every((meta) => meta.applied_seq === -1n), `initial checkpoint after ${completed} creations`)
@@ -166,7 +167,7 @@ test('fresh metadata can resume after each creation boundary', (t) => {
   }
   const f = fixture()
   try {
-    openApplyDatabase(f.base).close()
+    openApplyDatabase(f.base, seed).close()
     f.open()
     t.equal(f.reconcile()[0].applied_seq, -1n, 'Apply may open before Procs')
   } finally { f.cleanup() }
@@ -190,7 +191,7 @@ test('invalid established DB1 cannot be rebuilt from two valid peers', (t) => {
         if (damage === 'term') { db.exec('UPDATE raft_election SET current_term = -1') }
         db.close()
       }
-      t.throws(() => new ProtocolStore('procA', f.base).open(), undefined, `${damage} peer stops startup`)
+      t.throws(() => new ProtocolStore('procA', f.base).open(seed), undefined, `${damage} peer stops startup`)
       if (damage === 'missing') { t.notOk(fs.existsSync(f.paths.procC), 'missing peer remains absent') }
     } finally { f.cleanup() }
   }
@@ -258,7 +259,7 @@ test('adopted history failure closes and rolls back the entire copy', (t) => {
     const db = new DatabaseSync(f.paths.procC)
     db.exec('DROP TRIGGER reject_copy')
     db.close()
-    outlier.open()
+    outlier.open(seed)
     f.reconcile()
     t.equal(outlier.log.seq, 2n, 'reopened repair completes')
   } finally { f.cleanup() }
@@ -326,7 +327,7 @@ test('failed receipt import preserves DB2 work for reopening', (t) => {
     const db = new DatabaseSync(f.paths.procA)
     db.exec('DROP TRIGGER reject_import')
     db.close()
-    f.stores[0].open()
+    f.stores[0].open(seed)
     t.ok(f.reconcile().every((meta) => meta.applied_seq === 0n), 'next startup completes import')
   } finally { f.cleanup() }
   t.end()

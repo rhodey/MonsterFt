@@ -38,7 +38,7 @@ function fixture(opts={}) {
     startup() {
       for (let i = 0; i < 3; i++) { this.request(i, { type: 'hello', seed }) }
       for (let i = 0; i < 3; i++) { this.request(i, { type: 'open' }) }
-      openApplyDatabase(base).close()
+      openApplyDatabase(base, seed).close()
       for (const type of ['capture', 'adopt', 'reconcile']) {
         for (let i = 0; i < 3; i++) {
           const reply = this.request(i, { type })

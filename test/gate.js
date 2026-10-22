@@ -79,11 +79,10 @@ test('Gate hello retries use fresh CIDs and one seed before phased startup', asy
   release()
   await opening
   const hellos = h.requests.filter((r) => r.message.type === 'hello')
-  const seeds = hellos.filter((r) => r.to !== 'apply').map((r) => r.message.seed)
+  const seeds = hellos.map((r) => r.message.seed)
   t.ok(seeds.every((seed) => seed.length === 16 && seed.equals(seeds[0])), 'all attempts share one seed')
   const b = hellos.filter((r) => r.to === 'procB')
   t.notEqual(b[0].message.cid, b[1].message.cid, 'retry has a fresh CID')
-  t.notOk(Object.hasOwn(hellos.find((r) => r.to === 'apply').message, 'seed'), 'Apply has no seed')
   t.deepEqual(h.requests.filter((r) => r.to === 'procA').map((r) => r.message.type),
     ['hello', 'open', 'capture', 'adopt', 'reconcile', 'input'], 'startup phases stay ordered')
   t.equal(h.gate.tickCount, 1n, 'runtime start is first ordered input')

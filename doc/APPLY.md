@@ -50,7 +50,8 @@ no findings
 ## `onReceive`
 
 Handles Gate's startup, execution, and shutdown requests, permitting only one
-execution at a time and returning its receipt and outcomes.
+execution at a time and returning its receipt and outcomes. Claims the startup
+generation and rejects superseded requests before executing callbacks.
 
 ### findings
 
@@ -78,7 +79,8 @@ DB2 changes, preserving individual command failures as outcomes and local warnin
   be repeated on replay. This applies to setup and command callbacks. The
   README should say that after a caught database error, if `db.isTransaction`
   is false, the callback must rethrow and issue no further SQL. That guidance
-  has not yet been added.
+  has not yet been added. Such autocommit writes also bypass the generation
+  check protecting the original transaction.
 
 ## `close`
 

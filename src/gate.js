@@ -157,8 +157,7 @@ class Gate extends EventEmitter {
   async _hello(to) {
     while (!this._stopped) {
       try {
-        const message = { type: 'hello' }
-        if (to !== 'apply') { message.seed = this._seed }
+        const message = { type: 'hello', seed: this._seed }
         await this._request(to, message)
         this._helloDone.add(to)
         return

@@ -1,6 +1,6 @@
 import { EventEmitter } from 'node:events'
 import * as Err from './error.js'
-import { isCid } from './util.js'
+import { isCid, isSeed } from './util.js'
 import { ProtocolStore } from './storage.js'
 import { Executor } from './executor.js'
 import { Random } from './random.js'
@@ -143,6 +143,7 @@ class MonsterProc extends EventEmitter {
     this._outputs = []
     this._diagnostics = []
     this.db.exec('BEGIN IMMEDIATE')
+    this.store.checkGeneration()
     this.executor.run(message.timems, () => {
       switch (message.kind) {
         case 'start': this.engine.start(); break
@@ -191,8 +192,7 @@ class MonsterProc extends EventEmitter {
         if (this._pastHello) { throw illegal('Proc received hello after startup') }
         // Validate without advancing the shared generator. A new Gate may start
         // hello again while this Proc is still waiting in the hello phase.
-        if (!Buffer.isBuffer(message.seed) || message.seed.length !== 16 ||
-            message.seed.every((byte) => byte === 0)) {
+        if (!isSeed(message.seed)) {
           throw illegal('seed must be a nonzero 16-byte Buffer')
         }
         this._seed = message.seed
@@ -205,7 +205,7 @@ class MonsterProc extends EventEmitter {
         this.random = new Random(this._seed)
       }
       if (message.type === 'open' && this._phase === 'hello') {
-        this.store.open()
+        this.store.open(this._seed)
         this._phase = 'opened'
         this._ack(message)
       } else if (message.type === 'capture' && this._phase === 'opened') {

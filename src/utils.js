@@ -4,9 +4,34 @@ import { digestEntry, isDigest } from './utilm.js'
 
 const asBuffer = (value) =>
   Buffer.from(value.buffer, value.byteOffset, value.byteLength)
+const isGeneration = (value) => value instanceof Uint8Array && value.byteLength === 16 &&
+  value.some((byte) => byte !== 0)
 
 const corrupt = (message) => {
   throw new Err.ErrorWithCode(message, Err.MONSTER_CORRUPT)
+}
+
+function claimGeneration(db, table, generation) {
+  if (!util.isSeed(generation)) {
+    throw new Err.ErrorWithCode('generation must be a nonzero 16-byte Buffer', Err.ARGUMENT_ILLEGAL)
+  }
+  if (!db.isTransaction) {
+    throw new Err.ErrorWithCode('generation claim requires a transaction', Err.MONSTER_ILLEGAL)
+  }
+  if (db.prepare(`UPDATE ${table} SET generation = ? WHERE id = 1`).run(generation).changes !== 1n) {
+    corrupt(`${table} row is missing`)
+  }
+}
+
+function checkGeneration(db, table, generation) {
+  const row = db.prepare(`SELECT generation FROM ${table} WHERE id = 1`).get()
+  const name = table === 'monsterft_meta' ? 'DB1' : 'DB2'
+  if (!isGeneration(row?.generation)) {
+    corrupt(`${name} generation is corrupt`)
+  }
+  if (!asBuffer(row.generation).equals(generation)) {
+    throw new Err.ErrorWithCode(`${name} generation different`, Err.GENERATION_DIFF)
+  }
 }
 
 function readMeta(db1) {
@@ -15,14 +40,15 @@ function readMeta(db1) {
   `).get()
   if (table?.type !== 'table') { corrupt('meta table is missing') }
   const rows = db1.prepare(`
-    SELECT id, applied_seq, applied_entry_hash, repair_state,
+    SELECT id, generation, applied_seq, applied_entry_hash, repair_state,
            pending_cmd_seq, applied_local_digest
     FROM monsterft_meta
   `).all()
   if (rows.length !== 1 || rows[0].id !== 1n) {
     corrupt('meta row is missing or not singleton')
   }
-  const meta = rows[0]
+  const { generation, ...meta } = rows[0]
+  if (!isGeneration(generation)) { corrupt('DB1 generation is corrupt') }
   if (!util.isSeq(meta.applied_seq)) { corrupt('applied sequence is corrupt') }
   if (meta.repair_state !== 0n && meta.repair_state !== 1n && meta.repair_state !== 2n) {
     corrupt('stored repair state is corrupt')
@@ -52,12 +78,14 @@ function readApply(db2) {
   `).get()
   if (table?.type !== 'table') { corrupt('apply meta table is missing') }
   const rows = db2.prepare(`
-    SELECT id, seq, entry_hash, local_digest FROM monsterft_meta_apply
+    SELECT id, generation, seq, entry_hash, local_digest FROM monsterft_meta_apply
   `).all()
   if (rows.length !== 1 || rows[0].id !== 1n) {
     corrupt('apply meta row is missing or not singleton')
   }
-  return validateReceipt(rows[0])
+  const { generation, ...receipt } = rows[0]
+  if (!isGeneration(generation)) { corrupt('DB2 generation is corrupt') }
+  return validateReceipt(receipt)
 }
 
 function validateReceipt(receipt) {
@@ -155,10 +183,11 @@ function reconcileReceipt(db1, receipt) {
   return meta
 }
 
-function createMeta(db1) {
+function createMeta(db1, generation) {
   db1.exec(`
     CREATE TABLE monsterft_meta (
       id INTEGER PRIMARY KEY CHECK (id = 1),
+      generation BLOB NOT NULL CHECK (length(generation) = 16),
       applied_seq INTEGER NOT NULL,
       applied_entry_hash BLOB,
       repair_state INTEGER NOT NULL CHECK (repair_state IN (0, 1, 2)),
@@ -174,17 +203,20 @@ function createMeta(db1) {
       CHECK (pending_cmd_seq IS NULL OR
              (pending_cmd_seq >= 0 AND pending_cmd_seq <= applied_seq))
     ) STRICT;
-    INSERT INTO monsterft_meta
-      (id, applied_seq, applied_entry_hash, repair_state,
-       pending_cmd_seq, applied_local_digest)
-    VALUES (1, -1, NULL, 0, NULL, NULL);
   `)
+  db1.prepare(`
+    INSERT INTO monsterft_meta
+      (id, generation, applied_seq, applied_entry_hash, repair_state,
+       pending_cmd_seq, applied_local_digest)
+    VALUES (1, ?, -1, NULL, 0, NULL, NULL)
+  `).run(generation)
 }
 
-function createApply(db2) {
+function createApply(db2, generation) {
   db2.exec(`
     CREATE TABLE monsterft_meta_apply (
       id INTEGER PRIMARY KEY CHECK (id = 1),
+      generation BLOB NOT NULL CHECK (length(generation) = 16),
       seq INTEGER NOT NULL,
       entry_hash BLOB,
       local_digest BLOB,
@@ -194,9 +226,11 @@ function createApply(db2) {
          local_digest IS NOT NULL AND length(local_digest) = 32)
       )
     ) STRICT;
-    INSERT INTO monsterft_meta_apply (id, seq, entry_hash, local_digest)
-    VALUES (1, -1, NULL, NULL);
   `)
+  db2.prepare(`
+    INSERT INTO monsterft_meta_apply (id, generation, seq, entry_hash, local_digest)
+    VALUES (1, ?, -1, NULL, NULL)
+  `).run(generation)
 }
 
 function reconcile(db1, db2) {
@@ -204,6 +238,7 @@ function reconcile(db1, db2) {
 }
 
 export {
+  claimGeneration, checkGeneration,
   readMeta, readApply, verifyEntry, copyApply, createMeta, createApply,
   validateReceipt, reconcileReceipt, reconcile,
 }

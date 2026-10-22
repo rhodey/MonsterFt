@@ -3,6 +3,22 @@
 Function notes for [src/utils.js](../src/utils.js), in source order.
 Trivial helpers and direct delegation functions are omitted.
 
+## `claimGeneration`
+
+Claims an existing metadata row for this startup inside its write transaction.
+
+### findings
+
+no findings
+
+## `checkGeneration`
+
+Rejects a corrupt generation or one belonging to a different startup.
+
+### findings
+
+no findings
+
 ## `readMeta`
 
 Reads and validates the singleton protocol metadata in DB1.
@@ -64,7 +80,8 @@ eligible receipt into DB1 when its checkpoint is behind.
 
 ## `createMeta`
 
-Creates DB1's protocol metadata table and its initial singleton row.
+Creates DB1's protocol metadata table and its initial singleton row with the
+startup generation.
 
 ### findings
 
@@ -72,7 +89,8 @@ no findings
 
 ## `createApply`
 
-Creates DB2's Apply receipt table and its initial singleton row.
+Creates DB2's Apply receipt table and its initial singleton row with the
+startup generation.
 
 ### findings
 

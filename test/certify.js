@@ -9,6 +9,7 @@ import { digestEntry } from '../src/utilm.js'
 import { readMeta, readApply } from '../src/utils.js'
 import * as Err from '../src/error.js'
 
+const seed = Buffer.alloc(16, 1)
 const roles = ['procA', 'procB', 'procC']
 const zero = { term: 1n, entry: Buffer.alloc(0) }
 const command = { term: 1n, entry: Buffer.from('CMD') }
@@ -20,8 +21,8 @@ function fixture() {
   const base = path.join(dir, 'node')
   const paths = databasePaths(base)
   const stores = roles.map((role) => new ProtocolStore(role, base))
-  stores.forEach((store) => store.open())
-  let db2 = openApplyDatabase(base)
+  stores.forEach((store) => store.open(seed))
+  let db2 = openApplyDatabase(base, seed)
   const reconcile = () => {
     stores.forEach((store) => store.capture())
     stores.forEach((store) => store.adopt())

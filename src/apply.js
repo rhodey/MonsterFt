@@ -1,11 +1,11 @@
 import { EventEmitter } from 'node:events'
 import * as Err from './error.js'
-import { isCid, isSeq, isTerm } from './util.js'
+import { isCid, isSeq, isTerm, isSeed } from './util.js'
 import {
   asBuffer, assertEncodable, digestCmd, isDigest, outcomesWire,
 } from './utilm.js'
 import { openApplyDatabase } from './storage.js'
-import { readApply } from './utils.js'
+import { readApply, checkGeneration } from './utils.js'
 import { decodeFrame, encodeFrame, errorToWire } from './wire.js'
 
 const noop = () => {}
@@ -28,9 +28,8 @@ class MonsterApply extends EventEmitter {
     this.db = null
     this._localSend = localSend
     this._databasePath = databasePath
-    this._opts = opts
     this._apply = opts.apply
-    this._hello = false
+    this._seed = null
     this._pastHello = false
     this._ready = false
     this._stopped = false
@@ -126,11 +125,14 @@ class MonsterApply extends EventEmitter {
         if (this._pastHello) {
           throw new Err.ErrorWithCode('Apply received hello after startup', Err.RPC_ILLEGAL)
         }
-        this._hello = true
+        if (!isSeed(msg.seed)) {
+          throw new Err.ErrorWithCode('seed must be a nonzero 16-byte Buffer', Err.RPC_ILLEGAL)
+        }
+        this._seed = msg.seed
         this._ack(msg)
         return
       }
-      if (!this._hello) {
+      if (this._seed === null) {
         throw new Err.ErrorWithCode('Apply has not received hello', Err.RPC_ILLEGAL)
       }
       this._pastHello = true
@@ -138,7 +140,7 @@ class MonsterApply extends EventEmitter {
         if (this.db !== null) {
           throw new Err.ErrorWithCode('Apply is already open', Err.MONSTER_ILLEGAL)
         }
-        this.db = openApplyDatabase(this._databasePath, this._opts)
+        this.db = openApplyDatabase(this._databasePath, this._seed)
         this._ack(msg)
         return
       }
@@ -146,6 +148,7 @@ class MonsterApply extends EventEmitter {
         if (this.db === null || this._ready) {
           throw new Err.ErrorWithCode('Apply startup is illegal', Err.MONSTER_ILLEGAL)
         }
+        checkGeneration(this.db, 'monsterft_meta_apply', this._seed)
         this._ready = true
         this._ack(msg)
         return
@@ -155,6 +158,10 @@ class MonsterApply extends EventEmitter {
       }
       this._validateExecute(msg)
       this.tickCount = msg.tickCount
+      // Hold the generation check, receipt read, and callback in one write
+      // transaction so a replacement cannot claim DB2 during execution.
+      this.db.exec('BEGIN IMMEDIATE')
+      checkGeneration(this.db, 'monsterft_meta_apply', this._seed)
       const previous = readApply(this.db)
       if (msg.seq <= previous.seq || (previous.seq === -1n && msg.seq !== 0n)) {
         throw new Err.ErrorWithCode('Apply sequence is not advancing', Err.MONSTER_ILLEGAL)
@@ -200,7 +207,6 @@ class MonsterApply extends EventEmitter {
       local_digest: null,
     }
     const outcomes = []
-    db.exec('BEGIN IMMEDIATE')
     if (msg.seq === 0n) {
       await this._apply(db, null, msg.term, 0n, 0, null)
       this._throwIfStopped()

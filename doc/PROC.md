@@ -68,7 +68,8 @@ no findings
 ## `_input`
 
 Processes one ordered input and its runnable protocol work atomically in DB1,
-checking for a final status change before commit. Fatal repair fences are durable
+rejecting a superseded generation before protocol work and checking for a final
+status change before commit. Fatal repair fences are durable
 but produce no input completion. Quorum-impossible decisions report a nonfatal
 error while allowing replication to continue.
 
@@ -79,7 +80,7 @@ no findings
 ## `onReceive`
 
 Handles Gate's startup, runtime, and shutdown requests, enforcing the Proc
-lifecycle and reporting failures.
+lifecycle and reporting failures. Claims the startup generation when opening DB1.
 
 ### findings
 

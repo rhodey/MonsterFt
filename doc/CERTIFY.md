@@ -25,6 +25,7 @@ no findings
 Certifies an offline database family by validating the matching copies, adopting
 its majority protocol state, reconciling the Apply receipt, and clearing repair
 fences. Returns the agreed applied sequence.
+Requires exclusive access to all four databases and preserves their generations.
 
 ### findings
 

@@ -41,8 +41,9 @@ no findings
 
 ## `_hello`
 
-Establishes contact with a local component, sharing Proc randomness and retrying
-hello timeouts until the component responds or Gate closes.
+Establishes contact with a local component and shares the startup seed used for
+database generations and Proc randomness. Retries hello timeouts until the
+component responds or Gate closes.
 
 ### findings
 
@@ -51,7 +52,7 @@ no findings
 ## `open`
 
 Coordinates local startup and reconciliation, then starts ordered protocol
-processing and clock ticks.
+processing and clock ticks. All four owners claim their generations before capture.
 
 ### findings
 

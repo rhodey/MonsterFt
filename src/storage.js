@@ -106,7 +106,7 @@ function copyProtocolState(db1, donor, selected) {
   }
   const state = readState(donor)
   if (!stateDigest(state).equals(selected)) { corrupt('DB1 donor changed after capture') }
-  db1.exec('DELETE FROM raft_log; DELETE FROM raft_election; DELETE FROM monsterft_meta')
+  db1.exec('DELETE FROM raft_log; DELETE FROM raft_election')
   const insert = db1.prepare('INSERT INTO raft_log (seq, term, entry) VALUES (?, ?, ?)')
   let next = null
   for (const row of donor.prepare('SELECT seq, term, entry FROM raft_log ORDER BY seq').iterate()) {
@@ -121,13 +121,14 @@ function copyProtocolState(db1, donor, selected) {
     INSERT INTO raft_election (id, current_term, voted_for) VALUES (1, ?, ?)
   `).run(state.election.term, state.election.votedFor)
   const meta = state.meta
-  db1.prepare(`
-    INSERT INTO monsterft_meta
-      (id, applied_seq, applied_entry_hash, repair_state,
-       pending_cmd_seq, applied_local_digest)
-    VALUES (1, ?, ?, ?, ?, ?)
+  // Ownership is local to this file, not part of the donor's protocol state.
+  const result = db1.prepare(`
+    UPDATE monsterft_meta SET applied_seq = ?, applied_entry_hash = ?,
+      repair_state = ?, pending_cmd_seq = ?, applied_local_digest = ?
+    WHERE id = 1
   `).run(meta.applied_seq, meta.applied_entry_hash, meta.repair_state,
     meta.pending_cmd_seq, meta.applied_local_digest)
+  if (result.changes !== 1n) { corrupt('meta row is missing') }
   if (!stateDigest(readState(db1)).equals(selected)) {
     corrupt('adopted DB1 state does not match majority')
   }
@@ -168,7 +169,10 @@ function checkFamily(paths) {
   }
 }
 
-function openApplyDatabase(base) {
+function openApplyDatabase(base, generation) {
+  if (!util.isSeed(generation)) {
+    throw new Err.ErrorWithCode('generation must be a nonzero 16-byte Buffer', Err.ARGUMENT_ILLEGAL)
+  }
   const paths = databasePaths(base)
   checkFamily(paths)
   util.createSQLiteDirectory(paths.apply)
@@ -176,12 +180,11 @@ function openApplyDatabase(base) {
   try {
     db.exec('PRAGMA journal_mode = WAL')
     db.exec('PRAGMA synchronous = FULL')
-    if (schema(db).length === 0) {
-      db.exec('BEGIN IMMEDIATE')
-      sql.createApply(db)
-      db.exec('COMMIT')
-    }
+    db.exec('BEGIN IMMEDIATE')
+    if (schema(db).length === 0) { sql.createApply(db, generation) }
     sql.readApply(db)
+    sql.claimGeneration(db, 'monsterft_meta_apply', generation)
+    db.exec('COMMIT')
     return db
   } catch (err) {
     try { db.close() } catch { }
@@ -199,30 +202,49 @@ class ProtocolStore {
     this.log = new SQLiteLog(this.paths[role], opts)
     this._captured = null
     this._adopted = false
+    this._generation = null
   }
 
   get db() { return this.log.db }
 
-  open() {
-    if (this.log.isOpen) { return }
+  open(generation) {
+    if (!util.isSeed(generation)) {
+      throw new Err.ErrorWithCode('generation must be a nonzero 16-byte Buffer', Err.ARGUMENT_ILLEGAL)
+    }
+    if (this.log.isOpen) { this.checkGeneration(); return }
     checkFamily(this.paths)
     try {
-      this.log.open({ initialize: sql.createMeta })
+      this.log.open({ initialize: (db1) => sql.createMeta(db1, generation) })
+      this.db.exec('BEGIN IMMEDIATE')
       sql.readMeta(this.db)
+      sql.claimGeneration(this.db, 'monsterft_meta', generation)
+      this.log.readHead()
+      this.db.exec('COMMIT')
+      this._generation = generation
     } catch (err) {
       this.close()
       throw err
     }
   }
 
+  checkGeneration() {
+    sql.checkGeneration(this.db, 'monsterft_meta', this._generation)
+  }
+
   capture() {
     this.log._assertOpen()
-    const states = PROCS.map((role) => readDatabase(this.paths[role], readState))
+    const states = PROCS.map((role) => readDatabase(this.paths[role], (db1) => {
+      sql.checkGeneration(db1, 'monsterft_meta', this._generation)
+      return readState(db1)
+    }))
     const digests = states.map(stateDigest)
     const winner = digests.findIndex((digest) =>
       digests.filter((other) => digest.equals(other)).length >= 2)
     if (winner < 0) { corrupt('DB1 states have no majority') }
-    const receipt = readDatabase(this.paths.apply, sql.readApply)
+    const receipt = readDatabase(this.paths.apply, (db2) => {
+      sql.checkGeneration(db2, 'monsterft_meta_apply', this._generation)
+      return sql.readApply(db2)
+    })
     this._captured = { states, digests, winner, receipt }
     this._adopted = false
     return { state: digests[winner], receipt: receiptDigest(receipt), donor: PROCS[winner] }
@@ -235,23 +257,25 @@ class ProtocolStore {
     }
     const selected = captured.digests[captured.winner]
     const own = PROCS.indexOf(this.role)
-    if (!stateDigest(readState(this.db)).equals(captured.digests[own])) {
-      corrupt('DB1 changed after capture')
-    }
-    if (!captured.digests[own].equals(selected)) {
-      readDatabase(this.paths[PROCS[captured.winner]], (donor) => {
-        this.db.exec('BEGIN IMMEDIATE')
-        try {
+    this.db.exec('BEGIN IMMEDIATE')
+    try {
+      this.checkGeneration()
+      if (!stateDigest(readState(this.db)).equals(captured.digests[own])) {
+        corrupt('DB1 changed after capture')
+      }
+      if (!captured.digests[own].equals(selected)) {
+        readDatabase(this.paths[PROCS[captured.winner]], (donor) => {
+          sql.checkGeneration(donor, 'monsterft_meta', this._generation)
           copyProtocolState(this.db, donor, selected)
-          this.db.exec('COMMIT')
-        } catch (err) {
-          // Startup fails; connection teardown rolls back the whole replacement.
-          this.close()
-          throw err
-        }
-      })
+        })
+      }
+      this.log.readHead()
+      this.db.exec('COMMIT')
+    } catch (err) {
+      // Startup fails; connection teardown rolls back the whole replacement.
+      this.close()
+      throw err
     }
-    this.log.readHead()
     this._adopted = true
   }
 
@@ -261,6 +285,7 @@ class ProtocolStore {
     }
     this.db.exec('BEGIN IMMEDIATE')
     try {
+      this.checkGeneration()
       const meta = sql.reconcileReceipt(this.db, this._captured.receipt)
       this.db.exec('COMMIT')
       return meta

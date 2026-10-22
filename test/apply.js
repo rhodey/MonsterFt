@@ -12,6 +12,7 @@ import { digestCmd, digestEntry, outcomesPublic } from '../src/utilm.js'
 import { encodeFrame, decodeFrame } from '../src/wire.js'
 import * as Err from '../src/error.js'
 
+const seed = Buffer.alloc(16, 1)
 const schema = 'CREATE TABLE items (id INTEGER PRIMARY KEY, value INTEGER NOT NULL)'
 const buf = (value) => Buffer.from(value)
 const deferred = () => {
@@ -25,7 +26,7 @@ function fixture(apply) {
   const base = path.join(dir, 'node')
   for (const role of ['procA', 'procB', 'procC']) {
     const store = new ProtocolStore(role, base)
-    store.open()
+    store.open(seed)
     store.close()
   }
   const replies = []
@@ -47,7 +48,7 @@ function fixture(apply) {
   return {
     component, replies, diagnostics, dir, base, request,
     async start() {
-      await request({ type: 'hello' })
+      await request({ type: 'hello', seed })
       await request({ type: 'open' })
       await request({ type: 'ready' })
     },
@@ -489,8 +490,8 @@ test('Apply rejects duplicate execution and hello after startup', async (t) => {
   let calls = 0
   const f = fixture(() => { calls++ })
   try {
-    const hello1 = await f.request({ type: 'hello' })
-    const hello2 = await f.request({ type: 'hello' })
+    const hello1 = await f.request({ type: 'hello', seed })
+    const hello2 = await f.request({ type: 'hello', seed })
     t.equal(hello1.type, 'ack')
     t.equal(hello2.type, 'ack')
     await f.request({ type: 'open' })
@@ -504,7 +505,7 @@ test('Apply rejects duplicate execution and hello after startup', async (t) => {
   const second = fixture(() => {})
   try {
     await second.start()
-    t.equal(await second.request({ type: 'hello' }), undefined, 'post-startup hello has no ACK')
+    t.equal(await second.request({ type: 'hello', seed }), undefined, 'post-startup hello has no ACK')
     t.notOk(second.component.isOpen)
     t.equal(second.diagnostics.filter((event) => event.type === 'error').length, 1)
     t.equal(second.diagnostics.filter((event) => event.type === 'fatal').length, 0)
@@ -547,7 +548,7 @@ test('Apply preserves the correct receipt on either side of COMMIT failure', asy
         await reopened.onReceive('gate', encodeFrame(msg))
         return replies.find((reply) => reply.cid === msg.cid)
       }
-      await receive({ type: 'hello', cid: 'h' })
+      await receive({ type: 'hello', cid: 'h', seed })
       await receive({ type: 'open', cid: 'o' })
       await receive({ type: 'ready', cid: 'r' })
       t.equal(readApply(reopened.db).seq, committed ? 1n : 0n)

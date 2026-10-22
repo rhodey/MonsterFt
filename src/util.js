@@ -7,6 +7,8 @@ const MAX_INT = 9_223_372_036_854_775_807n
 const isCid = (cid) => typeof cid === 'string' && cid.length > 0
 const isTerm = (term) => typeof term === 'bigint' && term >= 0n && term <= MAX_INT
 const isSeq = (seq) => typeof seq === 'bigint' && seq >= -1n && seq <= MAX_INT
+const isSeed = (seed) => Buffer.isBuffer(seed) && seed.length === 16 &&
+  seed.some((byte) => byte !== 0)
 
 const isRpc = (msg) => msg !== null && typeof msg === 'object' &&
   !Array.isArray(msg) && !(msg instanceof Uint8Array) &&
@@ -37,7 +39,7 @@ const deleteSQLiteFiles = (databasePath) => {
 }
 
 export {
-  isCid, isTerm, isSeq,
+  isCid, isTerm, isSeq, isSeed,
   isRpc,
   createSQLiteDirectory,
   deleteSQLiteFiles,

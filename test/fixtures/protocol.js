@@ -7,6 +7,7 @@ import { openApplyDatabase, readDatabase, readState, databasePaths } from '../..
 import { encodeFrame, decodeFrame, decodePayload } from '../../src/wire.js'
 
 const roles = ['procA', 'procB', 'procC']
+const seed = Buffer.alloc(16, 1)
 const record = (term=1n, entry='') => ({ term, entry: Buffer.from(entry) })
 const cmd = (items=[Buffer.from('item')], matchIndex=[0n, 0n, 0n]) =>
   pack({ type: 'cmd', items, matchIndex })
@@ -54,9 +55,9 @@ function protocol(opts={}, nodes=['a', 'b', 'c'], id='a') {
         }
         return proc
       })
-      for (const proc of procs) f.request(proc, { type: 'hello', seed: Buffer.alloc(16, 1) })
+      for (const proc of procs) f.request(proc, { type: 'hello', seed })
       for (const proc of procs) f.request(proc, { type: 'open' })
-      db2 = openApplyDatabase(base)
+      db2 = openApplyDatabase(base, seed)
       for (const type of ['capture', 'adopt', 'reconcile']) {
         for (const proc of procs) {
           if (f.request(proc, { type })?.type !== 'ack') throw proc._fatalError ?? new Error(type)
