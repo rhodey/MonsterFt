@@ -238,7 +238,7 @@ test('does not choose separate majorities for individual tables', (t) => {
   t.end()
 })
 
-test('adopted history failure closes and rolls back the entire copy', (t) => {
+test('owner teardown rolls back the entire failed history copy', (t) => {
   const f = fixture().open()
   try {
     for (const store of f.stores.slice(0, 2)) {
@@ -252,7 +252,8 @@ test('adopted history failure closes and rolls back the entire copy', (t) => {
     `)
     f.capture()
     t.throws(() => outlier.adopt(), /injected adoption/)
-    t.notOk(outlier.log.isOpen, 'failed destination closed')
+    outlier.close()
+    t.notOk(outlier.log.isOpen, 'owner closes the failed destination')
     const rows = readDatabase(f.paths.procC, (db) => db.prepare('SELECT seq, term, entry FROM raft_log').all())
     t.equal(rows.length, 1, 'replacement delete rolled back')
     t.equal(Buffer.from(rows[0].entry).toString(), 'original', 'original suffix remains')
@@ -322,6 +323,7 @@ test('failed receipt import preserves DB2 work for reopening', (t) => {
     f.capture()
     f.stores.forEach((store) => store.adopt())
     t.throws(() => f.stores[0].reconcile(), /injected import/)
+    f.stores[0].close()
     t.equal(readDatabase(f.paths.procA, sql.readMeta).applied_seq, -1n, 'DB1 import rolled back')
     t.equal(sql.readApply(f.apply).seq, 0n, 'completed Apply receipt remains')
     const db = new DatabaseSync(f.paths.procA)

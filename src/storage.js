@@ -39,14 +39,17 @@ function fileExists(path) {
 function readDatabase(path, read) {
   if (!fileExists(path)) { corrupt(`database is missing: ${path}`) }
   const db = new DatabaseSync(path, { readOnly: true, readBigInts: true })
+  let result
   try {
     db.exec('BEGIN')
-    const result = read(db)
+    result = read(db)
     db.exec('COMMIT')
-    return result
-  } finally {
-    db.close()
+  } catch (err) {
+    try { db.close() } catch { }
+    throw err
   }
+  db.close()
+  return result
 }
 
 function schema(db) {
@@ -213,18 +216,14 @@ class ProtocolStore {
     }
     if (this.log.isOpen) { this.checkGeneration(); return }
     checkFamily(this.paths)
-    try {
-      this.log.open({ initialize: (db1) => sql.createMeta(db1, generation) })
-      this.db.exec('BEGIN IMMEDIATE')
-      sql.readMeta(this.db)
-      sql.claimGeneration(this.db, 'monsterft_meta', generation)
-      this.log.readHead()
-      this.db.exec('COMMIT')
-      this._generation = generation
-    } catch (err) {
-      this.close()
-      throw err
-    }
+    // Proc owns teardown if startup fails, including rollback of open transactions.
+    this.log.open({ initialize: (db1) => sql.createMeta(db1, generation) })
+    this.db.exec('BEGIN IMMEDIATE')
+    sql.readMeta(this.db)
+    sql.claimGeneration(this.db, 'monsterft_meta', generation)
+    this.log.readHead()
+    this.db.exec('COMMIT')
+    this._generation = generation
   }
 
   checkGeneration() {
@@ -258,24 +257,18 @@ class ProtocolStore {
     const selected = captured.digests[captured.winner]
     const own = PROCS.indexOf(this.role)
     this.db.exec('BEGIN IMMEDIATE')
-    try {
-      this.checkGeneration()
-      if (!stateDigest(readState(this.db)).equals(captured.digests[own])) {
-        corrupt('DB1 changed after capture')
-      }
-      if (!captured.digests[own].equals(selected)) {
-        readDatabase(this.paths[PROCS[captured.winner]], (donor) => {
-          sql.checkGeneration(donor, 'monsterft_meta', this._generation)
-          copyProtocolState(this.db, donor, selected)
-        })
-      }
-      this.log.readHead()
-      this.db.exec('COMMIT')
-    } catch (err) {
-      // Startup fails; connection teardown rolls back the whole replacement.
-      this.close()
-      throw err
+    this.checkGeneration()
+    if (!stateDigest(readState(this.db)).equals(captured.digests[own])) {
+      corrupt('DB1 changed after capture')
     }
+    if (!captured.digests[own].equals(selected)) {
+      readDatabase(this.paths[PROCS[captured.winner]], (donor) => {
+        sql.checkGeneration(donor, 'monsterft_meta', this._generation)
+        copyProtocolState(this.db, donor, selected)
+      })
+    }
+    this.log.readHead()
+    this.db.exec('COMMIT')
     this._adopted = true
   }
 
@@ -284,15 +277,10 @@ class ProtocolStore {
       throw new Err.ErrorWithCode('DB1 state has not been adopted', Err.MONSTER_ILLEGAL)
     }
     this.db.exec('BEGIN IMMEDIATE')
-    try {
-      this.checkGeneration()
-      const meta = sql.reconcileReceipt(this.db, this._captured.receipt)
-      this.db.exec('COMMIT')
-      return meta
-    } catch (err) {
-      this.close()
-      throw err
-    }
+    this.checkGeneration()
+    const meta = sql.reconcileReceipt(this.db, this._captured.receipt)
+    this.db.exec('COMMIT')
+    return meta
   }
 
   load() { return sql.readMeta(this.db) }

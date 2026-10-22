@@ -14,6 +14,9 @@ Claims wait on SQLite's existing writer exclusion: an active write transaction
 can prevent replacement from opening. Concurrent startups can supersede one
 another, so normal supervision still stops and reaps owners before replacement.
 
+Proc owns teardown after store operation failures. Temporary readers close their
+own connections without replacing an earlier operation error.
+
 ## `databasePaths`
 
 Validates the base database path and returns the paths for the three Proc
