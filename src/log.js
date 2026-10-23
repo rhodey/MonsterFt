@@ -84,17 +84,12 @@ class SQLiteLog {
   }
 
   _entryFromRow(row, expected=undefined) {
-    this._validateSeq(row.seq, false, Err.LOG_CORRUPT)
+    util.validate(util.logSchemas.row, row, 'stored log', Err.LOG_CORRUPT)
     if (expected !== undefined && row.seq !== expected) {
       throw new Err.ErrorWithCode(`seq ${row.seq} !== ${expected}`, Err.LOG_CORRUPT)
     }
-    if (!(row.entry instanceof Uint8Array)) {
-      throw new Err.ErrorWithCode('entry must be blob', Err.LOG_CORRUPT)
-    }
     const entry = Buffer.from(row.entry.buffer, row.entry.byteOffset, row.entry.byteLength)
-    const data = { term: row.term, entry }
-    this._validateEntry(data, Err.LOG_CORRUPT)
-    return data
+    return { term: row.term, entry }
   }
 
   readHead() {
@@ -114,7 +109,7 @@ class SQLiteLog {
     if (election === undefined) {
       throw new Err.ErrorWithCode('election row is missing', Err.LOG_CORRUPT)
     }
-    this._validateElection(election.term, election.votedFor, Err.LOG_CORRUPT)
+    util.validate(util.logSchemas.election, election, 'stored election', Err.LOG_CORRUPT)
 
     this.seq = seq
     this.term = term
@@ -127,7 +122,7 @@ class SQLiteLog {
       this.begin = -1n
       return
     }
-    this._validateSeq(begin.seq, false, Err.LOG_CORRUPT)
+    util.validate(util.schemas.nonnegativeSeq, begin.seq, 'stored log begin', Err.LOG_CORRUPT)
     this.begin = begin.seq
   }
 

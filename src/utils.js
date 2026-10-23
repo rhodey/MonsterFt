@@ -1,11 +1,32 @@
+import { z } from 'zod'
 import * as Err from './error.js'
 import * as util from './util.js'
-import { digestEntry, isDigest } from './utilm.js'
+import { digestEntry } from './utilm.js'
+
+const generationSchema = z.custom((value) => value instanceof Uint8Array &&
+  value.byteLength === 16 && value.some((byte) => byte !== 0))
+const metaFields = z.looseObject({
+  generation: generationSchema,
+  pending_cmd_seq: util.schemas.nonnegativeSeq.nullable(),
+})
+const initialMetaSchema = metaFields.extend({
+  applied_seq: z.literal(-1n), repair_state: z.literal(0n),
+  applied_entry_hash: z.null(), applied_local_digest: z.null(),
+})
+const appliedMetaSchema = metaFields.extend({
+  applied_seq: util.schemas.nonnegativeSeq, repair_state: z.bigint().min(0n).max(2n),
+  applied_entry_hash: util.schemas.digest, applied_local_digest: util.schemas.digest,
+})
+const initialReceiptSchema = z.looseObject({
+  seq: z.literal(-1n), entry_hash: z.null(), local_digest: z.null(),
+})
+const appliedReceiptSchema = z.looseObject({
+  seq: util.schemas.nonnegativeSeq,
+  entry_hash: util.schemas.digest, local_digest: util.schemas.digest,
+})
 
 const asBuffer = (value) =>
   Buffer.from(value.buffer, value.byteOffset, value.byteLength)
-const isGeneration = (value) => value instanceof Uint8Array && value.byteLength === 16 &&
-  value.some((byte) => byte !== 0)
 
 const corrupt = (message) => {
   throw new Err.ErrorWithCode(message, Err.MONSTER_CORRUPT)
@@ -26,9 +47,7 @@ function claimGeneration(db, table, generation) {
 function checkGeneration(db, table, generation, statement = null) {
   const row = (statement ?? db.prepare(`SELECT generation FROM ${table} WHERE id = 1`)).get()
   const name = table === 'monsterft_meta' ? 'DB1' : 'DB2'
-  if (!isGeneration(row?.generation)) {
-    corrupt(`${name} generation is corrupt`)
-  }
+  util.validate(generationSchema, row?.generation, `${name} generation`, Err.MONSTER_CORRUPT)
   if (!asBuffer(row.generation).equals(generation)) {
     throw new Err.ErrorWithCode(`${name} generation different`, Err.GENERATION_DIFF)
   }
@@ -47,26 +66,11 @@ function readMeta(db1) {
   if (rows.length !== 1 || rows[0].id !== 1n) {
     corrupt('meta row is missing or not singleton')
   }
+  util.validate(rows[0].applied_seq === -1n ? initialMetaSchema : appliedMetaSchema,
+    rows[0], 'DB1 meta', Err.MONSTER_CORRUPT)
   const { generation, ...meta } = rows[0]
-  if (!isGeneration(generation)) { corrupt('DB1 generation is corrupt') }
-  if (!util.isSeq(meta.applied_seq)) { corrupt('applied sequence is corrupt') }
-  if (meta.repair_state !== 0n && meta.repair_state !== 1n && meta.repair_state !== 2n) {
-    corrupt('stored repair state is corrupt')
-  }
-  if (meta.applied_seq === -1n) {
-    if (meta.repair_state !== 0n) {
-      corrupt('repair_state must be 0 when applied_seq is -1')
-    }
-    if (meta.applied_entry_hash !== null || meta.applied_local_digest !== null) {
-      corrupt('initial applied hashes must be null')
-    }
-  } else {
-    if (!isDigest(meta.applied_entry_hash)) { corrupt('applied entry hash is corrupt') }
-    if (!isDigest(meta.applied_local_digest)) { corrupt('applied local digest is corrupt') }
-  }
   const pending = meta.pending_cmd_seq
-  if (pending !== null &&
-      (!util.isSeq(pending) || pending < 0n || pending > meta.applied_seq)) {
+  if (pending !== null && pending > meta.applied_seq) {
     corrupt('pending command sequence is corrupt')
   }
   return meta
@@ -84,35 +88,19 @@ function readApply(db2) {
     corrupt('apply meta row is missing or not singleton')
   }
   const { generation, ...receipt } = rows[0]
-  if (!isGeneration(generation)) { corrupt('DB2 generation is corrupt') }
+  util.validate(generationSchema, generation, 'DB2 generation', Err.MONSTER_CORRUPT)
   return validateReceipt(receipt)
 }
 
 function validateReceipt(receipt) {
-  if (receipt === null || typeof receipt !== 'object') {
-    corrupt('apply receipt must be a record')
-  }
-  if (!util.isSeq(receipt.seq)) { corrupt('apply sequence is corrupt') }
-  if (receipt.seq === -1n) {
-    if (receipt.entry_hash !== null || receipt.local_digest !== null) {
-      corrupt('initial apply hashes must be null')
-    }
-  } else {
-    if (!isDigest(receipt.entry_hash)) { corrupt('apply entry hash is corrupt') }
-    if (!isDigest(receipt.local_digest)) { corrupt('apply local digest is corrupt') }
-  }
-  return receipt
+  return util.validate(receipt?.seq === -1n ? initialReceiptSchema : appliedReceiptSchema,
+    receipt, 'apply receipt', Err.MONSTER_CORRUPT)
 }
 
 function verifyEntry(db1, seq, hash, name='applied') {
   const row = db1.prepare('SELECT term, entry FROM raft_log WHERE seq = ?').get(seq)
   if (row === undefined) { corrupt(`${name} log entry not found`) }
-  if (!util.isTerm(row.term)) {
-    throw new Err.ErrorWithCode('stored log term is corrupt', Err.LOG_CORRUPT)
-  }
-  if (!(row.entry instanceof Uint8Array)) {
-    throw new Err.ErrorWithCode('entry must be blob', Err.LOG_CORRUPT)
-  }
+  util.validate(util.logSchemas.record, row, 'stored log', Err.LOG_CORRUPT)
   if (!asBuffer(hash).equals(digestEntry(row.term, row.entry))) {
     corrupt(`${name} entry hash does not match`)
   }
@@ -174,9 +162,7 @@ function reconcileReceipt(db1, receipt) {
     corrupt('pending command seq does not match apply receipt')
   }
   const first = db1.prepare('SELECT seq FROM raft_log ORDER BY seq LIMIT 1').get()
-  if (first === undefined || !util.isSeq(first.seq) || first.seq < 0n) {
-    throw new Err.ErrorWithCode('stored log begin is corrupt', Err.LOG_CORRUPT)
-  }
+  util.validate(util.schemas.nonnegativeSeq, first?.seq, 'stored log begin', Err.LOG_CORRUPT)
   if (receipt.seq >= first.seq) {
     verifyEntry(db1, receipt.seq, receipt.entry_hash, 'apply')
   }

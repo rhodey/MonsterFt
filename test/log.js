@@ -232,14 +232,14 @@ test('fresh election state is durable before any vote or append', (t) => {
 
 test('stored election fields are validated on open', (t) => {
   const cases = [
-    ['negative-term', -2n, null, /term must be >= 0/],
-    ['null-term', null, null, /term must be bigint/],
-    ['text-term', '4', null, /term must be bigint/],
-    ['real-term', 1.5, null, /term must be bigint/],
-    ['oversized-term', Number(MAX_SEQ) * 2, null, /term must be bigint/],
-    ['empty-vote', 4n, '', /votedFor must be null or a non-empty string/],
-    ['integer-vote', 4n, 2n, /votedFor must be null or a non-empty string/],
-    ['blob-vote', 4n, Buffer.from('2'), /votedFor must be null or a non-empty string/],
+    ['negative-term', -2n, null, /stored election term is corrupt/],
+    ['null-term', null, null, /stored election term is corrupt/],
+    ['text-term', '4', null, /stored election term is corrupt/],
+    ['real-term', 1.5, null, /stored election term is corrupt/],
+    ['oversized-term', Number(MAX_SEQ) * 2, null, /stored election term is corrupt/],
+    ['empty-vote', 4n, '', /stored election votedFor is corrupt/],
+    ['integer-vote', 4n, 2n, /stored election votedFor is corrupt/],
+    ['blob-vote', 4n, Buffer.from('2'), /stored election votedFor is corrupt/],
   ]
   for (const [name, term, votedFor, message] of cases) {
     const { create, file } = logFixture(t, `02-election-${name}`)
@@ -495,14 +495,14 @@ test('append prevalidates every record before writing', (t) => {
 
 test('stored invalid entry terms and payloads report log corruption', (t) => {
   const cases = [
-    ['negative-term', -1n, Buffer.alloc(0), /term must be >= 0/],
-    ['null-term', null, Buffer.alloc(0), /term must be bigint/],
-    ['text-term', '1', Buffer.alloc(0), /term must be bigint/],
-    ['real-term', 1.5, Buffer.alloc(0), /term must be bigint/],
-    ['oversized-term', Number(MAX_SEQ) * 2, Buffer.alloc(0), /term must be bigint/],
-    ['null-payload', 1n, null, /entry must be blob/],
-    ['text-payload', 1n, 'payload', /entry must be blob/],
-    ['integer-payload', 1n, 2n, /entry must be blob/],
+    ['negative-term', -1n, Buffer.alloc(0), /stored log term is corrupt/],
+    ['null-term', null, Buffer.alloc(0), /stored log term is corrupt/],
+    ['text-term', '1', Buffer.alloc(0), /stored log term is corrupt/],
+    ['real-term', 1.5, Buffer.alloc(0), /stored log term is corrupt/],
+    ['oversized-term', Number(MAX_SEQ) * 2, Buffer.alloc(0), /stored log term is corrupt/],
+    ['null-payload', 1n, null, /stored log entry is corrupt/],
+    ['text-payload', 1n, 'payload', /stored log entry is corrupt/],
+    ['integer-payload', 1n, 2n, /stored log entry is corrupt/],
   ]
   for (const [name, term, entry, message] of cases) {
     const { create } = logFixture(t, `02-corrupt-entry-${name}`)
@@ -549,7 +549,7 @@ test('stored invalid sequences report log corruption', (t) => {
     t.ok(err instanceof ErrorWithCode, 'stored sequence uses ErrorWithCode')
     t.equal(err.code, LOG_CORRUPT, 'stored sequence has LOG_CORRUPT code')
     t.equal(err.sqlCode, null, 'stored sequence has no SQLite code')
-    t.match(err.message, /seq must be >= 0/, 'stored sequence explains corruption')
+    t.match(err.message, /stored log seq is corrupt/, 'stored sequence explains corruption')
   }
   t.end()
 })

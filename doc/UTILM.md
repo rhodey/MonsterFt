@@ -150,7 +150,8 @@ no findings
 
 ## `validateSyncEntry`
 
-Validates a SYNC decision and returns its agreeing and disagreeing members.
+Validates a SYNC decision's quorum-dependent structure and cluster membership,
+and returns its agreeing and disagreeing members.
 
 ### findings
 

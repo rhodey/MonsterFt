@@ -3,6 +3,15 @@
 Function notes for [src/utils.js](../src/utils.js), in source order.
 Trivial helpers and direct delegation functions are omitted.
 
+## Metadata and receipt schemas
+
+Define valid stored generations, DB1 metadata, and Apply receipts, including
+their initial states. Receipt validation is shared by storage and Apply replies.
+
+### findings
+
+no findings
+
 ## `claimGeneration`
 
 Claims an existing metadata row for this startup inside its write transaction.

@@ -40,10 +40,10 @@ Checks the basic shape and type field of an RPC message.
 
 no findings
 
-## `schemas` / `raftSchemas`
+## `schemas` / `logSchemas` / `raftSchemas`
 
-Define shared protocol fields and the accepted shapes of Raft requests and
-`ack_err` headers. Additional fields remain allowed and values are never coerced.
+Define shared fields and the accepted shapes of stored Raft rows, requests,
+and `ack_err` headers. Additional fields remain allowed and values are never coerced.
 
 ### findings
 
@@ -51,7 +51,7 @@ no findings
 
 ## `firstIssue` / `validate`
 
-Validate a message and return its original object, or report a concise invalid
+Validate a value and return it unchanged, or report a concise invalid
 field using the caller's error code. Union failures prefer the matching tagged
 variant's field error.
 

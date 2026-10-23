@@ -34,8 +34,7 @@ no findings
 
 ## `_validateEntry`
 
-Validates a record’s term and Buffer payload, distinguishing invalid arguments
-from corrupt stored entries.
+Validates an append argument's term and Buffer payload.
 
 ### findings
 
@@ -43,7 +42,7 @@ no findings
 
 ## `_validateElection`
 
-Validates an election term and vote for storage or restoration.
+Validates an election term and vote supplied for storage.
 
 ### findings
 

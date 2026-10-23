@@ -69,18 +69,13 @@ function readState(db) {
   if (election.length !== 1 || election[0].id !== 1n) {
     throw new Err.ErrorWithCode('election row is missing or not singleton', Err.LOG_CORRUPT)
   }
+  util.validate(util.logSchemas.election, election[0], 'stored election', Err.LOG_CORRUPT)
   const { term, votedFor } = election[0]
-  if (!util.isTerm(term) ||
-      (votedFor !== null && (typeof votedFor !== 'string' || votedFor.length === 0))) {
-    throw new Err.ErrorWithCode('stored election is corrupt', Err.LOG_CORRUPT)
-  }
   const head = db.prepare('SELECT seq, term, entry FROM raft_log ORDER BY seq DESC LIMIT 1').get()
   const first = db.prepare('SELECT seq FROM raft_log ORDER BY seq LIMIT 1').get()
   if (head !== undefined) {
-    if (!util.isSeq(head.seq) || head.seq < 0n || !util.isTerm(head.term) ||
-        !(head.entry instanceof Uint8Array) || !util.isSeq(first.seq) || first.seq < 0n) {
-      throw new Err.ErrorWithCode('stored log head is corrupt', Err.LOG_CORRUPT)
-    }
+    util.validate(util.logSchemas.row, head, 'stored log head', Err.LOG_CORRUPT)
+    util.validate(util.schemas.nonnegativeSeq, first.seq, 'stored log begin', Err.LOG_CORRUPT)
     head.entry = asBuffer(head.entry)
   }
   const meta = sql.readMeta(db)
@@ -113,8 +108,8 @@ function copyProtocolState(db1, donor, selected) {
   const insert = db1.prepare('INSERT INTO raft_log (seq, term, entry) VALUES (?, ?, ?)')
   let next = null
   for (const row of donor.prepare('SELECT seq, term, entry FROM raft_log ORDER BY seq').iterate()) {
-    if (!util.isSeq(row.seq) || row.seq < 0n || !util.isTerm(row.term) ||
-        !(row.entry instanceof Uint8Array) || (next !== null && row.seq !== next)) {
+    util.validate(util.logSchemas.row, row, 'stored log', Err.LOG_CORRUPT)
+    if (next !== null && row.seq !== next) {
       throw new Err.ErrorWithCode('stored log row is corrupt', Err.LOG_CORRUPT)
     }
     insert.run(row.seq, row.term, row.entry.byteLength ? row.entry : Buffer.alloc(0))

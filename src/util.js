@@ -33,6 +33,13 @@ const schemas = {
   rpc: z.custom(isRpc),
 }
 
+const logRecordSchema = z.looseObject({ term: schemas.term, entry: schemas.bytes })
+const logSchemas = {
+  record: logRecordSchema,
+  row: logRecordSchema.extend({ seq: schemas.nonnegativeSeq }),
+  election: z.looseObject({ term: schemas.term, votedFor: schemas.cid.nullable() }),
+}
+
 const ack_err = z.looseObject({
   type: z.enum(['ack', 'err']), cid: schemas.cid, term: schemas.term,
 })
@@ -111,7 +118,7 @@ const deleteSQLiteFiles = (databasePath) => {
 export {
   isCid, isTerm, isSeq, isSeed,
   isRpc,
-  schemas, raftSchemas, validate,
+  schemas, logSchemas, raftSchemas, validate,
   HASH_BYTES, hash, hashParts,
   createSQLiteDirectory,
   deleteSQLiteFiles,

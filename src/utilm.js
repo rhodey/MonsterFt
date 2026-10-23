@@ -27,10 +27,14 @@ const cmdSchema = z.looseObject({
   items: z.array(schemas.bytes).min(1),
 })
 const nodeIdsSchema = z.array(schemas.cid)
-const syncSchema = z.looseObject({
-  type: z.literal('sync'), cmdSeq: schemas.nonnegativeSeq, quorum: z.boolean(),
+const syncFieldsSchema = z.looseObject({
+  type: z.literal('sync'), cmdSeq: schemas.nonnegativeSeq,
   agree: nodeIdsSchema, disagree: nodeIdsSchema,
 })
+const syncSchema = z.union([
+  syncFieldsSchema.extend({ quorum: z.literal(true), digest: schemas.digest }),
+  syncFieldsSchema.extend({ quorum: z.literal(false), agree: nodeIdsSchema.length(0) }),
+])
 const executeSchema = requestSchema.extend({
   type: z.literal('execute'), term: schemas.term, seq: schemas.nonnegativeSeq,
   tickCount: schemas.tickCount, entryHash: schemas.digest,
@@ -291,18 +295,6 @@ const validateSyncEntry = (node, entry) => {
     entry.quorum ? node.quorum : 0,
   )
   const disagree = validateNodes(node, entry.disagree, 'disagree')
-  if (!entry.quorum && agree.length !== 0) {
-    throw new Err.ErrorWithCode(
-      'SYNC entry quorum:false agree must be empty',
-      Err.MONSTER_CORRUPT,
-    )
-  }
-  if (entry.quorum && !isDigest(entry.digest)) {
-    throw new Err.ErrorWithCode(
-      'SYNC entry digest is corrupt',
-      Err.MONSTER_CORRUPT,
-    )
-  }
   return { agree, disagree }
 }
 

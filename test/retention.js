@@ -153,7 +153,7 @@ test('pruning preserves log corruption diagnostics and rolls back the input', (t
     for (const proc of f.procs) {
       t.notOk(proc.isOpen, `${proc.role}: owner stopped`)
       t.equal(proc._fatalError.code, Err.LOG_CORRUPT, `${proc.role}: corruption code preserved`)
-      t.equal(proc._fatalError.message, 'DB1 retention term must be >= 0', 'retention prefix retained')
+      t.equal(proc._fatalError.message, 'DB1 retention stored election term is corrupt', 'retention prefix retained')
     }
     t.deepEqual(f.rows(), before, 'appends and retention deletions rolled back')
   } finally { f.close() }
