@@ -141,7 +141,8 @@ class Gate extends EventEmitter {
       } else {
         if (this._stopped) { return }
         if (!this.nodes.includes(from) || from === this.id) {
-          throw rpcIllegal('cluster frame has invalid sender')
+          this._emitSafe('warn', rpcIllegal('cluster frame has invalid sender'))
+          return
         }
         try { wire.verifyFrame(frame) } catch (err) {
           this._emitSafe('warn', Err.wrapError(err, null, `cluster frame from ${from}: `))
@@ -307,6 +308,9 @@ class Gate extends EventEmitter {
       const pending = this._clients.get(message.cid)
       if (!pending) { return }
       utilm.validateReply(message)
+      if (message.type === 'ack' && pending.kind === 'append') {
+        utilm.validateCommandResult(message, pending.itemCount)
+      }
       const finish = () => {
         if (!this._clients.delete(message.cid)) { return }
         if (message.type === 'err') { pending.reject(wire.errorFromWire(message.error ?? message)) }
@@ -355,14 +359,9 @@ class Gate extends EventEmitter {
     if (!this.isOpen) { return Promise.reject(this._shutdownError ?? nodeClosed()) }
     const requestId = crypto.randomUUID()
     return new Promise((resolve, reject) => {
-      this._clients.set(requestId, { resolve, reject, kind })
+      this._clients.set(requestId, { resolve, reject, kind, itemCount: fields.items?.length })
       this._enqueue({ kind, requestId, ...fields })
     })
-  }
-
-  _outcomes(message, count) {
-    utilm.validateCommandResult(message, count)
-    return utilm.outcomesPublic(message.results)
   }
 
   async append(data) {
@@ -370,7 +369,7 @@ class Gate extends EventEmitter {
     if (this._drainWork !== null) { throw new Err.ErrorWithCode('node draining', Err.DRAINING) }
     if (!Buffer.isBuffer(data)) { throw illegal('data must be buffer') }
     const result = await this._command('append', { items: [data] })
-    const [outcome] = this._outcomes(result, 1)
+    const [outcome] = utilm.outcomesPublic(result.results)
     if (outcome.status === 'rejected') { throw outcome.reason }
     return [result.cmdSeq, outcome.value]
   }
@@ -383,7 +382,7 @@ class Gate extends EventEmitter {
       throw illegal('data must be non-empty array of buffers')
     }
     const result = await this._command('append', { items })
-    return [result.cmdSeq, this._outcomes(result, items.length)]
+    return [result.cmdSeq, utilm.outcomesPublic(result.results)]
   }
 
   drainCmd() {

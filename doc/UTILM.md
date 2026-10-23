@@ -15,8 +15,8 @@ no findings
 ## `parseProcRequest`
 
 Validates a local Proc request and prepares its cluster message when present.
-Remote decoding failures become local warnings; nested checksum failures and
-invalid envelopes remain fatal.
+Remote decoding and envelope failures become local warnings; invalid local
+inputs and nested checksum failures remain fatal.
 
 ### findings
 

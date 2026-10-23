@@ -117,16 +117,15 @@ function parseProcRequest(message, id, nodes) {
   }
   // Gate has checked this frame already; a later checksum failure is local.
   const payload = wire.verifyFrame(message.frame)
-  let envelope
-  try { envelope = wire.decodePayload(payload) } catch (err) {
+  try {
+    const envelope = validate(envelopeSchema, wire.decodePayload(payload), 'Proc cluster envelope')
+    if (envelope.to !== id || envelope.message.from !== message.from) {
+      fail('Proc cluster envelope is illegal')
+    }
+    parsed.clusterMessage = envelope.message
+  } catch (err) {
     parsed.warning = Err.wrapError(err, null, `cluster frame from ${message.from}: `)
-    return parsed
   }
-  validate(envelopeSchema, envelope, 'Proc cluster envelope')
-  if (envelope.to !== id || envelope.message.from !== message.from) {
-    fail('Proc cluster envelope is illegal')
-  }
-  parsed.clusterMessage = envelope.message
   return parsed
 }
 

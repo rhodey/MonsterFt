@@ -514,6 +514,8 @@ test('closing a forwarded caller abandons its reply without affecting later call
     reopened.gate.onReceive('unknown', encodeFrame({ arbitrary: 'ignored' }))
     reopened.gate.onReceive(caller, encodeFrame({ arbitrary: 'ignored' }))
     t.equal(reopened.gate.term, before, 'unknown and self senders are ignored at Gate')
+    t.ok(reopened.gate.isOpen, 'unknown and self senders leave Gate running')
+    t.equal((await reopened.gate.append(buf('after invalid senders')))[1], 'after invalid senders')
   } finally { await c.close() }
   t.end()
 })

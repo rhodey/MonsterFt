@@ -33,9 +33,9 @@ no findings
 ## `onReceive`
 
 Validates local replies against their requests and verifies cluster frames before
-queuing their original bytes. Incomplete remote frames and checksum failures
-warn and are discarded; local failures remain fatal. The Procs independently
-decode cluster payloads and warn locally on decoding failures.
+queuing their original bytes. Invalid remote senders and frames warn and are
+discarded; local failures remain fatal. The Procs independently decode and
+validate cluster envelopes, warning locally on remote failures.
 
 ### findings
 
@@ -88,8 +88,9 @@ no findings
 
 ## `_release`
 
-Delivers agreed outputs to Apply, callers, event listeners, or remote cluster
-nodes.
+Validates and delivers agreed outputs to Apply, callers, event listeners, or
+remote cluster nodes. Malformed command results stop Gate; valid command
+rejections remain nonfatal.
 
 ### findings
 
@@ -118,15 +119,6 @@ Queues a public request and returns a promise for its eventual result.
 
 no findings
 
-## `_outcomes`
-
-Validates command-result messages and converts them into public fulfilled or
-rejected outcomes.
-
-### findings
-
-no findings
-
 ## `append`
 
 Submits one command and returns its sequence and result, or rejects with the
@@ -146,7 +138,8 @@ outcomes.
 
 - **Accepted input-ownership policy:** callers must leave the submitted array
   and its Buffers unchanged until the operation settles. The queued request
-  retains the array, and the reply's result count is checked against its length.
+  retains the array, and the reply's result count is checked against the original
+  item count.
 - **Accepted: sparse arrays are unsupported.** The public `every` check skips
   holes; encoding and Proc validation can subsequently reject the request.
   Leave this JavaScript-specific case unchanged, as noted in

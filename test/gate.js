@@ -419,30 +419,37 @@ test('Gate stop preserves an earlier fatal error', async (t) => {
   t.end()
 })
 
-test('Gate rejects corrupt local frames and closes pending public work', async (t) => {
-  const h = harness()
-  let closed = false
-  let fatals = 0
-  h.gate.on('close', () => { closed = true })
-  h.gate.on('fatal', () => { fatals++ })
-  await h.gate.open()
-  const pending = h.gate.append(Buffer.from('pending')).catch((err) => err)
-  const frame = wire.encodeFrame({ type: 'ack', cid: 'corrupt-local-reply' })
-  frame[frame.length - 1] ^= 1
-  h.gate.onReceive('procA', frame)
-  t.equal((await pending).code, Err.FRAME_CORRUPT)
-  t.equal(h.errors[0].code, Err.FRAME_CORRUPT)
-  t.notOk(h.gate.isOpen, 'fatal failure stops Gate')
-  t.notOk(closed, 'stopping Gate does not claim component shutdown')
-  t.equal(fatals, 0, 'fatal handling is internal')
-  t.notOk(h.requests.some((r) => r.message.type === 'close'), 'fatal path sends no close requests')
-  await h.gate.close()
-  t.ok(closed, 'explicit close waits for owner completion')
-  t.equal(h.requests.filter((r) => r.message.type === 'close').length, 4)
+test('Gate rejects corrupt or malformed local replies and closes pending public work', async (t) => {
+  const checksum = wire.encodeFrame({ type: 'ack', cid: 'corrupt-local-reply' })
+  checksum[checksum.length - 1] ^= 1
+  const invalid = [
+    ['checksum', checksum, Err.FRAME_CORRUPT],
+    ['decode', wire.framePayload(Buffer.from([0xc4, 2, 0x61])), Err.FRAME_CORRUPT],
+    ['header', wire.encodeFrame({ type: 'ack', cid: 3 }), Err.RPC_ILLEGAL],
+  ]
+  for (const [label, frame, code] of invalid) {
+    const h = harness()
+    let closed = false
+    let fatals = 0
+    h.gate.on('close', () => { closed = true })
+    h.gate.on('fatal', () => { fatals++ })
+    await h.gate.open()
+    const pending = h.gate.append(Buffer.from('pending')).catch((err) => err)
+    h.gate.onReceive('procA', frame)
+    t.equal((await pending).code, code, `${label}: pending work rejects`)
+    t.equal(h.errors[0].code, code)
+    t.notOk(h.gate.isOpen, 'fatal failure stops Gate')
+    t.notOk(closed, 'stopping Gate does not claim component shutdown')
+    t.equal(fatals, 0, 'fatal handling is internal')
+    t.notOk(h.requests.some((r) => r.message.type === 'close'), 'fatal path sends no close requests')
+    await h.gate.close()
+    t.ok(closed, 'explicit close waits for owner completion')
+    t.equal(h.requests.filter((r) => r.message.type === 'close').length, 4)
+  }
   t.end()
 })
 
-test('Gate drops corrupt remote frames without cancelling pending commands', async (t) => {
+test('Gate drops corrupt remote frames and invalid senders without cancelling pending commands', async (t) => {
   const completions = []
   const h = harness({
     local({ to, message, complete }) {
@@ -471,6 +478,13 @@ test('Gate drops corrupt remote frames without cancelling pending commands', asy
       t.equal(h.warnings.length, index + 1, 'one warning per rejected frame')
       t.equal(h.warnings[index].code, Err.FRAME_CORRUPT)
       t.match(h.warnings[index].message, /^cluster frame from b: frame (checksum differs|is incomplete)$/)
+    }
+    for (const from of ['unknown', h.gate.id]) {
+      const count = h.warnings.length
+      h.gate.onReceive(from, good)
+      t.equal(h.warnings.length, count + 1, `${from}: one warning for invalid sender`)
+      t.equal(h.warnings[count].code, Err.RPC_ILLEGAL)
+      t.equal(h.warnings[count].message, 'cluster frame has invalid sender')
     }
     await immediate()
     t.deepEqual(h.errors, [], 'remote corruption emits no error')
@@ -1155,21 +1169,81 @@ test('Gate validates event-specific fields before delivery', async (t) => {
   t.end()
 })
 
-test('Gate malformed command outcomes reject only their callers', async (t) => {
-  const invalid = [[], [[0]], [[0, 'ok', 'extra']], [[1, 'failed', null, null, 3]],
-    [[1, 'failed', 'code', null]], [[2, 'unknown']]]
-  for (const results of invalid) {
-    let bad = true
-    const h = harness({ outputs: (input) => input.kind === 'append'
-      ? [bad ? client(input, results) : client(input)] : [] })
-    try {
-      await h.gate.open()
-      await assert.rejects(h.gate.append(Buffer.from('invalid')), { code: Err.RPC_ILLEGAL })
-      t.ok(h.gate.isOpen, 'malformed outcome does not stop Gate')
-      t.deepEqual(h.errors, [], 'validation rejection belongs to the caller')
-      bad = false
-      t.deepEqual(await h.gate.append(Buffer.from('next')), [3n, 'next'], 'later commands continue')
-    } finally { await h.gate.close() }
+test('Gate malformed command results stop before releasing further outputs', async (t) => {
+  const invalid = [
+    { cmdSeq: undefined }, { cmdSeq: -1n }, { cmdSeq: 3 },
+    { results: undefined }, { results: [] }, { results: [[0]] },
+    { results: [[0, 'ok', 'extra']] }, { results: [[1, 'failed', null, null, 3]] },
+    { results: [[1, 'failed', 'code', null]] }, { results: [[2, 'unknown']] },
+    { results: [[0, 'one'], [0, 'two'], [0, 'three']] },
+  ]
+  for (const batch of [false, true]) {
+    const cases = batch ? [...invalid, { results: [[0, 'missing second result']] }] : invalid
+    for (const fields of cases) {
+      const h = harness({ outputs(input) {
+        if (input.kind !== 'append') { return [] }
+        return [wire.encodePayload({ to: 'client', message: {
+          type: 'ack', cid: input.requestId, cmdSeq: 3n,
+          results: input.items.map(() => [0, 'ok']), ...fields,
+        } }), wire.encodePayload({ to: 'b', message: { type: 'append' } }), client(input)]
+      } })
+      let closed = false
+      h.gate.on('close', () => { closed = true })
+      h.gate.on('error', () => t.notOk(h.gate.isOpen, 'Gate stops before reporting the error'))
+      try {
+        await h.gate.open()
+        const items = [Buffer.from('one'), Buffer.from('two')]
+        const work = (batch ? h.gate.appendBatch(items) : h.gate.append(items[0])).catch((err) => err)
+        const queued = h.gate.append(Buffer.from('queued')).catch((err) => err)
+        const failure = await work
+        t.equal(failure.code, Err.RPC_ILLEGAL, `${batch ? 'batch' : 'single'}: malformed result rejects`)
+        t.equal(await queued, failure, 'other pending callers receive the terminal error')
+        t.deepEqual(h.errors, [failure], 'invalid local result is reported once')
+        t.equal(h.sent.length, 0, 'outputs following the malformed result are not released')
+        t.equal(h.requests.filter(({ to, message }) => to === 'procA' && message.kind === 'append').length, 1,
+          'queued command never reaches Procs')
+        t.notOk(closed, 'fatal stop does not emit close')
+        t.notOk(h.requests.some(({ message }) => message.type === 'close'), 'fatal stop sends no close requests')
+        await h.gate.close()
+        t.ok(closed, 'explicit cleanup still emits close')
+      } finally { await h.gate.close() }
+    }
   }
+  t.end()
+})
+
+test('Gate valid command errors and rejected outcomes remain nonfatal', async (t) => {
+  const reason = new Err.ErrorWithCode('command failed', Err.APPLY_ERROR)
+  let mode = 'err'
+  const h = harness({ outputs(input) {
+    if (input.kind !== 'append') { return [] }
+    if (mode === 'err') {
+      return [wire.encodePayload({ to: 'client', message: {
+        type: 'err', cid: input.requestId, error: wire.errorToWire(reason),
+      } })]
+    }
+    return [client(input, input.items.map((item) => item.toString() === 'reject'
+      ? [1, reason.message, reason.code, null, reason.stack] : [0, item.toString()]))]
+  } })
+  try {
+    await h.gate.open()
+    for (const batch of [false, true]) {
+      const work = batch ? h.gate.appendBatch([Buffer.from('reject')]) : h.gate.append(Buffer.from('reject'))
+      await assert.rejects(work, { message: reason.message, code: reason.code, stack: reason.stack })
+      t.ok(h.gate.isOpen, 'protocol ERR leaves Gate running')
+    }
+    mode = 'outcomes'
+    await assert.rejects(h.gate.append(Buffer.from('reject')), {
+      message: reason.message, code: reason.code, stack: reason.stack,
+    })
+    const [seq, outcomes] = await h.gate.appendBatch([Buffer.from('reject'), Buffer.from('keep')])
+    t.equal(seq, 3n)
+    t.deepEqual(outcomes.map((outcome) => outcome.status), ['rejected', 'fulfilled'])
+    t.equal(outcomes[0].reason.stack, reason.stack)
+    t.equal(outcomes[1].value, 'keep')
+    t.ok(h.gate.isOpen, 'valid rejected outcomes leave Gate running')
+    t.deepEqual(h.errors, [], 'command failures do not emit Gate errors')
+    t.deepEqual(await h.gate.append(Buffer.from('next')), [3n, 'next'])
+  } finally { await h.gate.close() }
   t.end()
 })

@@ -427,14 +427,25 @@ test('Proc independently verifies nested cluster frames before applying them', (
   t.end()
 })
 
-test('remote decode failures complete ordered inputs and still run due timers', (t) => {
-  for (const electionDue of [false, true]) {
+test('remote decode and envelope failures complete ordered inputs and still run due timers', (t) => {
+  const envelope = { to: 'a', message: {
+    from: 'b', type: 'append', cid: 'remote', term: 9n,
+    seqP: -1n, termP: -1n, commitSeq: -1n,
+    data: [{ term: 9n, entry: Buffer.from('must not write') }],
+  } }
+  const cases = [
+    [wire.framePayload(Buffer.from([0xdb, 0, 0, 0, 10, 65])), Err.FRAME_CORRUPT],
+    [wire.encodeFrame({ to: 'a' }), Err.RPC_ILLEGAL],
+    [wire.encodeFrame({ ...envelope, to: 'wrong-node' }), Err.RPC_ILLEGAL],
+    [wire.encodeFrame({ ...envelope, message: { ...envelope.message, from: 'c' } }), Err.RPC_ILLEGAL],
+    [wire.encodeFrame({ ...envelope, message: { ...envelope.message, type: 1 } }), Err.RPC_ILLEGAL],
+  ]
+  for (const [frame, code] of cases) for (const electionDue of [false, true]) {
     const f = fixture().startup()
     try {
       f.procs.forEach((proc, i) => f.input(i, 'start'))
       const first = f.procs[0]
       const timems = electionDue ? first.executor.timers.get(first.engine.electionTimer).due : 0
-      const frame = wire.framePayload(Buffer.from([0xdb, 0, 0, 0, 10, 65]))
       const replies = f.procs.map((proc, i) => {
         proc.on('warn', () => {
           t.notOk(proc.db.isTransaction, 'warning runs after commit')
@@ -446,8 +457,8 @@ test('remote decode failures complete ordered inputs and still run due timers', 
         t.equal(proc.executor.timems, timems)
         t.ok(proc.isOpen)
         t.deepEqual(f.events[i].map(({ type }) => type), ['warn'])
-        t.equal(f.events[i][0].value.code, Err.FRAME_CORRUPT)
-        t.match(f.events[i][0].value.message, /^cluster frame from b: message decode /)
+        t.equal(f.events[i][0].value.code, code)
+        t.match(f.events[i][0].value.message, /^cluster frame from b:/)
         t.equal(proc.engine.state, electionDue ? 'candidate' : 'follower')
         t.equal(proc.db.prepare('SELECT current_term FROM raft_election').get().current_term,
           electionDue ? 1n : 0n, 'only a due timer changes durable election state')
@@ -456,35 +467,44 @@ test('remote decode failures complete ordered inputs and still run due timers', 
       })
       t.deepEqual(replies[0].outputs.map(wire.checksum), replies[1].outputs, 'A and B outputs agree')
       t.deepEqual(replies[1].outputs, replies[2].outputs, 'B and C outputs agree')
-      if (!electionDue) { t.deepEqual(replies[0].outputs, [], 'no protocol response to undecodable bytes') }
+      if (!electionDue) { t.deepEqual(replies[0].outputs, [], 'invalid envelopes produce no protocol response') }
       else {
         t.deepEqual(replies[0].outputs.map((bytes) => wire.decodePayload(bytes).message.type),
           ['vote_request', 'vote_request', 'change'], 'due election and final change still publish')
       }
-      f.procs.forEach((proc, i) => {
-        t.equal(f.input(i, 'tick', { timems }).tickCount, 3n, 'the next ordered input is accepted')
+      const heartbeat = wire.encodeFrame({ to: 'a', message: {
+        from: 'b', type: 'append', cid: 'next-heartbeat', term: 2n,
+        seqP: -1n, termP: -1n, commitSeq: -1n,
+      } })
+      const continued = f.procs.map((proc, i) => {
+        const reply = f.input(i, 'rpc', { from: 'b', frame: heartbeat, timems })
+        t.equal(reply.tickCount, 3n, 'the next valid remote input is accepted')
+        t.equal(proc.engine.term, 2n)
+        t.equal(proc.engine.leader, 'b')
+        t.deepEqual(f.events[i].map(({ type }) => type), ['warn'], 'valid progress adds no diagnostic')
+        return reply
       })
+      t.deepEqual(continued[0].outputs.map(wire.checksum), continued[1].outputs, 'A and B continue in agreement')
+      t.deepEqual(continued[1].outputs, continued[2].outputs, 'B and C continue in agreement')
     } finally { f.cleanup() }
   }
   t.end()
 })
 
-test('remote decoding does not hide generation or decoded-envelope failures', (t) => {
-  for (const fault of ['generation', 'envelope']) {
+test('remote decode and envelope warnings cannot hide generation failures', (t) => {
+  for (const frame of [
+    wire.framePayload(Buffer.from([0xdb, 0, 0, 0, 10, 65])),
+    wire.encodeFrame({ to: 'wrong-node', message: { from: 'b', type: 'append' } }),
+  ]) {
     const f = fixture().startup()
     try {
       f.input(0, 'start')
       const proc = f.procs[0]
-      if (fault === 'generation') {
-        proc.db.prepare('UPDATE monsterft_meta SET generation = ?').run(Buffer.alloc(16, 9))
-      }
-      const frame = fault === 'generation'
-        ? wire.framePayload(Buffer.from([0xdb, 0, 0, 0, 10, 65]))
-        : wire.encodeFrame({ to: 'wrong-node', message: { from: 'b', type: 'append' } })
+      proc.db.prepare('UPDATE monsterft_meta SET generation = ?').run(Buffer.alloc(16, 9))
       t.equal(f.input(0, 'rpc', { from: 'b', frame }), undefined)
       t.notOk(proc.isOpen)
-      t.equal(proc._fatalError.code, fault === 'generation' ? Err.GENERATION_DIFF : Err.RPC_ILLEGAL)
-      t.notOk(f.events[0].some(({ type }) => type === 'warn'), 'only decode failures become warnings')
+      t.equal(proc._fatalError.code, Err.GENERATION_DIFF)
+      t.notOk(f.events[0].some(({ type }) => type === 'warn'), 'the failed input publishes no warning')
     } finally { f.cleanup() }
   }
   t.end()

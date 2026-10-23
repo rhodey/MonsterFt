@@ -59,7 +59,7 @@ no findings
 ## `_input`
 
 Processes one parsed input and its runnable work atomically in DB1,
-checking order, lifecycle, and generation before protocol work. Undecodable remote
+checking order, lifecycle, and generation before protocol work. Malformed remote
 messages warn locally without interrupting input completion. Fatal repair fences
 commit without publishing outputs; quorum-impossible decisions permit replication.
 

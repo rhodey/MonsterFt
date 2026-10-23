@@ -43,7 +43,7 @@ test('local message validators preserve originals and allow extra fields', (t) =
   t.end()
 })
 
-test('ordered input parsing distinguishes remote decode failures from local corruption', (t) => {
+test('ordered input parsing distinguishes remote invalid messages from local corruption', (t) => {
   const envelope = { to: 'a', message: { from: 'b', type: 'vote', term: 2n, voteGranted: true } }
   const parsed = utilm.parseProcRequest(input('rpc', {
     from: 'b', frame: wire.encodeFrame(envelope),
@@ -60,13 +60,23 @@ test('ordered input parsing distinguishes remote decode failures from local corr
   t.throws(() => utilm.parseProcRequest(input('rpc', { from: 'b', frame: corrupt }), 'a', nodes),
     isError(Err.FRAME_CORRUPT), 'nested checksum failures are never downgraded')
   for (const changed of [
+    null,
+    { to: 'a' },
     { ...envelope, to: 'c' },
     { ...envelope, message: { ...envelope.message, from: 'c' } },
     { ...envelope, message: { from: 'b' } },
   ]) {
-    t.throws(() => utilm.parseProcRequest(input('rpc', {
+    const ignored = utilm.parseProcRequest(input('rpc', {
       from: 'b', frame: wire.encodeFrame(changed),
-    }), 'a', nodes), isError(Err.RPC_ILLEGAL), 'decoded envelope failures remain fatal')
+    }), 'a', nodes)
+    t.equal(ignored.clusterMessage, null, 'invalid remote envelope is discarded')
+    t.equal(ignored.warning.code, Err.RPC_ILLEGAL)
+    t.match(ignored.warning.message, /^cluster frame from b:/)
+  }
+  for (const from of ['a', 'unknown']) {
+    t.throws(() => utilm.parseProcRequest(input('rpc', {
+      from, frame: wire.encodeFrame(envelope),
+    }), 'a', nodes), isError(Err.RPC_ILLEGAL), 'invalid local input sender remains fatal')
   }
   t.end()
 })
