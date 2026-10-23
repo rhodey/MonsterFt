@@ -60,6 +60,7 @@ no findings
 
 Validates ordered Gate inputs against the Proc's startup phase, clock, and
 expected request shapes, independently checking incoming cluster frames.
+Verification and decoding failures remain fatal after Gate accepts the frame.
 
 ### findings
 

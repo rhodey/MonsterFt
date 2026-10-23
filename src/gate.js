@@ -147,7 +147,10 @@ class Gate extends EventEmitter {
         if (!this.nodes.includes(from) || from === this.id) {
           throw rpcIllegal('cluster frame has invalid sender')
         }
-        wire.verifyFrame(frame)
+        try { wire.verifyFrame(frame) } catch (err) {
+          this._emitSafe('warn', Err.wrapError(err, null, `cluster frame from ${from}: `))
+          return
+        }
         this._enqueue({ kind: 'rpc', from, frame })
       }
     } catch (err) {

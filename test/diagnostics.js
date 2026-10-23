@@ -40,32 +40,45 @@ for (const localDelay of [0, 2]) {
   })
 }
 
-test('a bad remote checksum stops Gate before local fanout', async (t) => {
-  const received = []
-  const c = cluster({
-    opts: { tickInterval: 1_000, localTimeout: 100 },
-    local({ id, from, frame }) {
-      if (id !== 'a' || from !== 'gate') { return }
-      const message = decodeFrame(frame)
-      if (message.type === 'input' && message.kind === 'rpc') { received.push(message) }
-    },
-  })
-  try {
-    const node = c.nodes.get('a')
-    await node.gate.open()
+for (const localDelay of [0, 2]) {
+  test(`a bad remote checksum warns and drops before ${localDelay ? 'delayed' : 'synchronous'} local fanout`, async (t) => {
+    const received = []
     const corrupt = framePayload(Buffer.from([0xdb, 0, 0, 0, 10, 65]))
     corrupt[0] ^= 1
-    node.gate.onReceive('b', corrupt)
-    t.deepEqual(c.errors.map(({ role, error }) => [role, error.code]),
-      [['gate', Err.FRAME_CORRUPT]], 'Gate reports checksum corruption immediately')
-    t.equal(c.errors[0].error.message, 'frame checksum differs')
-    t.notOk(node.gate.isOpen)
-    t.equal(received.length, 0, 'corrupt bytes are never dispatched to the Procs')
-    t.ok(roles.every((role) => node[role].isOpen), 'Proc owners remain open until explicit cleanup')
-    t.equal(c.calls.length, 0)
-  } finally { await c.close() }
-  t.end()
-})
+    const c = cluster({
+      localDelay,
+      delay: localDelay,
+      local({ from, frame }) {
+        if (from !== 'gate') { return }
+        const message = decodeFrame(frame)
+        if (message.type === 'input' && message.kind === 'rpc' && message.frame.equals(corrupt)) {
+          received.push(message)
+        }
+      },
+    })
+    try {
+      await c.open()
+      await c.settled()
+      const gate = c.leader()
+      const node = c.nodes.get(gate.id)
+      const from = c.ids.find((id) => id !== gate.id)
+      const warnings = []
+      gate.on('warn', (error) => warnings.push(error))
+      gate.onReceive(from, corrupt)
+      t.equal(warnings.length, 1, 'Gate warns once immediately')
+      t.equal(warnings[0].code, Err.FRAME_CORRUPT)
+      t.equal(warnings[0].message, `cluster frame from ${from}: frame checksum differs`)
+      t.ok(gate.isOpen, 'the receiving Gate remains open')
+      t.ok(roles.every((role) => node[role].isOpen), 'all local Procs remain open')
+      t.equal((await gate.append(Buffer.from('after corrupt frame')))[1], 'after corrupt frame')
+      await c.settled()
+      t.equal(received.length, 0, 'corrupt bytes are never dispatched to the Procs')
+      t.deepEqual(c.errors, [], 'corruption does not produce a terminal diagnostic')
+      t.equal(c.calls.filter(({ seq }) => seq > 0n).length, 3, 'every node applies the later command')
+    } finally { await c.close() }
+    t.end()
+  })
+}
 
 test('failed startup reports locally and leaves remaining owners for explicit cleanup', async (t) => {
   const messages = []

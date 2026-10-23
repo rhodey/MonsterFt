@@ -201,12 +201,37 @@ test('Supervisor restarts a fatal Gate without mirroring its diagnostic', async 
   try {
     await h.supervisor.open()
     const run = h.runs[0]
-    run.gate.onReceive('b', Buffer.alloc(17))
+    run.gate.onReceive('procA', Buffer.alloc(17))
     await until(() => h.opens.length === 2, 'replacement after Gate fatal')
     t.equal(run.diagnostics.at(-1).code, Err.FRAME_CORRUPT)
     t.ok([...run.children.values()].every(exited))
     t.notOk(h.errors.some((err) => err.code === Err.FRAME_CORRUPT),
       'Gate remains the owner of the original fatal diagnostic')
+  } finally { await h.supervisor.close() }
+  t.end()
+})
+
+test('a corrupt remote frame does not restart Supervisor or reap healthy owners', async (t) => {
+  const h = harness()
+  try {
+    await h.supervisor.open()
+    const run = h.runs[0]
+    const warnings = []
+    run.gate.on('warn', (error) => warnings.push(error))
+    run.gate.onReceive('b', Buffer.alloc(17))
+    t.equal(warnings.length, 1)
+    t.equal(warnings[0].code, Err.FRAME_CORRUPT)
+    t.equal(warnings[0].message, 'cluster frame from b: frame checksum differs')
+    t.deepEqual(await run.gate.append(Buffer.from('continued')), [1n, 'continued'])
+    await pause(20)
+    t.equal(h.supervisor.gate, run.gate, 'the same Gate continues serving commands')
+    t.equal(h.runs.length, 1, 'no replacement is started')
+    t.ok([...run.children.values()].every((child) => !exited(child)), 'all original owners remain alive')
+    t.equal(run.stopped, 0)
+    t.equal(run.cleaned, 0)
+    t.notOk(run.requests.some(({ message }) => message.kind === 'rpc'), 'corrupt input is not fanned out')
+    t.deepEqual(run.diagnostics, [])
+    t.deepEqual(h.errors, [])
   } finally { await h.supervisor.close() }
   t.end()
 })
