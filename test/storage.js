@@ -4,7 +4,7 @@ import os from 'node:os'
 import path from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
 import { SQLiteLog } from '../src/log.js'
-import { ProtocolStore, databasePaths, openApplyDatabase, readDatabase } from '../src/storage.js'
+import { ProtocolStore, databasePaths, openApplyDatabase, readDatabase, readState } from '../src/storage.js'
 import * as sql from '../src/utils.js'
 import { digestEntry } from '../src/utilm.js'
 import * as Err from '../src/error.js'
@@ -141,6 +141,25 @@ test('log rejects absent term columns and corrupt stored terms', (t) => {
     log.close()
     t.throws(() => log.open(), (err) => err.code === Err.LOG_CORRUPT, 'corrupt stored term rejected')
   } finally { log.close(); f.cleanup() }
+  t.end()
+})
+
+test('missing DB1 tables report corruption at their owning layer', (t) => {
+  for (const [table, code] of [
+    ['raft_log', Err.LOG_CORRUPT],
+    ['raft_election', Err.LOG_CORRUPT],
+    ['monsterft_meta', Err.MONSTER_CORRUPT],
+  ]) {
+    const f = fixture().open()
+    try {
+      const db = f.stores[0].db
+      db.exec(`DROP TABLE ${table}`)
+      const expected = (err) => err.code === code && err.message === `${table} table is missing`
+      t.throws(() => readState(db), expected, `${table}: state validation`)
+      t.throws(() => new ProtocolStore('procA', f.base).open(seed), expected,
+        `${table}: startup family validation`)
+    } finally { f.cleanup() }
+  }
   t.end()
 })
 

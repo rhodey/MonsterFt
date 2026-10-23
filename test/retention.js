@@ -142,6 +142,24 @@ test('slow Apply retains its unapplied tail and startup prunes only validated ap
   t.end()
 })
 
+test('pruning preserves log corruption diagnostics and rolls back the input', (t) => {
+  const f = protocol({ keepTarget: 2, keepTrigger: 3 }).setup()
+  try {
+    const before = f.rows()
+    for (const proc of f.procs) {
+      proc.db.exec('UPDATE raft_election SET current_term = -1')
+    }
+    t.equal(noops(f, 2), undefined, 'corrupt election detected during head refresh prevents completion')
+    for (const proc of f.procs) {
+      t.notOk(proc.isOpen, `${proc.role}: owner stopped`)
+      t.equal(proc._fatalError.code, Err.LOG_CORRUPT, `${proc.role}: corruption code preserved`)
+      t.equal(proc._fatalError.message, 'DB1 retention term must be >= 0', 'retention prefix retained')
+    }
+    t.deepEqual(f.rows(), before, 'appends and retention deletions rolled back')
+  } finally { f.close() }
+  t.end()
+})
+
 test('runtime pruning and SYNC checkpoint failures roll back the entire input', (t) => {
   for (const fault of ['delete', 'head refresh', 'sync checkpoint']) {
     const f = protocol(options()).setup()
@@ -168,6 +186,10 @@ test('runtime pruning and SYNC checkpoint failures roll back the entire input', 
         }
       }
       t.equal(sync(f), undefined, `${fault}: no success completion`)
+      t.equal(f.proc._fatalError.code, Err.SQLITE_ERROR, `${fault}: SQL failure code retained`)
+      if (fault === 'delete') {
+        t.ok(Number.isInteger(f.proc._fatalError.sqlCode), 'native SQLite code retained')
+      }
       t.deepEqual(f.state(), before, 'checkpoint, SYNC insertion and deletions roll back together')
       t.equal(readApply(f.db2).seq, 1n, 'completed Apply receipt survives')
       t.ok(f.diagnostics.some(({ type, error }) => type === 'error' &&
@@ -212,6 +234,7 @@ test('startup pruning rejects invalid checkpoints and survives cleanup failures'
       } else {
         f.reopen()
         t.notOk(f.proc.isOpen, 'startup failure closes owner')
+        t.equal(f.proc._fatalError.code, Err.SQLITE_ERROR, 'startup SQL failure code retained')
       }
       t.deepEqual(f.rows(), before, `${fault}: failed startup removes no history`)
       f.stop()

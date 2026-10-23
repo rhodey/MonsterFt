@@ -70,7 +70,10 @@ class MonsterEngine extends RaftEngine {
       this.store.db.prepare('DELETE FROM raft_log WHERE seq < ?')
         .run(this.appliedSeq - this.keep.target + 1n)
       this.log.readHead()
-    } catch (err) { throw Err.wrapError(err, Err.SQLITE_ERROR, 'DB1 retention ') }
+    } catch (err) {
+      const code = err instanceof Err.ErrorWithCode ? null : Err.SQLITE_ERROR
+      throw Err.wrapError(err, code, 'DB1 retention ')
+    }
   }
 
   applyReady() {

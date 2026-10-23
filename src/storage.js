@@ -59,7 +59,8 @@ function readState(db) {
   const tables = schema(db)
   for (const name of TABLES) {
     if (!tables.some((row) => row.type === 'table' && row.name === name)) {
-      corrupt(`${name} table is missing`)
+      const code = name === 'monsterft_meta' ? Err.MONSTER_CORRUPT : Err.LOG_CORRUPT
+      throw new Err.ErrorWithCode(`${name} table is missing`, code)
     }
   }
   const election = db.prepare(`
