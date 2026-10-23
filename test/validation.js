@@ -18,50 +18,53 @@ const execute = (fields = {}) => ({
 test('local message validators preserve originals and allow extra fields', (t) => {
   const extra = { value: Buffer.from('extra') }
   const request = { type: 'hello', cid: 'hello', seed: Buffer.alloc(16, 1), extra }
-  t.equal(utilm.validateProcRequest(request), request)
+  t.equal(utilm.parseProcRequest(request, 'a', nodes).message, request)
   t.equal(utilm.validateApplyRequest(request), request)
   const message = input('append', { requestId: 'public', items: [Buffer.from('item')], extra })
   const bytes = wire.encodePayload(message)
-  const parsed = utilm.parseProcInput(message, 'a', nodes)
+  const parsed = utilm.parseProcRequest(message, 'a', nodes)
   t.equal(parsed.message, message)
   t.equal(parsed.message.items, message.items)
   t.equal(parsed.message.items[0], message.items[0], 'validation does not copy payloads')
   t.equal(parsed.message.extra, extra, 'extension fields remain available')
   t.deepEqual(wire.encodePayload(message), bytes, 'validation leaves encoded bytes unchanged')
   for (const bad of [
+    null, { cid: 'no-type' }, { type: 1, cid: 'number-type' },
+    { type: 'hello', cid: '', seed: request.seed },
+    input('tick', { cid: undefined }), input('tick', { cid: '' }),
     input('other'), input({ toString: null }),
     input('append', { requestId: 'public', items: [] }),
     input('append', { requestId: '', items: [Buffer.alloc(0)] }),
     input('append', { requestId: 'public', items: [new Uint8Array(1)] }),
     input('drain'), input('tick', { timems: NaN }),
   ]) {
-    t.throws(() => utilm.parseProcInput(bad, 'a', nodes), isError(Err.RPC_ILLEGAL))
+    t.throws(() => utilm.parseProcRequest(bad, 'a', nodes), isError(Err.RPC_ILLEGAL))
   }
   t.end()
 })
 
 test('ordered input parsing distinguishes remote decode failures from local corruption', (t) => {
   const envelope = { to: 'a', message: { from: 'b', type: 'vote', term: 2n, voteGranted: true } }
-  const parsed = utilm.parseProcInput(input('rpc', {
+  const parsed = utilm.parseProcRequest(input('rpc', {
     from: 'b', frame: wire.encodeFrame(envelope),
   }), 'a', nodes)
   t.deepEqual(parsed.clusterMessage, envelope.message)
   t.equal(parsed.warning, null)
   const badPayload = wire.framePayload(Buffer.from([0xdb, 0, 0, 0, 10, 65]))
-  const ignored = utilm.parseProcInput(input('rpc', { from: 'b', frame: badPayload }), 'a', nodes)
+  const ignored = utilm.parseProcRequest(input('rpc', { from: 'b', frame: badPayload }), 'a', nodes)
   t.equal(ignored.clusterMessage, null)
   t.equal(ignored.warning.code, Err.FRAME_CORRUPT)
   t.match(ignored.warning.message, /^cluster frame from b:/)
   const corrupt = Buffer.from(badPayload)
   corrupt[0] ^= 1
-  t.throws(() => utilm.parseProcInput(input('rpc', { from: 'b', frame: corrupt }), 'a', nodes),
+  t.throws(() => utilm.parseProcRequest(input('rpc', { from: 'b', frame: corrupt }), 'a', nodes),
     isError(Err.FRAME_CORRUPT), 'nested checksum failures are never downgraded')
   for (const changed of [
     { ...envelope, to: 'c' },
     { ...envelope, message: { ...envelope.message, from: 'c' } },
     { ...envelope, message: { from: 'b' } },
   ]) {
-    t.throws(() => utilm.parseProcInput(input('rpc', {
+    t.throws(() => utilm.parseProcRequest(input('rpc', {
       from: 'b', frame: wire.encodeFrame(changed),
     }), 'a', nodes), isError(Err.RPC_ILLEGAL), 'decoded envelope failures remain fatal')
   }
@@ -70,16 +73,17 @@ test('ordered input parsing distinguishes remote decode failures from local corr
 
 test('Apply validation retains setup, command, and byte-view contracts', (t) => {
   const setup = execute({ seq: 0n, items: null, matchIndex: null })
-  t.equal(utilm.validateExecute(setup), setup)
+  t.equal(utilm.validateApplyRequest(setup), setup)
   const message = execute({ extra: true, entryHash: new Uint8Array(16) })
-  t.equal(utilm.validateExecute(message), message, 'receipt hashes retain Uint8Array support')
+  t.equal(utilm.validateApplyRequest(message), message, 'receipt hashes retain Uint8Array support')
   t.equal(message.entryHash.constructor, Uint8Array, 'hash is not converted during validation')
   for (const bad of [
+    execute({ cid: undefined }), execute({ cid: '' }), execute({ type: 1 }),
     execute({ seq: 0n }), execute({ items: null, matchIndex: null }),
     execute({ items: [] }), execute({ items: [new Uint8Array(1)] }),
     execute({ matchIndex: [-2n, 0n, 0n] }), execute({ matchIndex: [0n, 1n, 0n] }),
   ]) {
-    t.throws(() => utilm.validateExecute(bad), isError(Err.RPC_ILLEGAL))
+    t.throws(() => utilm.validateApplyRequest(bad), isError(Err.RPC_ILLEGAL))
   }
   const ack = { type: 'ack', cid: message.cid, tickCount: message.tickCount }
   t.equal(utilm.validateLocalReply(ack, message, 'apply'), ack)

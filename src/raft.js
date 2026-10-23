@@ -105,7 +105,7 @@ class RaftEngine {
   }
 
   receive(from, message) {
-    if (this.stopped || !this.nodes.includes(from) || from === this.id || !util.schemas.rpc.validate(message)) { return }
+    if (this.stopped || !this.nodes.includes(from) || from === this.id) { return }
     if (message.type === 'ack' || message.type === 'err') {
       if (!util.raftSchemas.reply.validate(message)) { return }
       const waiting = this.requests.get(message.cid)
@@ -281,8 +281,8 @@ class RaftEngine {
       if (state.matchIndex < this.seq) { state.nextIndex = min(state.nextIndex, this.seq) }
       this.checkCommit()
       this.executor.enqueue(() => this.replicate(state))
-    }, (response) => util.raftSchemas.appendReply.validate(response) &&
-      (response.type === 'err' || response.term >= term),
+    }, (response) => response.type === 'err' ||
+      util.schemas.nonnegativeSeq.validate(response.seq) && response.term >= term,
     failure('heartbeat timeout', Err.HEARTBEAT_TIMEOUT))
     state.heartbeatCids.add(cid)
   }
@@ -367,8 +367,8 @@ class RaftEngine {
       state.nextIndex = max(state.nextIndex, matched + 1n)
       this.checkCommit()
       this.executor.enqueue(() => this.replicate(state))
-    }, (response) => util.raftSchemas.appendReply.validate(response) &&
-      (response.type === 'err' || response.term >= term))
+    }, (response) => response.type === 'err' ||
+      util.schemas.nonnegativeSeq.validate(response.seq) && response.term >= term)
   }
 
   checkCommit() {

@@ -600,6 +600,7 @@ test('Apply validates execution and frame checksums before invoking user code', 
 
 test('Apply validates execution fields before changing its receipt', async (t) => {
   const malformed = [
+    { cid: undefined }, { cid: '' }, { type: 1 },
     { tickCount: -1n }, { tickCount: 1 }, { tickCount: undefined },
     { term: -1n }, { term: 9_223_372_036_854_775_808n }, { term: 1 },
     { seq: -1n }, { seq: 0 }, { entryHash: 'hash' },

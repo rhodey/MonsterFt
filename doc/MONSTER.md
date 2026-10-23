@@ -131,8 +131,8 @@ no findings
 
 ## `submit`
 
-Validates a public command request and queues it locally or forwards it to the
-leader.
+Checks command size and availability, then queues a parsed command request
+locally or forwards it to the leader.
 
 ### findings
 

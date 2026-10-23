@@ -600,8 +600,11 @@ test('Proc retains an engine cleanup failure even when the database closes', (t)
   t.end()
 })
 
-test('Proc rejects input reordering and clock regressions', (t) => {
-  for (const bad of [{ tickCount: 1n, timems: 5 }, { tickCount: 2n, timems: 4 }]) {
+test('Proc rejects malformed inputs, input reordering, and clock regressions', (t) => {
+  for (const bad of [
+    { cid: undefined }, { cid: '' }, { type: 1 },
+    { tickCount: 1n, timems: 5 }, { tickCount: 2n, timems: 4 },
+  ]) {
     const f = fixture().startup()
     try {
       f.input(0, 'start', { timems: 5 })
@@ -609,6 +612,7 @@ test('Proc rejects input reordering and clock regressions', (t) => {
       t.equal(reply, undefined, 'bad input sends no fatal ERR reply')
       t.equal(f.events[0].find((event) => event.type === 'error').value.code, Err.RPC_ILLEGAL)
       t.notOk(f.procs[0].isOpen)
+      t.equal(f.procs[0].tickCount, 1n, 'rejected input cannot advance the clock')
     } finally { f.cleanup() }
   }
   t.end()

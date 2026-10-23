@@ -195,25 +195,41 @@ test('Raft cannot replace committed history even with identical payload bytes', 
 })
 
 test('Raft malformed ACKs leave the pending request and election state unchanged', (t) => {
-  const f = fixture()
-  try {
-    const election = f.elect()
-    const request = f.outputs(election).find(({ to, message }) => to === 'b' && message.type === 'append').message
-    for (const message of [
-      { term: 50n }, { term: 50n, seq: -1n }, { term: 50n, seq: 0 }, { term: '50', seq: 0n },
-      { term: 0n, seq: 0n },
-    ]) {
-      f.rpc({ type: 'ack', cid: request.cid, ...message })
-      t.equal(f.proc.engine.term, 1n)
-      t.equal(f.proc.engine.commitSeq, -1n)
-      t.ok(f.proc.engine.requests.has(request.cid))
-    }
-    f.rpc({ type: 'ack', cid: request.cid, term: 50n, seq: 0n }, 'c')
-    t.equal(f.proc.engine.term, 1n, 'wrong sender cannot satisfy the request')
-    const reply = f.rpc({ type: 'ack', cid: request.cid, term: 1n, seq: 0n })
-    t.equal(f.proc.engine.commitSeq, 0n, 'valid replication ACK needs no command results')
-    t.ok(f.outputs(reply).some(({ to }) => to === 'apply'), 'valid ACK enables setup')
-  } finally { f.close() }
+  for (const heartbeat of [false, true]) {
+    const f = fixture()
+    try {
+      const election = f.elect()
+      const page = f.outputs(election).find(({ to, message }) => to === 'b' && message.type === 'append').message
+      const request = heartbeat
+        ? f.outputs(f.input('tick', { timems: f.proc.executor.timems + 45 }))
+          .find(({ to, message }) => to === 'b' && message.type === 'append' && !message.data).message
+        : page
+      const waiting = f.proc.engine.requests.get(request.cid)
+      const before = stateDigest(f.state())
+      for (const fields of [
+        { seq: undefined }, { seq: -1n }, { seq: 0 }, { seq: 9_223_372_036_854_775_808n },
+        { term: '50' }, { term: 9_223_372_036_854_775_808n }, { term: 0n },
+        { cid: undefined }, { cid: '' }, { cid: 1 },
+      ]) {
+        f.rpc({ type: 'ack', cid: request.cid, term: 50n, seq: 0n, ...fields })
+        t.equal(f.proc.engine.term, 1n)
+        t.equal(f.proc.engine.commitSeq, -1n)
+        t.equal(f.proc.engine.requests.get(request.cid), waiting, 'invalid ACK preserves the request')
+        t.ok(f.proc.executor.timers.has(waiting.timer), 'invalid ACK preserves its deadline')
+        t.ok(stateDigest(f.state()).equals(before), 'invalid ACK leaves durable state unchanged')
+      }
+      f.rpc({ type: 'ack', cid: request.cid, term: 50n, seq: 0n }, 'c')
+      t.equal(f.proc.engine.term, 1n, 'wrong sender cannot satisfy the request')
+      let reply = f.rpc({ type: 'ack', cid: request.cid, term: 1n, seq: 0n })
+      t.notOk(f.proc.engine.requests.has(request.cid), 'valid ACK settles the request')
+      if (heartbeat) {
+        t.equal(f.proc.engine.commitSeq, -1n, 'heartbeat ACK does not establish replication')
+        reply = f.rpc({ type: 'ack', cid: page.cid, term: 1n, seq: 0n })
+      }
+      t.equal(f.proc.engine.commitSeq, 0n, 'valid replication ACK needs no command results')
+      t.ok(f.outputs(reply).some(({ to }) => to === 'apply'), 'valid ACK enables setup')
+    } finally { f.close() }
+  }
   t.end()
 })
 

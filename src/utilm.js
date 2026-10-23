@@ -10,6 +10,7 @@ const replySchema = requestSchema.extend({ type: z.enum(['ack', 'err']) })
 const applyReplySchema = requestSchema.extend({
   type: z.literal('ack'), tickCount: schemas.tickCount,
 })
+const completionSchema = z.looseObject({ tickCount: schemas.tickCount })
 const outcomeCode = z.number().int().nullable()
 const outcomeSchema = z.union([
   z.tuple([z.literal(0), z.unknown()]),
@@ -54,8 +55,8 @@ const inputSchemas = {
   apply: inputSchema.extend({ reply: applyReplySchema }),
 }
 const envelopeSchema = z.looseObject({ to: schemas.cid, message: schemas.rpc })
-const completionSchema = applyReplySchema.extend({ outputs: z.array(schemas.buffer) })
-const checksumCompletionSchema = applyReplySchema.extend({ outputs: z.array(schemas.hash) })
+const outputCompletionSchema = completionSchema.extend({ outputs: z.array(schemas.buffer) })
+const checksumCompletionSchema = completionSchema.extend({ outputs: z.array(schemas.hash) })
 const captureSchema = z.looseObject({ selection: z.looseObject({
   state: schemas.hash, receipt: schemas.hash, donor: z.enum(['procA', 'procB', 'procC']),
 }) })
@@ -96,17 +97,20 @@ const validateRequest = (message, owner) => {
     message, `${owner} ${hello ? 'hello' : 'request'}`)
 }
 
-const validateProcRequest = (message) => validateRequest(message, 'Proc')
-const validateApplyRequest = (message) => validateRequest(message, 'Apply')
+const validateApplyRequest = (message) => message?.type === 'execute'
+  ? validateExecute(message) : validateRequest(message, 'Apply')
 const validateReply = (message) => validate(replySchema, message, 'local reply')
-const validateApplyReply = (message) => validate(applyReplySchema, message, 'Apply reply')
 
-function parseProcInput(message, id, nodes) {
+function parseProcRequest(message, id, nodes) {
+  const parsed = { message, clusterMessage: null, warning: null }
+  if (message?.type !== 'input') {
+    validateRequest(message, 'Proc')
+    return parsed
+  }
   const kind = message?.kind
   const schema = typeof kind === 'string' && Object.hasOwn(inputSchemas, kind)
     ? inputSchemas[kind] : inputSchema
   validate(schema, message, 'Proc input')
-  const parsed = { message, clusterMessage: null, warning: null }
   if (message.kind !== 'rpc') { return parsed }
   if (!nodes.includes(message.from) || message.from === id) {
     fail('Proc cluster sender is illegal')
@@ -137,12 +141,13 @@ function validateExecute(message) {
 }
 
 function validateLocalReply(message, request, role) {
+  // The reply header was validated before looking up its request.
   if (message.type === 'err') { return message }
   if (request.type === 'input') {
-    validate(role === 'procA' ? completionSchema : checksumCompletionSchema,
+    validate(role === 'procA' ? outputCompletionSchema : checksumCompletionSchema,
       message, 'Proc completion')
   } else if (request.type === 'execute') {
-    validateApplyReply(message)
+    validate(completionSchema, message, 'Apply reply')
   } else if (request.type === 'capture') {
     validate(captureSchema, message, 'capture reply')
   }
@@ -349,8 +354,8 @@ const normalizeKeepOptions = (opts) => {
 }
 
 export {
-  monsterSchemas, validateProcRequest, validateApplyRequest, validateReply,
-  validateApplyReply, parseProcInput, validateExecute, validateLocalReply,
+  monsterSchemas, validateApplyRequest, validateReply,
+  parseProcRequest, validateExecute, validateLocalReply,
   parseOutput, validateEvent, validateCommandResult, decodeEntry,
   asBuffer, outcomesWire, outcomesPublic, digestCmd, assertEncodable,
   digestEntry, isDigest,

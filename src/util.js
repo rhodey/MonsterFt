@@ -38,13 +38,6 @@ const reply = z.looseObject({
 })
 const raftSchemas = {
   reply,
-  appendReply: z.discriminatedUnion('type', [
-    z.looseObject({ type: z.literal('err'), cid: schemas.cid, term: schemas.term }),
-    z.looseObject({
-      type: z.literal('ack'), cid: schemas.cid, term: schemas.term,
-      seq: schemas.nonnegativeSeq,
-    }),
-  ]),
   voteRequest: z.looseObject({
     type: z.literal('vote_request'), term: schemas.term,
     termP: schemas.seq, seqP: schemas.seq,

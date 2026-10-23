@@ -58,7 +58,7 @@ no findings
 
 ## `_input`
 
-Parses and processes one ordered input and its runnable work atomically in DB1,
+Processes one parsed input and its runnable work atomically in DB1,
 checking order, lifecycle, and generation before protocol work. Undecodable remote
 messages warn locally without interrupting input completion. Fatal repair fences
 commit without publishing outputs; quorum-impossible decisions permit replication.
@@ -69,7 +69,7 @@ no findings
 
 ## `onReceive`
 
-Handles Gate's startup, runtime, and shutdown requests, enforcing the Proc
+Parses Gate's startup, runtime, and shutdown requests, enforcing the Proc
 lifecycle and reporting failures. Claims the startup generation when opening DB1.
 
 ### findings

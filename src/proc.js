@@ -98,8 +98,7 @@ class MonsterProc extends EventEmitter {
     this._outputs.push(this.role === 'procA' ? payload : wire.checksum(payload))
   }
 
-  _input(message) {
-    const { clusterMessage, warning } = utilm.parseProcInput(message, this.id, this.nodes)
+  _input({ message, clusterMessage, warning }) {
     if (message.tickCount !== this.tickCount + 1n || message.timems < this.executor.timems) {
       throw illegal('Proc input order is illegal')
     }
@@ -160,7 +159,7 @@ class MonsterProc extends EventEmitter {
         return
       }
       if (this._stopped) { return }
-      utilm.validateProcRequest(message)
+      const parsed = utilm.parseProcRequest(message, this.id, this.nodes)
       if (message.type === 'hello') {
         if (this._pastHello) { throw illegal('Proc received hello after startup') }
         // Validate without advancing the shared generator. A new Gate may start
@@ -199,7 +198,7 @@ class MonsterProc extends EventEmitter {
         this._phase = 'reconciled'
         this._ack(message)
       } else if (message.type === 'input' && this.engine !== null) {
-        this._input(message)
+        this._input(parsed)
       } else {
         throw illegal('Proc startup phase is illegal')
       }

@@ -12,9 +12,9 @@ Validates a local request header and the shared seed for hello requests.
 
 no findings
 
-## `parseProcInput`
+## `parseProcRequest`
 
-Validates an ordered Proc input and prepares its cluster message when present.
+Validates a local Proc request and prepares its cluster message when present.
 Remote decoding failures become local warnings; nested checksum failures and
 invalid envelopes remain fatal.
 
@@ -32,7 +32,8 @@ no findings
 
 ## `validateLocalReply`
 
-Validates local completion fields against the original request and sending role.
+Validates local completion fields against the original request and sending role,
+after the reply header has been checked for request lookup.
 
 ### findings
 

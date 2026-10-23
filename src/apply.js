@@ -2,7 +2,7 @@ import { EventEmitter } from 'node:events'
 import * as Err from './error.js'
 import { isCid, HASH_BYTES } from './util.js'
 import {
-  asBuffer, assertEncodable, digestCmd, outcomesWire, validateApplyRequest, validateExecute,
+  asBuffer, assertEncodable, digestCmd, outcomesWire, validateApplyRequest,
 } from './utilm.js'
 import { openApplyDatabase } from './storage.js'
 import { readApply, checkGeneration } from './utils.js'
@@ -133,7 +133,6 @@ class MonsterApply extends EventEmitter {
       if (msg.type !== 'execute' || !this._ready || this._work !== null) {
         throw new Err.ErrorWithCode('Apply request is not executable', Err.MONSTER_ILLEGAL)
       }
-      validateExecute(msg)
       if (msg.tickCount < this.tickCount) {
         throw new Err.ErrorWithCode('Apply execution tickCount is behind', Err.RPC_ILLEGAL)
       }

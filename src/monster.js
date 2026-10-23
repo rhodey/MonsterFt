@@ -121,7 +121,6 @@ class MonsterEngine extends RaftEngine {
   }
 
   receiveApply(reply) {
-    utilm.validateApplyReply(reply)
     const pending = this.pendingApply
     if (!pending || reply.cid !== pending.cid || reply.tickCount !== pending.tickCount) {
       throw failure('Apply reply has no matching request', Err.RPC_ILLEGAL)
@@ -199,8 +198,7 @@ class MonsterEngine extends RaftEngine {
     const request = { to: 'client', cid: requestId, items, responded: false }
     try {
       this.available()
-      if (!Array.isArray(items) || items.length === 0 || !items.every(Buffer.isBuffer) ||
-          commandBytes(items, this.nodes.length) > MAX_SQLITE_BYTES) {
+      if (commandBytes(items, this.nodes.length) > MAX_SQLITE_BYTES) {
         throw failure('command items are illegal', Err.ARGUMENT_ILLEGAL)
       }
       if (this.state !== 'leader' && this.leader === null) {
