@@ -145,7 +145,11 @@ class MonsterProc extends EventEmitter {
   }
 
   onReceive(from, frame) {
-    if (from !== 'gate') { return }
+    if (from !== 'gate') {
+      if (this._stopped) { return }
+      this._emitSafe('warn', illegal(`Proc sender ${from} is illegal, expected gate`))
+      return
+    }
     let message = null
     try {
       message = wire.decodeFrame(frame)

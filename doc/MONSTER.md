@@ -132,7 +132,8 @@ no findings
 ## `submit`
 
 Checks command size and availability, then queues a parsed command request
-locally or forwards it to the leader.
+locally or forwards it to the leader. Malformed forwarded results warn without
+settling the request.
 
 ### findings
 
@@ -203,11 +204,13 @@ no findings
 ## `receiveCustom`
 
 Handles forwarded commands and command-outcome requests and reports.
+Unknown message types and forwarded requests without a usable CID warn and are
+discarded.
 
 ### findings
 
 - **Deferred: duplicate forwarded requests execute twice.**
-  The `fwd_cmd` branch in `src/monster.js:352` creates a new queued request
+  The `fwd_cmd` branch creates a new queued request
   for every delivery, including the same sender and CID. Delivering one genuine
   forwarded frame twice in a three-node cluster made a single public `append()`
   execute at sequences 1 and 3 on every node; the caller received only the first

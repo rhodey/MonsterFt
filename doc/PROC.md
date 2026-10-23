@@ -71,6 +71,7 @@ no findings
 
 Parses Gate's startup, runtime, and shutdown requests, enforcing the Proc
 lifecycle and reporting failures. Claims the startup generation when opening DB1.
+While active, warns and ignores messages from any sender other than Gate.
 
 ### findings
 

@@ -86,7 +86,13 @@ class MonsterApply extends EventEmitter {
   }
 
   async onReceive(from, buffer) {
-    if (from !== 'gate') { return }
+    if (from !== 'gate') {
+      if (this._stopped) { return }
+      this._emitSafe('warn', new Err.ErrorWithCode(
+        `Apply sender ${from} is illegal, expected gate`, Err.RPC_ILLEGAL,
+      ))
+      return
+    }
     try {
       let msg = decodeFrame(buffer)
       if (msg?.to === 'apply') { msg = msg.message }

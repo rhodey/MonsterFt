@@ -107,9 +107,15 @@ class RaftEngine {
   receive(from, message) {
     if (this.stopped || !this.nodes.includes(from) || from === this.id) { return }
     if (message.type === 'ack' || message.type === 'err') {
-      if (!util.raftSchemas.reply.validate(message)) { return }
-      const waiting = this.requests.get(message.cid)
-      if (!waiting || waiting.to !== from || !waiting.validate(message)) { return }
+      let waiting
+      try {
+        util.validate(util.raftSchemas.reply, message, 'reply')
+        waiting = this.requests.get(message.cid)
+        if (!waiting || waiting.to !== from || !waiting.validate(message)) { return }
+      } catch (err) {
+        this.warn(Err.wrapError(err, null, `${message.type} from ${from}: `))
+        return
+      }
       if (message.term > this.term) { this.advanceTerm(message.term) }
       if (!this.requests.delete(message.cid)) { return }
       this.executor.cancel(waiting.timer)
@@ -127,7 +133,9 @@ class RaftEngine {
     }
   }
 
-  receiveCustom() {}
+  receiveCustom(from, message) {
+    this.warn(failure(`unknown message type '${message.type}' from ${from}`, Err.RPC_ILLEGAL))
+  }
   applyReady() {}
   leaderChanged() {}
 
@@ -200,8 +208,13 @@ class RaftEngine {
 
   voteRequest(from, msg) {
     const { term, termP, seqP } = msg
+    let valid = false
+    try {
+      util.validate(util.raftSchemas.voteRequest, msg, `vote_request from ${from}`)
+      valid = true
+    } catch (err) { this.warn(err) }
     let granted = false
-    if (util.raftSchemas.voteRequest.validate(msg) && term >= this.term) {
+    if (valid && term >= this.term) {
       const wasLeader = this.state === 'leader'
       this.advanceTerm(term, null, wasLeader)
       granted = (this.votedFor === null || this.votedFor === from) && term >= termP &&
@@ -217,7 +230,8 @@ class RaftEngine {
   }
 
   voteResponse(from, msg) {
-    if (!util.raftSchemas.vote.validate(msg)) { return }
+    try { util.validate(util.raftSchemas.vote, msg, `vote from ${from}`) }
+    catch (err) { this.warn(err); return }
     if (this.advanceTerm(msg.term)) { return }
     if (this.state !== 'candidate' || msg.term !== this.term || !msg.voteGranted) { return }
     this.votes.add(from)
@@ -281,8 +295,12 @@ class RaftEngine {
       if (state.matchIndex < this.seq) { state.nextIndex = min(state.nextIndex, this.seq) }
       this.checkCommit()
       this.executor.enqueue(() => this.replicate(state))
-    }, (response) => response.type === 'err' ||
-      util.schemas.nonnegativeSeq.validate(response.seq) && response.term >= term,
+    }, (response) => {
+      if (response.type === 'err') { return true }
+      if (response.term < term) { return false }
+      util.validate(util.schemas.nonnegativeSeq, response.seq, 'heartbeat ACK seq')
+      return true
+    },
     failure('heartbeat timeout', Err.HEARTBEAT_TIMEOUT))
     state.heartbeatCids.add(cid)
   }
@@ -367,8 +385,12 @@ class RaftEngine {
       state.nextIndex = max(state.nextIndex, matched + 1n)
       this.checkCommit()
       this.executor.enqueue(() => this.replicate(state))
-    }, (response) => response.type === 'err' ||
-      util.schemas.nonnegativeSeq.validate(response.seq) && response.term >= term)
+    }, (response) => {
+      if (response.type === 'err') { return true }
+      if (response.term < term) { return false }
+      util.validate(util.schemas.nonnegativeSeq, response.seq, 'append ACK seq')
+      return true
+    })
   }
 
   checkCommit() {
@@ -393,14 +415,14 @@ class RaftEngine {
 
   appendRequest(from, msg) {
     const { cid, term, termP, seqP, commitSeq, data } = msg
-    if (!util.isCid(cid)) { return }
     try {
       util.validate(util.raftSchemas.append, msg, 'append')
       if (data !== undefined && !util.isSeq(seqP + BigInt(data.length))) {
         throw failure('append sequence is illegal', Err.RPC_ILLEGAL)
       }
     } catch (err) {
-      this.rpcError(from, cid, err)
+      if (util.isCid(cid)) { this.rpcError(from, cid, err) }
+      else { this.warn(Err.wrapError(err, null, `from ${from}: `)) }
       return
     }
     if (term < this.term) {

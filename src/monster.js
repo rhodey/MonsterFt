@@ -218,7 +218,11 @@ class MonsterEngine extends RaftEngine {
               this.output('client', { type: 'err', cid: request.cid, ...errorToWire(err, typeof reply?.stack === 'string') })
             }
           } else { this.respond(request, null, reply.cmdSeq, reply.results) }
-        }, (reply) => reply.type === 'err' || utilm.isFwdCmdAck(reply, items.length))
+        }, (reply) => {
+          if (reply.type === 'err') { return true }
+          utilm.validateCommandResult(reply, items.length)
+          return true
+        })
     }
   }
 
@@ -347,7 +351,10 @@ class MonsterEngine extends RaftEngine {
 
   receiveCustom(from, msg) {
     if (msg.type === 'fwd_cmd') {
-      if (!util.isCid(msg.cid)) { return }
+      if (!util.isCid(msg.cid)) {
+        this.warn(failure(`fwd_cmd from ${from} cid is illegal`, Err.RPC_ILLEGAL))
+        return
+      }
       const request = { to: from, cid: msg.cid, items: msg.items, responded: false }
       try {
         util.validate(utilm.monsterSchemas.forwarded, msg, 'forward CMD')
@@ -370,6 +377,8 @@ class MonsterEngine extends RaftEngine {
       if (this.state === 'leader' && this.pendingCommand?.cmdSeq === msg.cmdSeq) {
         this.rememberReport(from, msg.digest)
       }
+    } else {
+      super.receiveCustom(from, msg)
     }
   }
 

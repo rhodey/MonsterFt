@@ -73,7 +73,16 @@ no findings
 ## `receive`
 
 Validates and routes incoming Raft messages and completes matching outstanding
-requests. Reply schemas depend on the outstanding request.
+requests. Malformed reply fields warn without settling requests; unmatched and
+stale replies remain quiet.
+
+### findings
+
+no findings
+
+## `receiveCustom`
+
+Warns when a remote message type is unsupported.
 
 ### findings
 
@@ -131,7 +140,7 @@ no findings
 ## `voteRequest`
 
 Evaluates a candidate and records a granted vote before returning the vote
-response.
+response. Malformed requests warn and receive a negative vote.
 
 ### findings
 
@@ -140,7 +149,7 @@ no findings
 ## `voteResponse`
 
 Collects election votes and starts leader replication when a quorum elects this
-node.
+node. Malformed responses warn; valid denials and stale votes remain quiet.
 
 ### findings
 
@@ -247,6 +256,7 @@ no findings
 
 Handles replication and heartbeats, reconciling follower history while
 protecting committed entries. Structural validation precedes term or log changes.
+Requests without a usable CID warn and are discarded.
 
 ### findings
 

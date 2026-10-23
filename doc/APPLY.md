@@ -44,6 +44,7 @@ no findings
 Handles Gate's startup, execution, and shutdown requests, permitting only one
 execution at a time and returning its receipt and outcomes. Uses shared message
 validation and checks lifecycle, execution order, and generation before callbacks.
+While active, warns and ignores messages from any sender other than Gate.
 
 ### findings
 
