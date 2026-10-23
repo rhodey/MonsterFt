@@ -4,6 +4,72 @@ Function notes for [src/utilm.js](../src/utilm.js), in source order.
 Trivial conversion and type-check helpers are omitted, and nested callbacks
 are covered with their enclosing function.
 
+## `validateRequest`
+
+Validates a local request header and the shared seed for hello requests.
+
+### findings
+
+no findings
+
+## `parseProcInput`
+
+Validates an ordered Proc input and prepares its cluster message when present.
+Remote decoding failures become local warnings; nested checksum failures and
+invalid envelopes remain fatal.
+
+### findings
+
+no findings
+
+## `validateExecute`
+
+Validates Apply execution fields for setup or a command.
+
+### findings
+
+no findings
+
+## `validateLocalReply`
+
+Validates local completion fields against the original request and sending role.
+
+### findings
+
+no findings
+
+## `parseOutput`
+
+Decodes and validates a Proc output envelope without changing its message.
+
+### findings
+
+no findings
+
+## `validateEvent`
+
+Validates a protocol event's status, fields, and cluster membership references.
+
+### findings
+
+no findings
+
+## `validateCommandResult`
+
+Validates a command's sequence and outcome tuples against its requested item count.
+
+### findings
+
+no findings
+
+## `decodeEntry`
+
+Decodes a Monster log payload and requires a CMD or SYNC record.
+
+### findings
+
+no findings
+
 ## `outcomesWire`
 
 Converts command outcomes to wire tuples, optionally retaining error stacks.

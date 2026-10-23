@@ -5,36 +5,85 @@ import { readApply } from '../src/utils.js'
 import * as Err from '../src/error.js'
 
 for (const localDelay of [0, 2]) {
-  test(`malformed remote MessagePack is diagnosed by each Proc with ${localDelay ? 'delayed' : 'synchronous'} local transport`, async (t) => {
+  test(`malformed remote MessagePack warns and completes with ${localDelay ? 'delayed' : 'synchronous'} local transport`, async (t) => {
+    let target = null
     const received = []
+    const completed = []
+    const malformed = framePayload(Buffer.from([0xdb, 0, 0, 0, 10, 65]))
     const c = cluster({
-      opts: { tickInterval: 1_000, localTimeout: 100 },
       localDelay,
+      delay: localDelay,
       local({ id, from, to, frame }) {
-        if (id !== 'a' || from !== 'gate') { return }
+        if (id !== target) { return }
         const message = decodeFrame(frame)
-        if (message.type === 'input' && message.kind === 'rpc') {
-          received.push({ to, frame: message.frame })
+        if (from === 'gate' && message.type === 'input' && message.kind === 'rpc' &&
+            message.frame.equals(malformed)) {
+          received.push({ to, message })
+        } else if (message.type === 'ack' && received.some((input) =>
+          input.to === from && input.message.cid === message.cid)) {
+          completed.push({ from, message })
         }
       },
     })
     try {
+      await c.open()
+      await c.settled()
+      const gate = c.leader()
+      target = gate.id
+      const node = c.nodes.get(target)
+      const from = c.ids.find((id) => id !== target)
+      const warnings = []
+      for (const role of roles) {
+        node[role].on('warn', (error) => {
+          if (error.code === Err.FRAME_CORRUPT) {
+            warnings.push({ role, error, transaction: node[role].db.isTransaction })
+          }
+        })
+      }
+      const heartbeatStart = c.history.length
+      gate.onReceive(from, malformed)
+      await until(() => completed.length === 3 && warnings.length === 3, 'malformed input completion')
+      t.deepEqual(received.map(({ to }) => to), roles, 'all three Procs receive the remote input')
+      t.ok(received.every(({ message }) => message.frame.equals(malformed)),
+        'fanout preserves the exact remote bytes')
+      t.deepEqual(completed.map(({ from }) => from), roles, 'all three Procs acknowledge the input')
+      t.ok(completed.every(({ from, message }) => message.tickCount ===
+        received.find(({ to }) => to === from).message.tickCount), 'completion advances the ordered input')
+      t.deepEqual(warnings.map(({ role, error }) => [role, error.code]),
+        roles.map((role) => [role, Err.FRAME_CORRUPT]), 'each Proc warns once locally')
+      t.ok(warnings.every(({ error }) => error.message.startsWith(`cluster frame from ${from}: message decode `)),
+        'warnings identify the remote sender and decoding failure')
+      t.ok(warnings.every(({ transaction }) => !transaction), 'warnings follow committed input processing')
+      t.notOk(c.warnings.some(({ role }) => role === 'gate'), 'Gate does not mirror Proc diagnostics')
+      t.ok(gate.isOpen && roles.every((role) => node[role].isOpen), 'Gate and Procs remain open')
+      await until(() => c.history.slice(heartbeatStart).some(({ from, message }) =>
+        from === target && message.type === 'append' && message.data === undefined), 'later heartbeat')
+      t.equal((await gate.append(Buffer.from('after malformed MessagePack')))[1], 'after malformed MessagePack')
+      await c.settled()
+      t.deepEqual(c.errors, [], 'decoding failure causes no error, timeout, or output disagreement')
+      t.equal(c.calls.filter(({ seq }) => seq > 0n).length, 3, 'every node applies the later command once')
+    } finally { await c.close() }
+    t.end()
+  })
+}
+
+for (const role of ['gate', 'procA', 'apply']) {
+  test(`malformed local MessagePack remains fatal at ${role}`, async (t) => {
+    const c = cluster()
+    try {
       const node = c.nodes.get('a')
       await node.gate.open()
       const malformed = framePayload(Buffer.from([0xdb, 0, 0, 0, 10, 65]))
-      node.gate.onReceive('b', malformed)
-      t.equal(c.errors.length, 0, 'Gate accepts the checksum without parsing the payload')
-      await until(() => c.errors.some(({ role }) => role === 'gate'), 'Gate completion timeout')
-      t.deepEqual(received.map(({ to }) => to), roles, 'all three Procs receive the remote input')
-      t.ok(received.every(({ frame }) => frame.equals(malformed)), 'fanout preserves the exact remote bytes')
-      t.deepEqual(c.errors.map(({ role, error }) => [role, error.code]), [
-        ...roles.map((role) => [role, Err.FRAME_CORRUPT]),
-        ['gate', Err.LOCAL_TIMEOUT],
-      ], 'each Proc reports its own decode failure before Gate reports missing completion')
-      t.ok(roles.every((role) => node[role].db === null), 'all failing Procs close their own stores')
-      t.notOk(node.gate.isOpen)
-      t.notEqual(node.apply.db, null, 'Gate does not implicitly close the remaining owner')
-      t.equal(c.calls.length, 0, 'malformed input never invokes Apply')
+      await node[role].onReceive(role === 'gate' ? 'procA' : 'gate', malformed)
+      const diagnostic = c.errors.find((item) => item.role === role)
+      t.equal(diagnostic?.error.code, Err.FRAME_CORRUPT, 'receiver reports the local decoding failure')
+      t.notOk(node[role].isOpen, 'receiver stops')
+      if (role !== 'gate') {
+        await until(() => node[role].db === null, 'failed owner cleanup')
+        t.equal(node[role].db, null, 'receiver closes its own database')
+      }
+      t.equal(c.warnings.length, 0, 'local decoding failure is not downgraded to a warning')
+      t.equal(c.calls.length, 0, 'invalid local frame cannot invoke Apply')
     } finally { await c.close() }
     t.end()
   })

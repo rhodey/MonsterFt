@@ -56,23 +56,12 @@ checksums for Procs B and C.
 
 no findings
 
-## `_validateInput`
-
-Validates ordered Gate inputs against the Proc's startup phase, clock, and
-expected request shapes, independently checking incoming cluster frames.
-Verification and decoding failures remain fatal after Gate accepts the frame.
-
-### findings
-
-no findings
-
 ## `_input`
 
-Processes one ordered input and its runnable protocol work atomically in DB1,
-rejecting a superseded generation before protocol work and checking for a final
-status change before commit. Fatal repair fences are durable
-but produce no input completion. Quorum-impossible decisions report a nonfatal
-error while allowing replication to continue.
+Parses and processes one ordered input and its runnable work atomically in DB1,
+checking order, lifecycle, and generation before protocol work. Undecodable remote
+messages warn locally without interrupting input completion. Fatal repair fences
+commit without publishing outputs; quorum-impossible decisions permit replication.
 
 ### findings
 

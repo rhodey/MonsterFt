@@ -55,7 +55,7 @@ function harness(options = {}) {
           })]
         }
         reply(to, {
-          type: 'ack', cid: message.cid,
+          type: 'ack', cid: message.cid, tickCount: message.tickCount,
           outputs: to === 'procA' ? outputs : outputs.map(wire.checksum),
         })
       } else {
@@ -357,14 +357,17 @@ test('Gate listener failures restart its group while Supervisor diagnostics rema
     local(run, to, message, reply) {
       if (run.number !== 0 || message.kind !== 'append') { return false }
       const outputs = [wire.encodePayload({
-        to: 'event', message: { type: 'change', status: {} },
+        to: 'event', message: { type: 'change', status: {
+          state: 'leader', leader: 'a', term: 1n, seq: 1n,
+          commitSeq: 1n, commitTerm: 1n, followers: ['b', 'c'],
+        } },
       }), wire.encodePayload({
         to: 'client', message: {
           type: 'ack', cid: message.requestId, cmdSeq: 1n, results: [[0, 'must not escape']],
         },
       })]
       reply(to, {
-        type: 'ack', cid: message.cid,
+        type: 'ack', cid: message.cid, tickCount: message.tickCount,
         outputs: to === 'procA' ? outputs : outputs.map(wire.checksum),
       })
       return true
@@ -713,7 +716,7 @@ test('Supervisor retains a drain failure after forced cleanup and does not repla
         },
       })
       reply(to, {
-        type: 'ack', cid: message.cid,
+        type: 'ack', cid: message.cid, tickCount: message.tickCount,
         outputs: to === 'procA' ? [output] : [wire.checksum(output)],
       })
       return true

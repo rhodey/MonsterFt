@@ -7,6 +7,19 @@ import * as wire from '../src/wire.js'
 const procs = ['procA', 'procB', 'procC']
 const immediate = () => new Promise((resolve) => setImmediate(resolve))
 const delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms))
+const status = (fields = {}) => ({
+  state: 'leader', leader: 'a', term: 1n, seq: 3n,
+  commitSeq: 3n, commitTerm: 1n, followers: ['b'], ...fields,
+})
+const execution = (cid, tickCount = 2n) => ({
+  type: 'execute', cid, tickCount, term: 1n, seq: 1n,
+  entryHash: Buffer.alloc(16), items: [Buffer.from('work')], matchIndex: [0n, 0n, 0n],
+})
+const executionReply = (message) => ({
+  type: 'ack', cid: message.cid, tickCount: message.tickCount,
+  receipt: { seq: message.seq, entry_hash: message.entryHash, local_digest: Buffer.alloc(16) },
+  outcomes: message.items?.map(() => [0, 'ok']) ?? [],
+})
 
 function harness(options = {}) {
   const requests = []
@@ -16,7 +29,7 @@ function harness(options = {}) {
   let gate
   const reply = (from, message) => gate.onReceive(from, wire.encodeFrame(message))
   const complete = (from, input, outputs = []) => reply(from, {
-    type: 'ack', cid: input.cid,
+    type: 'ack', cid: input.cid, tickCount: input.tickCount,
     outputs: from === 'procA' ? outputs : outputs.map(wire.checksum),
   })
   const localSend = (to, frame) => {
@@ -216,7 +229,8 @@ test('Gate detects checksum-only disagreement without waiting for ProcA', async 
     local({ to, message, reply }) {
       if (message.kind !== 'append') { return false }
       if (to !== 'procA') {
-        reply(to, { type: 'ack', cid: message.cid, outputs: [Buffer.alloc(16, to === 'procB' ? 1 : 2)] })
+        reply(to, { type: 'ack', cid: message.cid, tickCount: message.tickCount,
+          outputs: [Buffer.alloc(16, to === 'procB' ? 1 : 2)] })
       }
       return true
     },
@@ -325,7 +339,7 @@ test('Gate Apply watchdog expires while waiting for a third Proc', async (t) => 
 test('Gate cancels Apply timeout when reply arrives before queued delivery', async (t) => {
   let requestId
   let releaseC
-  const execute = wire.encodePayload({ to: 'apply', message: { type: 'execute', cid: 'apply-fast' } })
+  const execute = wire.encodePayload({ to: 'apply', message: execution('apply-fast') })
   const h = harness({
     opts: { applyTimeout: 10 },
     outputs(input) {
@@ -337,7 +351,7 @@ test('Gate cancels Apply timeout when reply arrives before queued delivery', asy
     },
     local({ to, message, reply, complete }) {
       if (message.type === 'execute') {
-        reply(to, { type: 'ack', cid: message.cid, warnings: [{
+        reply(to, { ...executionReply(message), warnings: [{
           message: 'item rejected', code: Err.APPLY_ERROR, sqlCode: null, stack: 'user trace',
         }] })
         return true
@@ -675,7 +689,7 @@ test('Gate close waits retain condition behavior before and after cleanup', asyn
 test('Gate awaitEvent preserves every thrown value', async (t) => {
   const h = harness({
     outputs: (input) => input.kind === 'append' ? [wire.encodePayload({
-      to: 'event', message: { type: 'cmd', cmdSeq: 3n, cmdCount: 1, status: { commitSeq: 3n } },
+      to: 'event', message: { type: 'cmd', cmdSeq: 3n, cmdCount: 1, status: status() },
     }), client(input)] : [],
   })
   const error = new Error('condition failed')
@@ -705,7 +719,7 @@ test('Gate awaitEvent preserves every thrown value', async (t) => {
 test('Gate awaitEvent filters events and rejects if its condition closes Gate', async (t) => {
   const h = harness({
     outputs: (input) => input.kind === 'append' ? [wire.encodePayload({
-      to: 'event', message: { type: 'cmd', cmdSeq: 3n, cmdCount: 1, status: { commitSeq: 3n } },
+      to: 'event', message: { type: 'cmd', cmdSeq: 3n, cmdCount: 1, status: status() },
     }), client(input)] : [],
   })
   try {
@@ -816,7 +830,7 @@ test('Gate warning listener may throw or close without dispatching later Apply w
       if (input.kind !== 'append') { return [] }
       return [
         wire.encodePayload({ to: 'b', message: { type: 'append' } }),
-        wire.encodePayload({ to: 'apply', message: { type: 'execute', cid: 'warn-close' } }),
+        wire.encodePayload({ to: 'apply', message: execution('warn-close') }),
       ]
     },
     send() { throw new Error('transport failed') },
@@ -837,7 +851,7 @@ test('Gate listener failures stop work before reporting and preserve later liste
   for (const type of ['change', 'warn']) {
     const h = harness({
       outputs: (input) => input.kind === 'append' ? [wire.encodePayload({
-        to: type === 'warn' ? 'b' : 'event', message: { type: type === 'warn' ? 'append' : 'change', status: {} },
+        to: type === 'warn' ? 'b' : 'event', message: { type: type === 'warn' ? 'append' : 'change', status: status() },
       }), client(input)] : [],
       send() { throw new Error('transport warning') },
     })
@@ -989,7 +1003,7 @@ test('Gate malformed completion cannot satisfy an input', async (t) => {
     const h = harness({
       local({ to, message, reply }) {
         if (to !== 'procB' || message.kind !== 'append') { return false }
-        reply(to, { type: 'ack', cid: message.cid, outputs: [Buffer.alloc(size)] })
+        reply(to, { type: 'ack', cid: message.cid, tickCount: message.tickCount, outputs: [Buffer.alloc(size)] })
         return true
       },
     })
@@ -1008,7 +1022,7 @@ test('Gate does not release A/C outputs after synchronous A/B disagreement', asy
     local({ to, message, complete, reply }) {
       if (message.kind !== 'append') { return false }
       if (to === 'procB') {
-        reply(to, { type: 'ack', cid: message.cid, outputs: [Buffer.alloc(16)] })
+        reply(to, { type: 'ack', cid: message.cid, tickCount: message.tickCount, outputs: [Buffer.alloc(16)] })
       } else { complete(to, message, [output]) }
       return true
     },
@@ -1017,5 +1031,145 @@ test('Gate does not release A/C outputs after synchronous A/B disagreement', asy
   await assert.rejects(h.gate.append(Buffer.from('work')), { code: Err.LOCAL_DIVERGENCE })
   t.equal(h.sent.length, 0, 'first disagreement prevents later matching evidence from releasing outputs')
   await h.gate.close()
+  t.end()
+})
+
+test('Gate correlates Proc completion ticks before releasing outputs', async (t) => {
+  for (const tickCount of [undefined, 1n, 3n, 2]) {
+    const h = harness({
+      local({ to, message, reply }) {
+        if (message.kind !== 'append') { return false }
+        const completion = { type: 'ack', cid: message.cid,
+          outputs: to === 'procA' ? [client(message)] : [wire.checksum(client(message))] }
+        if (tickCount !== undefined) { completion.tickCount = tickCount }
+        reply(to, completion)
+        return true
+      },
+    })
+    try {
+      await h.gate.open()
+      await assert.rejects(h.gate.append(Buffer.from('work')), { code: Err.RPC_ILLEGAL })
+      t.equal(h.errors.length, 1, `${String(tickCount)}: invalid completion stops Gate`)
+      t.notOk(h.gate.isOpen)
+      t.equal(h.sent.length, 0, 'invalid completion cannot release protocol outputs')
+    } finally { await h.gate.close() }
+  }
+  t.end()
+})
+
+test('Gate correlates Apply replies with the execution tick', async (t) => {
+  for (const tickCount of [undefined, 1n, 3n, 2]) {
+    const h = harness({
+      outputs: (input) => input.kind === 'append'
+        ? [wire.encodePayload({ to: 'apply', message: execution('apply-tick', input.tickCount) })] : [],
+      local({ to, message, reply }) {
+        if (message.type !== 'execute') { return false }
+        const completion = executionReply(message)
+        if (tickCount === undefined) { delete completion.tickCount }
+        else { completion.tickCount = tickCount }
+        reply(to, completion)
+        return true
+      },
+    })
+    try {
+      await h.gate.open()
+      await assert.rejects(h.gate.append(Buffer.from('work')), { code: Err.RPC_ILLEGAL })
+      t.equal(h.errors.length, 1)
+      t.notOk(h.requests.some(({ message }) => message.kind === 'apply'),
+        'bad execution completion is not delivered to Procs')
+    } finally { await h.gate.close() }
+  }
+  t.end()
+})
+
+test('Gate validates startup capture hash lengths before adoption', async (t) => {
+  for (const field of ['state', 'receipt']) {
+    for (const length of [0, 15, 17]) {
+      const h = harness({
+        local({ to, message, reply }) {
+          if (message.type !== 'capture') { return false }
+          reply(to, { type: 'ack', cid: message.cid, selection: {
+            state: Buffer.alloc(16), receipt: Buffer.alloc(16), donor: 'procA',
+            [field]: Buffer.alloc(length),
+          } })
+          return true
+        },
+      })
+      try {
+        await assert.rejects(h.gate.open(), { code: Err.RPC_ILLEGAL })
+        t.notOk(h.requests.some(({ message }) => message.type === 'adopt'),
+          `${field} length ${length}: invalid hashes cannot select durable state`)
+        t.equal(h.errors.length, 1)
+      } finally { await h.gate.close() }
+    }
+  }
+  t.end()
+})
+
+test('Gate validates complete event status before changing public properties', async (t) => {
+  const malformed = Object.keys(status()).map((field) => {
+    const value = status()
+    delete value[field]
+    return value
+  })
+  malformed.push(status({ state: 'unknown' }), status({ term: 1 }),
+    status({ followers: [3] }), status({ seq: -2n }), status({ leader: 3 }))
+  for (const value of malformed) {
+    const h = harness({ outputs: (input) => input.kind === 'append' ? [wire.encodePayload({
+      to: 'event', message: { type: 'change', status: value },
+    }), client(input)] : [] })
+    let changes = 0
+    h.gate.on('change', () => { changes++ })
+    try {
+      await h.gate.open()
+      await assert.rejects(h.gate.append(Buffer.from('work')), { code: Err.RPC_ILLEGAL })
+      t.equal(changes, 0, 'invalid status is not emitted')
+      t.equal(h.gate.state, 'follower', 'invalid status cannot partially update public state')
+      t.equal(h.gate.term, 0n)
+      t.equal(h.gate.seq, -1n)
+    } finally { await h.gate.close() }
+  }
+  t.end()
+})
+
+test('Gate validates event-specific fields before delivery', async (t) => {
+  const messages = [
+    { type: 'commit' }, { type: 'commit', seq: -1n },
+    { type: 'cmd', cmdSeq: 1n }, { type: 'cmd', cmdSeq: 1n, cmdCount: 0 },
+    { type: 'sync', cmdSeq: 1n, syncSeq: 2n, quorum: 'yes', agree: ['a', 'b'], disagree: [] },
+    { type: 'sync', cmdSeq: 1n, syncSeq: 2n, quorum: true, agree: [4], disagree: [] },
+  ]
+  for (const message of messages) {
+    const h = harness({ outputs: (input) => input.kind === 'append' ? [wire.encodePayload({
+      to: 'event', message: { ...message, status: status() },
+    }), client(input)] : [] })
+    let emitted = 0
+    h.gate.on(message.type, () => { emitted++ })
+    try {
+      await h.gate.open()
+      await assert.rejects(h.gate.append(Buffer.from('work')), { code: Err.RPC_ILLEGAL })
+      t.equal(emitted, 0, `${message.type}: invalid event is not published`)
+      t.equal(h.gate.term, 0n, 'status is not updated before the whole event validates')
+    } finally { await h.gate.close() }
+  }
+  t.end()
+})
+
+test('Gate malformed command outcomes reject only their callers', async (t) => {
+  const invalid = [[], [[0]], [[0, 'ok', 'extra']], [[1, 'failed', null, null, 3]],
+    [[1, 'failed', 'code', null]], [[2, 'unknown']]]
+  for (const results of invalid) {
+    let bad = true
+    const h = harness({ outputs: (input) => input.kind === 'append'
+      ? [bad ? client(input, results) : client(input)] : [] })
+    try {
+      await h.gate.open()
+      await assert.rejects(h.gate.append(Buffer.from('invalid')), { code: Err.RPC_ILLEGAL })
+      t.ok(h.gate.isOpen, 'malformed outcome does not stop Gate')
+      t.deepEqual(h.errors, [], 'validation rejection belongs to the caller')
+      bad = false
+      t.deepEqual(await h.gate.append(Buffer.from('next')), [3n, 'next'], 'later commands continue')
+    } finally { await h.gate.close() }
+  }
   t.end()
 })

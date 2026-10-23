@@ -32,10 +32,10 @@ no findings
 
 ## `onReceive`
 
-Decodes local replies to resolve requests and verifies cluster frames before
+Validates local replies against their requests and verifies cluster frames before
 queuing their original bytes. Incomplete remote frames and checksum failures
-warn and are discarded; local failures remain fatal. The Procs decode cluster
-payloads independently.
+warn and are discarded; local failures remain fatal. The Procs independently
+decode cluster payloads and warn locally on decoding failures.
 
 ### findings
 

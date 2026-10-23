@@ -1,8 +1,8 @@
 import { EventEmitter } from 'node:events'
 import * as Err from './error.js'
-import { isCid, isSeq, isTerm, isSeed, HASH_BYTES } from './util.js'
+import { isCid, HASH_BYTES } from './util.js'
 import {
-  asBuffer, assertEncodable, digestCmd, isDigest, outcomesWire,
+  asBuffer, assertEncodable, digestCmd, outcomesWire, validateApplyRequest, validateExecute,
 } from './utilm.js'
 import { openApplyDatabase } from './storage.js'
 import { readApply, checkGeneration } from './utils.js'
@@ -85,24 +85,6 @@ class MonsterApply extends EventEmitter {
     this._send({ ...reply, ...extra })
   }
 
-  _validateExecute(msg) {
-    if (!isTerm(msg.term) || !isSeq(msg.seq) || msg.seq < 0n ||
-        typeof msg.tickCount !== 'bigint' || msg.tickCount < this.tickCount ||
-        !isDigest(msg.entryHash)) {
-      throw new Err.ErrorWithCode('Apply execution is illegal', Err.RPC_ILLEGAL)
-    }
-    if (msg.seq === 0n) {
-      if (msg.items !== null || msg.matchIndex !== null) {
-        throw new Err.ErrorWithCode('Apply setup is illegal', Err.RPC_ILLEGAL)
-      }
-    } else if (!Array.isArray(msg.items) || msg.items.length === 0 ||
-        !msg.items.every(Buffer.isBuffer) ||
-        !Array.isArray(msg.matchIndex) ||
-        !msg.matchIndex.every((seq) => isSeq(seq) && seq < msg.seq)) {
-      throw new Err.ErrorWithCode('Apply command is illegal', Err.RPC_ILLEGAL)
-    }
-  }
-
   async onReceive(from, buffer) {
     if (from !== 'gate') { return }
     try {
@@ -118,15 +100,10 @@ class MonsterApply extends EventEmitter {
         return
       }
       if (this._stopped) { return }
-      if (!msg || !isCid(msg.cid)) {
-        throw new Err.ErrorWithCode('Apply request is illegal', Err.RPC_ILLEGAL)
-      }
+      validateApplyRequest(msg)
       if (msg.type === 'hello') {
         if (this._pastHello) {
           throw new Err.ErrorWithCode('Apply received hello after startup', Err.RPC_ILLEGAL)
-        }
-        if (!isSeed(msg.seed)) {
-          throw new Err.ErrorWithCode('seed must be a nonzero 16-byte Buffer', Err.RPC_ILLEGAL)
         }
         this._seed = msg.seed
         this._ack(msg)
@@ -156,7 +133,10 @@ class MonsterApply extends EventEmitter {
       if (msg.type !== 'execute' || !this._ready || this._work !== null) {
         throw new Err.ErrorWithCode('Apply request is not executable', Err.MONSTER_ILLEGAL)
       }
-      this._validateExecute(msg)
+      validateExecute(msg)
+      if (msg.tickCount < this.tickCount) {
+        throw new Err.ErrorWithCode('Apply execution tickCount is behind', Err.RPC_ILLEGAL)
+      }
       this.tickCount = msg.tickCount
       // Hold the generation check, receipt read, and callback in one write
       // transaction so a replacement cannot claim DB2 during execution.

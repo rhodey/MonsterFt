@@ -40,6 +40,25 @@ Checks the basic shape and type field of an RPC message.
 
 no findings
 
+## `schemas` / `raftSchemas`
+
+Define shared protocol fields and the accepted shapes of Raft requests and
+replies. Additional fields remain allowed and values are never coerced.
+
+### findings
+
+no findings
+
+## `firstIssue` / `validate`
+
+Validate a message and return its original object, or report a concise invalid
+field using the caller's error code. Union failures prefer the matching tagged
+variant's field error.
+
+### findings
+
+no findings
+
 ## `hashParts`
 
 Hashes consecutive byte sequences as one input without concatenating them.

@@ -39,19 +39,11 @@ Sends a reply to Gate and treats transport failure as fatal.
 
 no findings
 
-## `_validateExecute`
-
-Validates the identity and contents of setup or command execution requests.
-
-### findings
-
-no findings
-
 ## `onReceive`
 
 Handles Gate's startup, execution, and shutdown requests, permitting only one
-execution at a time and returning its receipt and outcomes. Claims the startup
-generation and rejects superseded requests before executing callbacks.
+execution at a time and returning its receipt and outcomes. Uses shared message
+validation and checks lifecycle, execution order, and generation before callbacks.
 
 ### findings
 

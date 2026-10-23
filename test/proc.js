@@ -277,7 +277,7 @@ test('Proc treats CMD insert failures as fatal for local and forwarded commands'
       const execute = committed.outputs.map(wire.decodePayload)
         .find(({ to }) => to === 'apply').message
       f.input(0, 'apply', { reply: {
-        type: 'ack', cid: execute.cid,
+        type: 'ack', cid: execute.cid, tickCount: execute.tickCount,
         receipt: { seq: 0n, entry_hash: execute.entryHash, local_digest: Buffer.alloc(16) },
         outcomes: [],
       } })
@@ -295,6 +295,46 @@ test('Proc treats CMD insert failures as fatal for local and forwarded commands'
         'failed input reports its diagnostic locally')
       t.equal(readDatabase(f.paths.procA, (db) => db.prepare('SELECT max(seq) AS seq FROM raft_log').get().seq),
         0n, 'durable history remains at completed setup')
+    } finally { f.cleanup() }
+  }
+  t.end()
+})
+
+test('Proc independently matches Apply replies to the original execution tick', (t) => {
+  for (const tick of ['original', 'missing', 'delivery', 'number']) {
+    const f = fixture().startup()
+    try {
+      f.input(0, 'start')
+      const committed = f.input(0, 'rpc', { from: 'b', frame: wire.encodeFrame({
+        to: 'a', message: { type: 'append', from: 'b', cid: 'setup', term: 1n,
+          termP: -1n, seqP: -1n, commitSeq: 0n,
+          data: [{ term: 1n, entry: Buffer.alloc(0) }],
+        },
+      }) })
+      const execute = committed.outputs.map(wire.decodePayload)
+        .find(({ to }) => to === 'apply').message
+      f.input(0, 'tick')
+      const proc = f.procs[0]
+      const reply = { type: 'ack', cid: execute.cid,
+        receipt: { seq: 0n, entry_hash: execute.entryHash, local_digest: Buffer.alloc(16) },
+        outcomes: [],
+      }
+      if (tick === 'original') { reply.tickCount = execute.tickCount }
+      if (tick === 'delivery') { reply.tickCount = proc.tickCount + 1n }
+      if (tick === 'number') { reply.tickCount = Number(execute.tickCount) }
+      const completion = f.input(0, 'apply', { reply })
+      const applied = readDatabase(f.paths.procA, (db) =>
+        db.prepare('SELECT applied_seq FROM monsterft_meta').get().applied_seq)
+      if (tick === 'original') {
+        t.equal(completion.type, 'ack', 'reply remains valid after intervening inputs')
+        t.equal(applied, 0n, 'the completed setup receipt is copied')
+        t.ok(proc.isOpen)
+      } else {
+        t.equal(completion, undefined, `${tick}: mismatched identity sends no completion`)
+        t.equal(f.events[0].find(({ type }) => type === 'error').value.code, Err.RPC_ILLEGAL)
+        t.equal(applied, -1n, 'rejected reply cannot advance durable checkpoint')
+        t.notOk(proc.isOpen)
+      }
     } finally { f.cleanup() }
   }
   t.end()
@@ -353,7 +393,8 @@ test('Proc reports quorum-impossible repair locally without stopping', (t) => {
       proc.db.prepare(`UPDATE monsterft_meta SET applied_seq = 1,
         applied_entry_hash = ?, pending_cmd_seq = 1, applied_local_digest = ?`).run(digest, digest)
       proc.engine.pendingCommand = { cmdSeq: 1n, localDigest: digest }
-      proc.engine.applySync({ cmdSeq: 1n, quorum: false, agree: [], disagree: ['a', 'b', 'c'] }, 2n, digest)
+      proc.engine.applySync({ type: 'sync', cmdSeq: 1n, quorum: false,
+        agree: [], disagree: ['a', 'b', 'c'] }, 2n, digest)
     }
     const reply = f.input(0, 'start')
     t.deepEqual(reply.outputs.map((output) => wire.decodePayload(output).message.type), ['sync', 'change'],
@@ -386,10 +427,74 @@ test('Proc independently verifies nested cluster frames before applying them', (
   t.end()
 })
 
+test('remote decode failures complete ordered inputs and still run due timers', (t) => {
+  for (const electionDue of [false, true]) {
+    const f = fixture().startup()
+    try {
+      f.procs.forEach((proc, i) => f.input(i, 'start'))
+      const first = f.procs[0]
+      const timems = electionDue ? first.executor.timers.get(first.engine.electionTimer).due : 0
+      const frame = wire.framePayload(Buffer.from([0xdb, 0, 0, 0, 10, 65]))
+      const replies = f.procs.map((proc, i) => {
+        proc.on('warn', () => {
+          t.notOk(proc.db.isTransaction, 'warning runs after commit')
+          t.equal(f.replies[i].at(-1).tickCount, 2n, 'warning follows input completion')
+        })
+        const reply = f.input(i, 'rpc', { from: 'b', frame, timems })
+        t.equal(reply.type, 'ack', 'discarding the RPC does not discard its Gate input')
+        t.equal(reply.tickCount, 2n)
+        t.equal(proc.executor.timems, timems)
+        t.ok(proc.isOpen)
+        t.deepEqual(f.events[i].map(({ type }) => type), ['warn'])
+        t.equal(f.events[i][0].value.code, Err.FRAME_CORRUPT)
+        t.match(f.events[i][0].value.message, /^cluster frame from b: message decode /)
+        t.equal(proc.engine.state, electionDue ? 'candidate' : 'follower')
+        t.equal(proc.db.prepare('SELECT current_term FROM raft_election').get().current_term,
+          electionDue ? 1n : 0n, 'only a due timer changes durable election state')
+        t.equal(proc.log.seq, -1n, 'malformed payload writes no log entries')
+        return reply
+      })
+      t.deepEqual(replies[0].outputs.map(wire.checksum), replies[1].outputs, 'A and B outputs agree')
+      t.deepEqual(replies[1].outputs, replies[2].outputs, 'B and C outputs agree')
+      if (!electionDue) { t.deepEqual(replies[0].outputs, [], 'no protocol response to undecodable bytes') }
+      else {
+        t.deepEqual(replies[0].outputs.map((bytes) => wire.decodePayload(bytes).message.type),
+          ['vote_request', 'vote_request', 'change'], 'due election and final change still publish')
+      }
+      f.procs.forEach((proc, i) => {
+        t.equal(f.input(i, 'tick', { timems }).tickCount, 3n, 'the next ordered input is accepted')
+      })
+    } finally { f.cleanup() }
+  }
+  t.end()
+})
+
+test('remote decoding does not hide generation or decoded-envelope failures', (t) => {
+  for (const fault of ['generation', 'envelope']) {
+    const f = fixture().startup()
+    try {
+      f.input(0, 'start')
+      const proc = f.procs[0]
+      if (fault === 'generation') {
+        proc.db.prepare('UPDATE monsterft_meta SET generation = ?').run(Buffer.alloc(16, 9))
+      }
+      const frame = fault === 'generation'
+        ? wire.framePayload(Buffer.from([0xdb, 0, 0, 0, 10, 65]))
+        : wire.encodeFrame({ to: 'wrong-node', message: { from: 'b', type: 'append' } })
+      t.equal(f.input(0, 'rpc', { from: 'b', frame }), undefined)
+      t.notOk(proc.isOpen)
+      t.equal(proc._fatalError.code, fault === 'generation' ? Err.GENERATION_DIFF : Err.RPC_ILLEGAL)
+      t.notOk(f.events[0].some(({ type }) => type === 'warn'), 'only decode failures become warnings')
+    } finally { f.cleanup() }
+  }
+  t.end()
+})
+
 test('Proc diagnostic listeners cannot hide later listeners or prevent teardown', (t) => {
   const f = fixture().startup()
   try {
     const proc = f.procs[0]
+    f.input(0, 'start')
     let warned = 0
     let errored = 0
     const failure = new Err.ErrorWithCode('warning listener failed', Err.SQLITE_ERROR, 10)
@@ -402,8 +507,8 @@ test('Proc diagnostic listeners cannot hide later listeners or prevent teardown'
       t.notOk(proc.isOpen, 'the component stops before reporting the listener failure')
       proc.close()
     })
-    proc.engine.start = () => proc.engine.warn(new Error('original warning'))
-    t.equal(f.input(0, 'start').type, 'ack')
+    const malformed = wire.framePayload(Buffer.from([0xdb, 0, 0, 0, 10, 65]))
+    t.equal(f.input(0, 'rpc', { from: 'b', frame: malformed }).type, 'ack')
     t.equal(warned, 1, 'later warning listener still runs')
     t.equal(errored, 1, 'later error listener still runs')
     let received = false

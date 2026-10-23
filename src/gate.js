@@ -2,7 +2,7 @@ import crypto from 'node:crypto'
 import { EventEmitter } from 'node:events'
 import * as Err from './error.js'
 import * as wire from './wire.js'
-import { HASH_BYTES } from './util.js'
+import * as utilm from './utilm.js'
 
 const PROCS = ['procA', 'procB', 'procC']
 const COMPONENTS = [...PROCS, 'apply']
@@ -113,7 +113,7 @@ class Gate extends EventEmitter {
       const timer = setTimeout(() => finish(new Err.ErrorWithCode(
         `${to} ${message.type} timeout`, code,
       )), timeout)
-      this._requests.set(key, { finish, timer, allowClosing, type: message.type })
+      this._requests.set(key, { finish, timer, allowClosing, message })
       try {
         const sent = this._localSend(to, frame ?? wire.encodeFrame(message))
         Promise.resolve(sent).catch((err) => finish(Err.wrapError(
@@ -131,15 +131,11 @@ class Gate extends EventEmitter {
     try {
       if (COMPONENTS.includes(from)) {
         const message = wire.decodeFrame(frame)
-        if (message?.type !== 'ack' && message?.type !== 'err') {
-          throw rpcIllegal('local reply must be ACK or ERR')
-        }
-        if (typeof message.cid !== 'string' || message.cid.length === 0) {
-          throw rpcIllegal('local reply has invalid cid')
-        }
+        utilm.validateReply(message)
         const request = this._requests.get(`${from}:${message.cid}`)
         if (!request) { return }
-        if (request.type === 'hello' && message.type === 'ack') { this._helloDone.add(from) }
+        utilm.validateLocalReply(message, request.message, from)
+        if (request.message.type === 'hello' && message.type === 'ack') { this._helloDone.add(from) }
         request.finish(message.type === 'err'
           ? wire.errorFromWire(message.error ?? message) : null, message)
       } else {
@@ -187,14 +183,7 @@ class Gate extends EventEmitter {
       // schema creation or another owner's switch into WAL mode.
       for (const to of COMPONENTS) { await this._request(to, { type: 'open' }) }
       const captured = await this._phase('capture')
-      const selections = captured.map((reply) => {
-        const selection = reply.selection
-        if (!Buffer.isBuffer(selection?.state) || !Buffer.isBuffer(selection.receipt) ||
-            !PROCS.includes(selection.donor)) {
-          throw rpcIllegal('capture reply has invalid selection')
-        }
-        return wire.encodePayload(selection)
-      })
+      const selections = captured.map((reply) => wire.encodePayload(reply.selection))
       if (!selections.every((selection) => selection.equals(selections[0]))) {
         throw new Err.ErrorWithCode('startup selections disagree', Err.LOCAL_DIVERGENCE)
       }
@@ -276,10 +265,6 @@ class Gate extends EventEmitter {
       try {
         const reply = await this._request(to, input, this.localTimeout, false, frame)
         if (this._stopped) { throw this._shutdownError ?? nodeClosed() }
-        if (!Array.isArray(reply.outputs) || !reply.outputs.every((value) =>
-          Buffer.isBuffer(value) && (to === 'procA' || value.length === HASH_BYTES))) {
-          throw rpcIllegal('completion has invalid outputs')
-        }
         const hashes = to === 'procA' ? reply.outputs.map(wire.checksum) : reply.outputs
         for (const other of completed.values()) {
           if (hashes.length !== other.hashes.length ||
@@ -306,14 +291,11 @@ class Gate extends EventEmitter {
   }
 
   _release(payload, hash) {
-    const envelope = wire.decodePayload(payload)
-    const { to, message } = envelope ?? {}
-    if (typeof message?.type !== 'string') {
-      throw rpcIllegal('output has invalid message')
-    }
+    const { to, message } = utilm.parseOutput(payload)
     if (to === 'apply') {
-      if (message.type !== 'execute' || typeof message.cid !== 'string') {
-        throw rpcIllegal('invalid Apply request')
+      utilm.validateExecute(message)
+      if (message.seq > 0n && message.matchIndex.length !== this.nodes.length) {
+        throw rpcIllegal('Apply matchIndex has illegal length')
       }
       // The pending request exists before sending, including synchronous transports.
       this._request('apply', message, this.applyTimeout, false,
@@ -324,9 +306,7 @@ class Gate extends EventEmitter {
     } else if (to === 'client') {
       const pending = this._clients.get(message.cid)
       if (!pending) { return }
-      if (message.type !== 'err' && message.type !== 'ack') {
-        throw rpcIllegal('client output must be ACK or ERR')
-      }
+      utilm.validateReply(message)
       const finish = () => {
         if (!this._clients.delete(message.cid)) { return }
         if (message.type === 'err') { pending.reject(wire.errorFromWire(message.error ?? message)) }
@@ -356,15 +336,11 @@ class Gate extends EventEmitter {
     }
   }
 
-  _event({ status, ...message }) {
-    if (!['change', 'commit', 'cmd', 'sync'].includes(message.type)) {
-      throw rpcIllegal('output has invalid event type')
-    }
-    if (status === null || typeof status !== 'object') {
-      throw rpcIllegal('output has invalid event status')
-    }
+  _event(value) {
+    utilm.validateEvent(value, this.nodes, this.id)
+    const { status, ...message } = value
     for (const key of ['state', 'leader', 'term', 'seq', 'commitSeq', 'commitTerm', 'followers']) {
-      if (Object.hasOwn(status, key)) { this[key] = status[key] }
+      this[key] = status[key]
     }
     if (message.type === 'change') {
       this._emitSafe('change', status)
@@ -385,25 +361,8 @@ class Gate extends EventEmitter {
   }
 
   _outcomes(message, count) {
-    if (typeof message.cmdSeq !== 'bigint' || message.cmdSeq < 0n ||
-        !Array.isArray(message.results) || message.results.length !== count) {
-      throw rpcIllegal('command result has invalid sequence or results')
-    }
-    return message.results.map((item) => {
-      if (!Array.isArray(item)) { throw rpcIllegal('invalid command result') }
-      if (item[0] === 0 && item.length === 2) {
-        return { status: 'fulfilled', value: item[1] }
-      }
-      if (item[0] !== 1 || (item.length !== 4 && item.length !== 5) ||
-          typeof item[1] !== 'string' ||
-          (item[2] !== null && !Number.isSafeInteger(item[2])) ||
-          (item[3] !== null && !Number.isSafeInteger(item[3])) ||
-          (item.length === 5 && typeof item[4] !== 'string')) {
-        throw rpcIllegal('invalid rejected command result')
-      }
-      const reason = wire.errorFromWire({ msg: item[1], code: item[2], sqlCode: item[3], stack: item[4] })
-      return { status: 'rejected', reason }
-    })
+    utilm.validateCommandResult(message, count)
+    return utilm.outcomesPublic(message.results)
   }
 
   async append(data) {

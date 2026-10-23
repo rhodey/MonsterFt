@@ -1,4 +1,4 @@
-import { pack, unpack } from 'msgpackr'
+import { pack } from 'msgpackr'
 import { RaftEngine } from './raft.js'
 import * as Err from './error.js'
 import * as util from './util.js'
@@ -90,11 +90,8 @@ class MonsterEngine extends RaftEngine {
         }
         this.advanceApplied(seq, hash)
       } else {
-        let entry
-        try { entry = unpack(record.entry) } catch (err) {
-          throw Err.wrapError(err, Err.MONSTER_CORRUPT, 'entry decode ')
-        }
-        if (entry?.type === 'cmd') {
+        const entry = utilm.decodeEntry(record.entry)
+        if (entry.type === 'cmd') {
           if (this.draining) { this.finishDrain(); return }
           if (this.repairState !== 0) { this.fatal(this.repairError()); return }
           utilm.validateCmdEntry(this, entry, seq)
@@ -104,7 +101,6 @@ class MonsterEngine extends RaftEngine {
           this.execute(record, seq, hash, entry)
           return
         }
-        if (entry?.type !== 'sync') { throw failure('entry type is corrupt', Err.MONSTER_CORRUPT) }
         this.applySync(entry, seq, hash)
         if (this.fatalError) { return }
       }
@@ -117,7 +113,7 @@ class MonsterEngine extends RaftEngine {
 
   execute(record, seq, hash, entry) {
     const cid = this.random.cid()
-    this.pendingApply = { cid, seq, hash, count: entry?.items.length ?? 0 }
+    this.pendingApply = { cid, seq, hash, tickCount: this.tickCount, count: entry?.items.length ?? 0 }
     this.output('apply', {
       type: 'execute', cid, tickCount: this.tickCount, term: record.term, seq,
       entryHash: hash, items: entry?.items ?? null, matchIndex: entry?.matchIndex ?? null,
@@ -125,14 +121,14 @@ class MonsterEngine extends RaftEngine {
   }
 
   receiveApply(reply) {
+    utilm.validateApplyReply(reply)
     const pending = this.pendingApply
-    if (!pending || reply?.type !== 'ack' || reply.cid !== pending.cid) {
+    if (!pending || reply.cid !== pending.cid || reply.tickCount !== pending.tickCount) {
       throw failure('Apply reply has no matching request', Err.RPC_ILLEGAL)
     }
     const receipt = sql.validateReceipt(reply.receipt)
     if (receipt.seq !== pending.seq || !utilm.asBuffer(receipt.entry_hash).equals(pending.hash) ||
-        !Array.isArray(reply.outcomes) || reply.outcomes.length !== pending.count ||
-        !reply.outcomes.every(utilm.isOutcomeTuple) ||
+        !utilm.isOutcomes(reply.outcomes, pending.count) ||
         (receipt.seq === 0n && !utilm.asBuffer(receipt.local_digest).equals(Buffer.alloc(util.HASH_BYTES)))) {
       throw failure('Apply reply does not match execution', Err.MONSTER_CORRUPT)
     }
@@ -356,7 +352,8 @@ class MonsterEngine extends RaftEngine {
       if (!util.isCid(msg.cid)) { return }
       const request = { to: from, cid: msg.cid, items: msg.items, responded: false }
       try {
-        if (!utilm.isFwdCmdMsg(msg) || commandBytes(msg.items, this.nodes.length) > MAX_SQLITE_BYTES) {
+        util.validate(utilm.monsterSchemas.forwarded, msg, 'forward CMD')
+        if (commandBytes(msg.items, this.nodes.length) > MAX_SQLITE_BYTES) {
           throw failure('forward CMD illegal', Err.RPC_ILLEGAL)
         }
         if (this.state !== 'leader') { throw failure('node not leader', Err.NOT_LEADER) }

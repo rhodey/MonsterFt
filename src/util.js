@@ -1,6 +1,7 @@
 import fs from 'node:fs'
 import path from 'node:path'
 import xxhash from 'xxhash-addon'
+import { z } from 'zod'
 import * as Err from './error.js'
 
 const { XXHash128 } = xxhash
@@ -16,6 +17,66 @@ const isSeed = (seed) => Buffer.isBuffer(seed) && seed.length === 16 &&
 const isRpc = (msg) => msg !== null && typeof msg === 'object' &&
   !Array.isArray(msg) && !(msg instanceof Uint8Array) &&
   typeof msg.type === 'string'
+
+const schemas = {
+  cid: z.string().min(1),
+  term: z.bigint().min(0n).max(MAX_INT),
+  seq: z.bigint().min(-1n).max(MAX_INT),
+  nonnegativeSeq: z.bigint().min(0n).max(MAX_INT),
+  tickCount: z.bigint().min(0n),
+  timems: z.number().int().min(0),
+  buffer: z.custom(Buffer.isBuffer),
+  bytes: z.custom((value) => value instanceof Uint8Array),
+  digest: z.custom((value) => value instanceof Uint8Array && value.length === HASH_BYTES),
+  hash: z.custom((value) => Buffer.isBuffer(value) && value.length === HASH_BYTES),
+  seed: z.custom(isSeed),
+  rpc: z.custom(isRpc),
+}
+
+const reply = z.looseObject({
+  type: z.enum(['ack', 'err']), cid: schemas.cid, term: schemas.term,
+})
+const raftSchemas = {
+  reply,
+  appendReply: z.discriminatedUnion('type', [
+    z.looseObject({ type: z.literal('err'), cid: schemas.cid, term: schemas.term }),
+    z.looseObject({
+      type: z.literal('ack'), cid: schemas.cid, term: schemas.term,
+      seq: schemas.nonnegativeSeq,
+    }),
+  ]),
+  voteRequest: z.looseObject({
+    type: z.literal('vote_request'), term: schemas.term,
+    termP: schemas.seq, seqP: schemas.seq,
+  }),
+  vote: z.looseObject({
+    type: z.literal('vote'), term: schemas.term, voteGranted: z.boolean(),
+  }),
+  append: z.looseObject({
+    type: z.literal('append'), cid: schemas.cid, term: schemas.term,
+    termP: schemas.seq, seqP: schemas.seq, commitSeq: schemas.seq,
+    data: z.array(z.looseObject({ term: schemas.term, entry: schemas.buffer })).min(1).optional(),
+  }),
+}
+
+function firstIssue(issues) {
+  const issue = issues[0]
+  if (issue.code !== 'invalid_union' || !issue.errors?.length) { return issue }
+  // Prefer the branch whose literal tags matched before reporting its field.
+  const branch = issue.errors.find((errors) =>
+    !errors.some((error) => error.code === 'invalid_value')) ?? issue.errors[0]
+  const nested = firstIssue(branch)
+  return { ...nested, path: [...issue.path, ...nested.path] }
+}
+
+function validate(schema, value, label, code = Err.RPC_ILLEGAL) {
+  if (schema.validate(value)) { return value }
+  const issue = firstIssue(schema.safeParse(value).error.issues)
+  const path = issue.path.reduce((text, key) => typeof key === 'number'
+    ? `${text}[${key}]` : `${text}${text ? '.' : ''}${String(key)}`, '')
+  const problem = code === Err.LOG_CORRUPT || code === Err.MONSTER_CORRUPT ? 'corrupt' : 'illegal'
+  throw new Err.ErrorWithCode(`${label}${path ? ` ${path}` : ''} is ${problem}`, code)
+}
 
 // The native addon requires Buffers. Preserve the exact view without copying.
 const asBuffer = (bytes) => Buffer.isBuffer(bytes) ? bytes :
@@ -57,6 +118,7 @@ const deleteSQLiteFiles = (databasePath) => {
 export {
   isCid, isTerm, isSeq, isSeed,
   isRpc,
+  schemas, raftSchemas, validate,
   HASH_BYTES, hash, hashParts,
   createSQLiteDirectory,
   deleteSQLiteFiles,

@@ -598,6 +598,29 @@ test('Apply validates execution and frame checksums before invoking user code', 
   t.end()
 })
 
+test('Apply validates execution fields before changing its receipt', async (t) => {
+  const malformed = [
+    { tickCount: -1n }, { tickCount: 1 }, { tickCount: undefined },
+    { term: -1n }, { term: 9_223_372_036_854_775_808n }, { term: 1 },
+    { seq: -1n }, { seq: 0 }, { entryHash: 'hash' },
+    { matchIndex: [] }, { items: [] },
+  ]
+  for (const extra of malformed) {
+    let calls = 0
+    const f = fixture(() => { calls++ })
+    try {
+      await f.start()
+      t.equal(await f.execute(0n, null, extra), undefined, 'invalid execute has no success reply')
+      await f.component.close()
+      t.equal(f.diagnostics.find(({ type }) => type === 'error').err.code, Err.RPC_ILLEGAL)
+      t.equal(calls, 0, 'invalid execute cannot invoke apply')
+      const db = new DatabaseSync(`${f.base}2`, { readOnly: true, readBigInts: true })
+      try { t.equal(readApply(db).seq, -1n, 'receipt remains initial') } finally { db.close() }
+    } finally { await f.close() }
+  }
+  t.end()
+})
+
 test('one CMD session captures only the successful net batch transition', async (t) => {
   const f = fixture((db, data, term, seq, index) => {
     if (seq === 0n) { db.exec(schema); return }

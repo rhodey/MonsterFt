@@ -81,8 +81,8 @@ no findings
 
 ## `receiveApply`
 
-Validates an Apply completion, copies its receipt into DB1, and resumes protocol
-progress.
+Validates an Apply completion against its original execution request, copies its
+receipt into DB1, and resumes protocol progress.
 
 ### findings
 

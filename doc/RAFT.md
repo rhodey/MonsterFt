@@ -4,15 +4,6 @@ Function notes for [src/raft.js](../src/raft.js), in source
 order. Trivial helpers are omitted, and nested callbacks are covered with their
 enclosing function.
 
-## `validRecords`
-
-Checks that replication data contains a nonempty array of valid term-and-payload
-records.
-
-### findings
-
-no findings
-
 ## `constructor`
 
 Validates membership and protocol options, restores the committed position, and
@@ -82,7 +73,7 @@ no findings
 ## `receive`
 
 Validates and routes incoming Raft messages and completes matching outstanding
-requests.
+requests. Reply schemas depend on the outstanding request.
 
 ### findings
 
@@ -255,7 +246,7 @@ no findings
 ## `appendRequest`
 
 Handles replication and heartbeats, reconciling follower history while
-protecting committed entries.
+protecting committed entries. Structural validation precedes term or log changes.
 
 ### findings
 

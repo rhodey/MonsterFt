@@ -1,6 +1,7 @@
 import { EventEmitter } from 'node:events'
 import * as Err from './error.js'
-import { isCid, isSeed } from './util.js'
+import { isCid } from './util.js'
+import * as utilm from './utilm.js'
 import { ProtocolStore } from './storage.js'
 import { Executor } from './executor.js'
 import { Random } from './random.js'
@@ -97,47 +98,16 @@ class MonsterProc extends EventEmitter {
     this._outputs.push(this.role === 'procA' ? payload : wire.checksum(payload))
   }
 
-  _validateInput(message) {
-    if (typeof message.tickCount !== 'bigint' || message.tickCount !== this.tickCount + 1n ||
-        !Number.isSafeInteger(message.timems) || message.timems < this.executor.timems) {
+  _input(message) {
+    const { clusterMessage, warning } = utilm.parseProcInput(message, this.id, this.nodes)
+    if (message.tickCount !== this.tickCount + 1n || message.timems < this.executor.timems) {
       throw illegal('Proc input order is illegal')
     }
     if (message.kind === 'start') {
       if (this._phase !== 'reconciled') { throw illegal('Proc cannot start before reconciliation') }
-      return null
+    } else if (!this.isOpen) {
+      throw illegal('Proc runtime has not started')
     }
-    if (!this.isOpen) { throw illegal('Proc runtime has not started') }
-    if (message.kind === 'rpc') {
-      if (!this.nodes.includes(message.from) || message.from === this.id) {
-        throw illegal('Proc cluster sender is illegal')
-      }
-      // The remote Gate forwards the original agreed envelope unchanged.
-      const envelope = wire.decodeFrame(message.frame)
-      if (envelope?.to !== this.id || envelope.message?.from !== message.from ||
-          typeof envelope.message?.type !== 'string') {
-        throw illegal('Proc cluster envelope is illegal')
-      }
-      return envelope.message
-    }
-    if (message.kind === 'append') {
-      if (!isCid(message.requestId) || !Array.isArray(message.items) || message.items.length === 0 ||
-          !message.items.every(Buffer.isBuffer)) {
-        throw illegal('Proc append input is illegal')
-      }
-    } else if (message.kind === 'drain') {
-      if (!isCid(message.requestId)) { throw illegal('Proc drain input is illegal') }
-    } else if (message.kind === 'apply') {
-      if (message.reply?.type !== 'ack' || !isCid(message.reply.cid)) {
-        throw illegal('Proc Apply reply is illegal')
-      }
-    } else if (message.kind !== 'tick') {
-      throw illegal('Proc input kind is illegal')
-    }
-    return null
-  }
-
-  _input(message) {
-    const clusterMessage = this._validateInput(message)
     this.tickCount = message.tickCount
     this.engine.tickCount = message.tickCount
     this._outputs = []
@@ -147,7 +117,10 @@ class MonsterProc extends EventEmitter {
     this.executor.run(message.timems, () => {
       switch (message.kind) {
         case 'start': this.engine.start(); break
-        case 'rpc': this.engine.receive(message.from, clusterMessage); break
+        case 'rpc':
+          if (warning) { this.engine.warn(warning) }
+          else { this.engine.receive(message.from, clusterMessage) }
+          break
         case 'append': this.engine.submit(message.requestId, message.items); break
         case 'drain': this.engine.drain(message.requestId); break
         case 'apply': this.engine.receiveApply(message.reply); break
@@ -187,14 +160,11 @@ class MonsterProc extends EventEmitter {
         return
       }
       if (this._stopped) { return }
-      if (!isCid(message?.cid)) { throw illegal('Proc request cid is illegal') }
+      utilm.validateProcRequest(message)
       if (message.type === 'hello') {
         if (this._pastHello) { throw illegal('Proc received hello after startup') }
         // Validate without advancing the shared generator. A new Gate may start
         // hello again while this Proc is still waiting in the hello phase.
-        if (!isSeed(message.seed)) {
-          throw illegal('seed must be a nonzero 16-byte Buffer')
-        }
         this._seed = message.seed
         this._ack(message)
         return

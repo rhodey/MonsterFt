@@ -5,9 +5,6 @@ import { errorToWire, errorFromWire } from './wire.js'
 const min = (a, b) => a < b ? a : b
 const max = (a, b) => a > b ? a : b
 const failure = (message, code) => new Err.ErrorWithCode(message, code)
-const validRecords = (data) => Array.isArray(data) && data.length > 0 &&
-  data.every((row) => row !== null && typeof row === 'object' &&
-    util.isTerm(row.term) && Buffer.isBuffer(row.entry))
 
 // Internal Raft engine. All methods run synchronously in a Proc input's
 // executor and DB1 transaction; remote waits are registered continuations.
@@ -108,9 +105,9 @@ class RaftEngine {
   }
 
   receive(from, message) {
-    if (this.stopped || !this.nodes.includes(from) || from === this.id || !util.isRpc(message)) { return }
+    if (this.stopped || !this.nodes.includes(from) || from === this.id || !util.schemas.rpc.validate(message)) { return }
     if (message.type === 'ack' || message.type === 'err') {
-      if (!util.isTerm(message.term)) { return }
+      if (!util.raftSchemas.reply.validate(message)) { return }
       const waiting = this.requests.get(message.cid)
       if (!waiting || waiting.to !== from || !waiting.validate(message)) { return }
       if (message.term > this.term) { this.advanceTerm(message.term) }
@@ -204,7 +201,7 @@ class RaftEngine {
   voteRequest(from, msg) {
     const { term, termP, seqP } = msg
     let granted = false
-    if (util.isTerm(term) && util.isSeq(termP) && util.isSeq(seqP) && term >= this.term) {
+    if (util.raftSchemas.voteRequest.validate(msg) && term >= this.term) {
       const wasLeader = this.state === 'leader'
       this.advanceTerm(term, null, wasLeader)
       granted = (this.votedFor === null || this.votedFor === from) && term >= termP &&
@@ -220,7 +217,7 @@ class RaftEngine {
   }
 
   voteResponse(from, msg) {
-    if (!util.isTerm(msg.term) || typeof msg.voteGranted !== 'boolean') { return }
+    if (!util.raftSchemas.vote.validate(msg)) { return }
     if (this.advanceTerm(msg.term)) { return }
     if (this.state !== 'candidate' || msg.term !== this.term || !msg.voteGranted) { return }
     this.votes.add(from)
@@ -284,8 +281,8 @@ class RaftEngine {
       if (state.matchIndex < this.seq) { state.nextIndex = min(state.nextIndex, this.seq) }
       this.checkCommit()
       this.executor.enqueue(() => this.replicate(state))
-    }, (response) => response.type === 'err' ||
-      (util.isSeq(response.seq) && response.seq >= 0n && response.term >= term),
+    }, (response) => util.raftSchemas.appendReply.validate(response) &&
+      (response.type === 'err' || response.term >= term),
     failure('heartbeat timeout', Err.HEARTBEAT_TIMEOUT))
     state.heartbeatCids.add(cid)
   }
@@ -370,8 +367,8 @@ class RaftEngine {
       state.nextIndex = max(state.nextIndex, matched + 1n)
       this.checkCommit()
       this.executor.enqueue(() => this.replicate(state))
-    }, (response) => response.type === 'err' ||
-      (util.isSeq(response.seq) && response.seq >= 0n && response.term >= term))
+    }, (response) => util.raftSchemas.appendReply.validate(response) &&
+      (response.type === 'err' || response.term >= term))
   }
 
   checkCommit() {
@@ -397,9 +394,13 @@ class RaftEngine {
   appendRequest(from, msg) {
     const { cid, term, termP, seqP, commitSeq, data } = msg
     if (!util.isCid(cid)) { return }
-    if (!util.isTerm(term) || !util.isSeq(termP) || !util.isSeq(seqP) || !util.isSeq(commitSeq) ||
-        (data !== undefined && (!validRecords(data) || !util.isSeq(seqP + BigInt(data.length))))) {
-      this.rpcError(from, cid, failure('append fields are illegal', Err.RPC_ILLEGAL))
+    try {
+      util.validate(util.raftSchemas.append, msg, 'append')
+      if (data !== undefined && !util.isSeq(seqP + BigInt(data.length))) {
+        throw failure('append sequence is illegal', Err.RPC_ILLEGAL)
+      }
+    } catch (err) {
+      this.rpcError(from, cid, err)
       return
     }
     if (term < this.term) {
