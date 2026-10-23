@@ -63,15 +63,15 @@ test('protocol validation reports field paths without exposing Zod errors', (t) 
   t.end()
 })
 
-test('Raft reply headers leave success fields and error normalization to their owners', (t) => {
+test('Raft ack_err headers leave success fields and error normalization to their owners', (t) => {
   const error = { type: 'err', cid: 'request', term: 9n }
-  t.ok(raftSchemas.reply.validate(error), 'error body fields may be absent')
-  t.ok(raftSchemas.reply.validate({ ...error, code: 'native', message: 17, logSeq: 'bad' }),
+  t.ok(raftSchemas.ack_err.validate(error), 'error body fields may be absent')
+  t.ok(raftSchemas.ack_err.validate({ ...error, code: 'native', message: 17, logSeq: 'bad' }),
     'normalization and optional hint fallback remain owner decisions')
-  t.ok(raftSchemas.reply.validate({ type: 'ack', cid: 'request', term: 9n }),
+  t.ok(raftSchemas.ack_err.validate({ type: 'ack', cid: 'request', term: 9n }),
     'ACK body requirements depend on the outstanding request')
-  t.notOk(raftSchemas.reply.validate({ ...error, term: max + 1n }))
-  t.notOk(raftSchemas.reply.validate({ ...error, cid: '' }))
-  t.notOk(raftSchemas.reply.validate({ ...error, type: 'vote' }))
+  t.notOk(raftSchemas.ack_err.validate({ ...error, term: max + 1n }))
+  t.notOk(raftSchemas.ack_err.validate({ ...error, cid: '' }))
+  t.notOk(raftSchemas.ack_err.validate({ ...error, type: 'vote' }))
   t.end()
 })

@@ -96,11 +96,11 @@ test('Apply validation retains setup, command, and byte-view contracts', (t) => 
     t.throws(() => utilm.validateApplyRequest(bad), isError(Err.RPC_ILLEGAL))
   }
   const ack = { type: 'ack', cid: message.cid, tickCount: message.tickCount }
-  t.equal(utilm.validateLocalReply(ack, message, 'apply'), ack)
-  t.throws(() => utilm.validateLocalReply({ ...ack, tickCount: 3n }, message, 'apply'),
+  t.equal(utilm.validateLocalAckErr(ack, message, 'apply'), ack)
+  t.throws(() => utilm.validateLocalAckErr({ ...ack, tickCount: 3n }, message, 'apply'),
     isError(Err.RPC_ILLEGAL))
   const error = { type: 'err', cid: message.cid, error: { message: 7, code: 'native' } }
-  t.equal(utilm.validateLocalReply(error, message, 'apply'), error,
+  t.equal(utilm.validateLocalAckErr(error, message, 'apply'), error,
     'operation errors preserve normalization instead of requiring success fields')
   t.end()
 })

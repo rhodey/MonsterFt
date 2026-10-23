@@ -6,8 +6,8 @@ import * as wire from './wire.js'
 
 const requestSchema = z.looseObject({ type: z.string(), cid: schemas.cid })
 const helloSchema = requestSchema.extend({ type: z.literal('hello'), seed: schemas.seed })
-const replySchema = requestSchema.extend({ type: z.enum(['ack', 'err']) })
-const applyReplySchema = requestSchema.extend({
+const ackErrSchema = requestSchema.extend({ type: z.enum(['ack', 'err']) })
+const applyAckSchema = requestSchema.extend({
   type: z.literal('ack'), tickCount: schemas.tickCount,
 })
 const completionSchema = z.looseObject({ tickCount: schemas.tickCount })
@@ -52,7 +52,7 @@ const inputSchemas = {
     requestId: schemas.cid, items: z.array(schemas.buffer).min(1),
   }),
   drain: inputSchema.extend({ requestId: schemas.cid }),
-  apply: inputSchema.extend({ reply: applyReplySchema }),
+  apply: inputSchema.extend({ reply: applyAckSchema }),
 }
 const envelopeSchema = z.looseObject({ to: schemas.cid, message: schemas.rpc })
 const outputCompletionSchema = completionSchema.extend({ outputs: z.array(schemas.buffer) })
@@ -99,7 +99,7 @@ const validateRequest = (message, owner) => {
 
 const validateApplyRequest = (message) => message?.type === 'execute'
   ? validateExecute(message) : validateRequest(message, 'Apply')
-const validateReply = (message) => validate(replySchema, message, 'local reply')
+const validateAckErr = (message) => validate(ackErrSchema, message, 'local ack_err')
 
 function parseProcRequest(message, id, nodes) {
   const parsed = { message, clusterMessage: null, warning: null }
@@ -139,16 +139,16 @@ function validateExecute(message) {
   return message
 }
 
-function validateLocalReply(message, request, role) {
-  // The reply header was validated before looking up its request.
+function validateLocalAckErr(message, request, role) {
+  // The ack_err header was validated before looking up its request.
   if (message.type === 'err') { return message }
   if (request.type === 'input') {
     validate(role === 'procA' ? outputCompletionSchema : checksumCompletionSchema,
       message, 'Proc completion')
   } else if (request.type === 'execute') {
-    validate(completionSchema, message, 'Apply reply')
+    validate(completionSchema, message, 'Apply ACK')
   } else if (request.type === 'capture') {
-    validate(captureSchema, message, 'capture reply')
+    validate(captureSchema, message, 'capture ACK')
   }
   if ((request.type === 'input' || request.type === 'execute') &&
       message.tickCount !== request.tickCount) {
@@ -353,8 +353,8 @@ const normalizeKeepOptions = (opts) => {
 }
 
 export {
-  monsterSchemas, validateApplyRequest, validateReply,
-  parseProcRequest, validateExecute, validateLocalReply,
+  monsterSchemas, validateApplyRequest, validateAckErr,
+  parseProcRequest, validateExecute, validateLocalAckErr,
   parseOutput, validateEvent, validateCommandResult, decodeEntry,
   asBuffer, outcomesWire, outcomesPublic, digestCmd, assertEncodable,
   digestEntry, isDigest,

@@ -43,7 +43,7 @@ no findings
 ## `schemas` / `raftSchemas`
 
 Define shared protocol fields and the accepted shapes of Raft requests and
-replies. Additional fields remain allowed and values are never coerced.
+`ack_err` headers. Additional fields remain allowed and values are never coerced.
 
 ### findings
 

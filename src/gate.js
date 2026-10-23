@@ -131,10 +131,10 @@ class Gate extends EventEmitter {
     try {
       if (COMPONENTS.includes(from)) {
         const message = wire.decodeFrame(frame)
-        utilm.validateReply(message)
+        utilm.validateAckErr(message)
         const request = this._requests.get(`${from}:${message.cid}`)
         if (!request) { return }
-        utilm.validateLocalReply(message, request.message, from)
+        utilm.validateLocalAckErr(message, request.message, from)
         if (request.message.type === 'hello' && message.type === 'ack') { this._helloDone.add(from) }
         request.finish(message.type === 'err'
           ? wire.errorFromWire(message.error ?? message) : null, message)
@@ -307,7 +307,7 @@ class Gate extends EventEmitter {
     } else if (to === 'client') {
       const pending = this._clients.get(message.cid)
       if (!pending) { return }
-      utilm.validateReply(message)
+      utilm.validateAckErr(message)
       if (message.type === 'ack' && pending.kind === 'append') {
         utilm.validateCommandResult(message, pending.itemCount)
       }

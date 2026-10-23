@@ -30,10 +30,10 @@ Validates Apply execution fields for setup or a command.
 
 no findings
 
-## `validateLocalReply`
+## `validateLocalAckErr`
 
 Validates local completion fields against the original request and sending role,
-after the reply header has been checked for request lookup.
+after the `ack_err` header has been checked for request lookup.
 
 ### findings
 

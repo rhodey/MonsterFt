@@ -109,7 +109,7 @@ class RaftEngine {
     if (message.type === 'ack' || message.type === 'err') {
       let waiting
       try {
-        util.validate(util.raftSchemas.reply, message, 'reply')
+        util.validate(util.raftSchemas.ack_err, message, 'ack_err')
         waiting = this.requests.get(message.cid)
         if (!waiting || waiting.to !== from || !waiting.validate(message)) { return }
       } catch (err) {

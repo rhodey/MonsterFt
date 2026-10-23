@@ -27,7 +27,7 @@ function waiting(t, f, request, snapshot) {
   t.deepEqual(f.state(), snapshot, 'malformed reply leaves durable state unchanged')
 }
 
-test('malformed remote reply headers warn without settling or advancing a request', (t) => {
+test('malformed remote ack_err headers warn without settling or advancing a request', (t) => {
   const f = protocol()
   try {
     const request = page(f.elect())

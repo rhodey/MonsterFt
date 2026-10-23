@@ -33,11 +33,11 @@ const schemas = {
   rpc: z.custom(isRpc),
 }
 
-const reply = z.looseObject({
+const ack_err = z.looseObject({
   type: z.enum(['ack', 'err']), cid: schemas.cid, term: schemas.term,
 })
 const raftSchemas = {
-  reply,
+  ack_err,
   voteRequest: z.looseObject({
     type: z.literal('vote_request'), term: schemas.term,
     termP: schemas.seq, seqP: schemas.seq,
