@@ -39,7 +39,10 @@ validate cluster envelopes, warning locally on remote failures.
 
 ### findings
 
-no findings
+- **Accepted: malformed replies during explicit cleanup may end in
+  `LOCAL_TIMEOUT`.** Gate is already stopped, and a corrupt reply may have no
+  usable CID. Leave the close request pending rather than infer its identity.
+  If no valid reply arrives, cleanup rejects without emitting `close`.
 
 ## `_hello`
 
