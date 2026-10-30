@@ -1,7 +1,7 @@
 {
   "name": "monsterft",
   "author": "rhodey",
-  "description": "Integrity layer for Raft.",
+  "description": "Write apps that survive cosmic radiation.",
   "version": "0.8.0",
   "license": "AGPL-3.0-only",
   "type": "module",
