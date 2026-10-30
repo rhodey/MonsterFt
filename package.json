@@ -1,8 +1,8 @@
 {
   "name": "monsterft",
   "author": "rhodey",
-  "description": "Integrity layer for Raft.",
-  "version": "0.7.0",
+  "description": "Write apps that survive cosmic radiation.",
+  "version": "0.8.0",
   "license": "AGPL-3.0-only",
   "type": "module",
   "main": "src/index.js",
@@ -18,8 +18,10 @@
     "test": "tape test/*.js"
   },
   "dependencies": {
-    "libsodium-wrappers": "^0.8.2",
-    "msgpackr": "^1.11.2"
+    "msgpackr": "^1.11.2",
+    "pure-rand": "8.4.2",
+    "xxhash-addon": "2.1.0",
+    "zod": "4.6.7"
   },
   "devDependencies": {
     "tape": "^5.9.0"

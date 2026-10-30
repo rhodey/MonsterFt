@@ -13,9 +13,10 @@ const defaults = {
 
 class SQLiteLog {
   constructor(databasePath, opts={}) {
-    if (typeof databasePath !== 'string' || databasePath.length <= 0) {
+    if (typeof databasePath !== 'string' || databasePath.length <= 0 ||
+        databasePath === ':memory:') {
       throw new Err.ErrorWithCode(
-        'SQLiteLog DB path must be non-empty string', Err.ARGUMENT_ILLEGAL)
+        'SQLiteLog DB path must be a non-empty file path', Err.ARGUMENT_ILLEGAL)
     }
 
     opts = { ...defaults, ...opts }
@@ -25,7 +26,6 @@ class SQLiteLog {
     }
 
     this.path = databasePath
-    this._memory = databasePath === ':memory:'
     this.iterStepSize = opts.iterStepSize
     this.db = null
     this._statements = null
@@ -66,7 +66,7 @@ class SQLiteLog {
 
   _validateEntry(data, code=Err.ARGUMENT_ILLEGAL) {
     if (data === null || typeof data !== 'object' || Array.isArray(data)) {
-      throw new Err.ErrorWithCode('data must be record', code)
+      throw new Err.ErrorWithCode('data must be object', code)
     }
     this._validateSeq(data.term, false, code, 'term')
     if (!Buffer.isBuffer(data.entry)) {
@@ -84,17 +84,27 @@ class SQLiteLog {
   }
 
   _entryFromRow(row, expected=undefined) {
-    this._validateSeq(row.seq, false, Err.LOG_CORRUPT)
+    util.validate(util.logSchemas.row, row, 'stored log', Err.LOG_CORRUPT)
     if (expected !== undefined && row.seq !== expected) {
       throw new Err.ErrorWithCode(`seq ${row.seq} !== ${expected}`, Err.LOG_CORRUPT)
     }
-    if (!(row.entry instanceof Uint8Array)) {
-      throw new Err.ErrorWithCode('entry must be blob', Err.LOG_CORRUPT)
-    }
     const entry = Buffer.from(row.entry.buffer, row.entry.byteOffset, row.entry.byteLength)
-    const data = { term: row.term, entry }
-    this._validateEntry(data, Err.LOG_CORRUPT)
-    return data
+    return { term: row.term, entry }
+  }
+
+  sizes(seq, limit) {
+    try {
+      this._assertOpen()
+      this._validateSeq(seq)
+      if (!Number.isSafeInteger(limit) || limit <= 0) {
+        throw new Err.ErrorWithCode(
+          'limit must be int > 0', Err.ARGUMENT_ILLEGAL)
+      }
+      return this._statements.sizes.all(seq, this.seq, limit)
+        .map((row) => Number(row.bytes))
+    } catch (err) {
+      throw this._wrapError(err, 'sizes')
+    }
   }
 
   readHead() {
@@ -114,7 +124,7 @@ class SQLiteLog {
     if (election === undefined) {
       throw new Err.ErrorWithCode('election row is missing', Err.LOG_CORRUPT)
     }
-    this._validateElection(election.term, election.votedFor, Err.LOG_CORRUPT)
+    util.validate(util.logSchemas.election, election, 'stored election', Err.LOG_CORRUPT)
 
     this.seq = seq
     this.term = term
@@ -127,18 +137,175 @@ class SQLiteLog {
       this.begin = -1n
       return
     }
-    this._validateSeq(begin.seq, false, Err.LOG_CORRUPT)
+    util.validate(util.schemas.nonnegativeSeq, begin.seq, 'stored log begin', Err.LOG_CORRUPT)
     this.begin = begin.seq
   }
 
-  open() {
+  iter(seq=0n, opts={}) {
+    try {
+      this._assertOpen()
+      this._validateSeq(seq)
+
+      const iterStepSize = opts.iterStepSize ?? this.iterStepSize
+      if (!Number.isSafeInteger(iterStepSize) || iterStepSize <= 0) {
+        throw new Err.ErrorWithCode(
+          'iterStepSize must be int > 0', Err.ARGUMENT_ILLEGAL)
+      }
+
+      const log = this
+      const last = this.seq
+      return (function*() {
+        let next = seq
+        try {
+          while (next <= last) {
+            const rows = log._statements.range.all(next, last, iterStepSize)
+            if (rows.length <= 0) { return }
+
+            for (const row of rows) {
+              const entry = log._entryFromRow(row, next)
+              next++
+              yield entry
+            }
+          }
+        } catch (err) {
+          throw log._wrapError(err, 'iter')
+        }
+      })()
+    } catch (err) {
+      throw this._wrapError(err, 'iter')
+    }
+  }
+
+  election(currentTerm, votedFor) {
+    try {
+      this._assertOpen()
+      this._validateElection(currentTerm, votedFor)
+
+      this._statements.electionUpsert.run(currentTerm, votedFor)
+      this.elec.term = currentTerm
+      this.elec.votedFor = votedFor
+      return [currentTerm, votedFor]
+    } catch (err) {
+      throw this._wrapError(err, 'election')
+    }
+  }
+
+  trim(seq=-1n) {
+    try {
+      this._assertOpen()
+      this._validateSeq(seq, true)
+      if (this.seq <= seq) { return }
+
+      this._statements.trim.run(seq)
+      this.readHead()
+    } catch (err) {
+      throw this._wrapError(err, 'trim')
+    }
+  }
+
+  append(data, seq=null) {
+    try {
+      this._assertOpen()
+      const next = this.seq + 1n
+      seq = seq !== null ? seq : next
+      this._validateSeq(seq)
+      this._validateEntry(data)
+      if (next !== seq) {
+        throw new Err.ErrorWithCode(
+          `next ${next} !== ${seq}`, Err.ARGUMENT_ILLEGAL)
+      }
+
+      const { term, entry: head } = data
+      this._statements.insert.run(seq, term, head.length ? head : EMPTY_ENTRY)
+      this.term = term
+      this.head = head
+      this.seq = seq
+      if (this.begin < 0n) { this.begin = seq }
+      return seq
+    } catch (err) {
+      throw this._wrapError(err, 'append')
+    }
+  }
+
+  appendBatch(data, seq=null) {
+    try {
+      this._assertOpen()
+      if (!Array.isArray(data)) {
+        throw new Err.ErrorWithCode('data must be array', Err.ARGUMENT_ILLEGAL)
+      }
+      if (data.length <= 0) {
+        throw new Err.ErrorWithCode(
+          'data must be array with length > 0', Err.ARGUMENT_ILLEGAL)
+      }
+      data.forEach((entry) => this._validateEntry(entry))
+
+      const next = this.seq + 1n
+      seq = seq !== null ? seq : next
+      this._validateSeq(seq)
+      if (next !== seq) {
+        throw new Err.ErrorWithCode(
+          `next ${next} !== ${seq}`, Err.ARGUMENT_ILLEGAL)
+      }
+
+      const end = seq + BigInt(data.length - 1)
+      this._validateSeq(end)
+      const last = data[data.length - 1]
+      const { term, entry: head } = last
+
+      if (!this.db.isTransaction) {
+        throw new Err.ErrorWithCode('appendBatch requires a transaction', Err.RAFT_ILLEGAL)
+      }
+      data.forEach(({ term, entry }, idx) => {
+        this._statements.insert.run(seq + BigInt(idx), term, entry.length ? entry : EMPTY_ENTRY)
+      })
+
+      this.term = term
+      this.head = head
+      this.seq = end
+      if (this.begin < 0n) { this.begin = seq }
+      return seq
+    } catch (err) {
+      throw this._wrapError(err, 'appendBatch')
+    }
+  }
+
+  close() {
+    if (!this._open) { return }
+
+    try {
+      this.db.close()
+    } catch (err) {
+      throw this._wrapError(err, 'close')
+    }
+
+    this.db = null
+    this._statements = null
+    this.term = null
+    this.head = null
+    this.seq = null
+    this.begin = null
+    this.elec.term = null
+    this.elec.votedFor = null
+    this._open = false
+  }
+
+  del() {
+    try {
+      if (this._open) {
+        throw new Err.ErrorWithCode('log is open', Err.LOG_OPEN)
+      }
+      util.deleteSQLiteFiles(this.path)
+    } catch (err) {
+      throw this._wrapError(err, 'del')
+    }
+  }
+
+  open({ initialize=null }={}) {
     if (this._open) { return }
     const { path: databasePath } = this
     let db = null
     try {
-      if (!this._memory) {
-        util.createSQLiteDirectory(databasePath)
-      }
+      util.createSQLiteDirectory(databasePath)
       db = new DatabaseSync(databasePath, { readBigInts: true })
 
       db.exec('PRAGMA journal_mode = WAL')
@@ -162,8 +329,9 @@ class SQLiteLog {
 
           INSERT INTO raft_election (id, current_term, voted_for)
           VALUES (1, 0, NULL);
-          COMMIT;
         `)
+        if (initialize !== null) { initialize(db) }
+        db.exec('COMMIT')
       } else {
         for (const name of ['raft_log', 'raft_election']) {
           if (!schema.some((row) => row.type === 'table' && row.name === name)) {
@@ -217,190 +385,6 @@ class SQLiteLog {
         try { db.close() } catch (_) {}
       }
       throw this._wrapError(err, 'open')
-    }
-  }
-
-  close() {
-    if (!this._open) { return }
-
-    try {
-      this.db.close()
-    } catch (err) {
-      throw this._wrapError(err, 'close')
-    }
-
-    this.db = null
-    this._statements = null
-    this.term = null
-    this.head = null
-    this.seq = null
-    this.begin = null
-    this.elec.term = null
-    this.elec.votedFor = null
-    this._open = false
-  }
-
-  append(data, seq=null) {
-    try {
-      this._assertOpen()
-      const next = this.seq + 1n
-      seq = seq !== null ? seq : next
-      this._validateSeq(seq)
-      this._validateEntry(data)
-      if (next !== seq) {
-        throw new Err.ErrorWithCode(
-          `next ${next} !== ${seq}`, Err.ARGUMENT_ILLEGAL)
-      }
-
-      const { term, entry: head } = data
-      this._statements.insert.run(seq, term, head.length ? head : EMPTY_ENTRY)
-      this.term = term
-      this.head = head
-      this.seq = seq
-      if (this.begin < 0n) { this.begin = seq }
-      return seq
-    } catch (err) {
-      throw this._wrapError(err, 'append')
-    }
-  }
-
-  appendBatch(data, seq=null) {
-    let transaction = false
-    try {
-      this._assertOpen()
-      if (!Array.isArray(data)) {
-        throw new Err.ErrorWithCode('data must be array', Err.ARGUMENT_ILLEGAL)
-      }
-      if (data.length <= 0) {
-        throw new Err.ErrorWithCode(
-          'data must be array with length > 0', Err.ARGUMENT_ILLEGAL)
-      }
-      data.forEach((entry) => this._validateEntry(entry))
-
-      const next = this.seq + 1n
-      seq = seq !== null ? seq : next
-      this._validateSeq(seq)
-      if (next !== seq) {
-        throw new Err.ErrorWithCode(
-          `next ${next} !== ${seq}`, Err.ARGUMENT_ILLEGAL)
-      }
-
-      const end = seq + BigInt(data.length - 1)
-      this._validateSeq(end)
-      const last = data[data.length - 1]
-      const { term, entry: head } = last
-
-      this.db.exec('BEGIN IMMEDIATE')
-      transaction = true
-      data.forEach(({ term, entry }, idx) => {
-        this._statements.insert.run(seq + BigInt(idx), term, entry.length ? entry : EMPTY_ENTRY)
-      })
-      this.db.exec('COMMIT')
-      transaction = false
-
-      this.term = term
-      this.head = head
-      this.seq = end
-      if (this.begin < 0n) { this.begin = seq }
-      return seq
-    } catch (err) {
-      if (transaction) {
-        try {
-          this.db.exec('ROLLBACK')
-        } catch {}
-        try {
-          this.readHead()
-        } catch {}
-      }
-      throw this._wrapError(err, 'appendBatch')
-    }
-  }
-
-  election(currentTerm, votedFor) {
-    try {
-      this._assertOpen()
-      this._validateElection(currentTerm, votedFor)
-
-      this._statements.electionUpsert.run(currentTerm, votedFor)
-      this.elec.term = currentTerm
-      this.elec.votedFor = votedFor
-      return [currentTerm, votedFor]
-    } catch (err) {
-      throw this._wrapError(err, 'election')
-    }
-  }
-
-  trim(seq=-1n) {
-    try {
-      this._assertOpen()
-      this._validateSeq(seq, true)
-      if (this.seq <= seq) { return }
-
-      this._statements.trim.run(seq)
-      this.readHead()
-    } catch (err) {
-      throw this._wrapError(err, 'trim')
-    }
-  }
-
-  iter(seq=0n, opts={}) {
-    try {
-      this._assertOpen()
-      this._validateSeq(seq)
-
-      const iterStepSize = opts.iterStepSize ?? this.iterStepSize
-      if (!Number.isSafeInteger(iterStepSize) || iterStepSize <= 0) {
-        throw new Err.ErrorWithCode(
-          'iterStepSize must be int > 0', Err.ARGUMENT_ILLEGAL)
-      }
-
-      const log = this
-      const last = this.seq
-      return (function*() {
-        let next = seq
-        try {
-          while (next <= last) {
-            const rows = log._statements.range.all(next, last, iterStepSize)
-            if (rows.length <= 0) { return }
-
-            for (const row of rows) {
-              const entry = log._entryFromRow(row, next)
-              next++
-              yield entry
-            }
-          }
-        } catch (err) {
-          throw log._wrapError(err, 'iter')
-        }
-      })()
-    } catch (err) {
-      throw this._wrapError(err, 'iter')
-    }
-  }
-
-  sizes(seq, limit) {
-    try {
-      this._assertOpen()
-      this._validateSeq(seq)
-      if (!Number.isSafeInteger(limit) || limit <= 0) {
-        throw new Err.ErrorWithCode(
-          'limit must be int > 0', Err.ARGUMENT_ILLEGAL)
-      }
-      return this._statements.sizes.all(seq, this.seq, limit)
-        .map((row) => Number(row.bytes))
-    } catch (err) {
-      throw this._wrapError(err, 'sizes')
-    }
-  }
-
-  del() {
-    try {
-      if (this._open) {
-        throw new Err.ErrorWithCode('log is open', Err.LOG_OPEN)
-      }
-      util.deleteSQLiteFiles(this.path)
-    } catch (err) {
-      throw this._wrapError(err, 'del')
     }
   }
 }

@@ -15,14 +15,14 @@ plus faulty hard drives.
 Create at least three nodes with the same membership IDs:
 
 ```js
-import { MonsterFt } from 'monsterft'
+import { Gate, MonsterProc, MonsterApply } from 'monsterft'
 
 const nodeIds = ['1', '2', '3']
 const nodesById = new Map()
 
 function createNode(id) {
-  const send = (to, message) => {
-    return nodesById.get(to).onReceive(id, message)
+  const send = (to, frame) => {
+    return nodesById.get(to).onReceive(id, frame)
   }
 
   const apply = (db, data, term, seq, index) => {
@@ -43,7 +43,7 @@ function createNode(id) {
 
     db.prepare(`
       INSERT INTO counters (name, value) VALUES (?, 1)
-      ON CONFLICT (name) DO UPDATE SET value = value + 1
+        ON CONFLICT (name) DO UPDATE SET value = value + 1
     `).run(command.name)
 
     return db.prepare(
@@ -51,19 +51,30 @@ function createNode(id) {
     ).get(command.name).value
   }
 
-  const node = new MonsterFt(
-    id,
-    nodeIds,
-    send,
-    `/tmp/node${id}.db`,
-    { apply },
-  )
-  nodesById.set(id, node)
-  return node
+  const local = new Map()
+  const localSend = (from) => (to, frame) => {
+    return local.get(to).onReceive(from, frame)
+  }
+
+  const gate = new Gate(id, nodeIds, send, localSend('gate'))
+  local.set('gate', gate)
+
+  const databasePath = `/tmp/node${id}.db`
+  for (const role of ['procA', 'procB', 'procC']) {
+    local.set(role, new MonsterProc(
+      role, id, nodeIds, localSend(role), databasePath,
+    ))
+  }
+  local.set('apply', new MonsterApply(
+    id, localSend('apply'), databasePath, apply,
+  ))
+
+  nodesById.set(id, gate)
+  return gate
 }
 
 const nodes = nodeIds.map(createNode)
-nodes.forEach((node) => node.open())
+await Promise.all(nodes.map((node) => node.open()))
 await Promise.all(nodes.map((node) => node.awaitLeader()))
 
 const command = Buffer.from(JSON.stringify({
@@ -74,9 +85,18 @@ const [cmdSeq, value] = await nodes[0].append(command)
 console.log('count =', value)
 ```
 
-`send(to, message)` may be synchronous or async. A real deployment uses
-its transport to deliver the message to `target.onReceive(senderId, message)`.
-`open()` and `close()` are synchronous.
+What's going on here is important and also easy to miss: this is a 3 node
+Raft cluster but every node is made up of a "gate", three protocol engines,
+and one "apply" worker. These are to be run as five linux processes and
+this architecture maximizes correctness. The three protocol engines per node
+turn "strong leader" Raft into "strong correct leader" in the presence of
+cosmic bit flips.
+
+`send(to, frame)` and `localSend(to, frame)` allow MonsterFt to be fully
+transport-agnostic. send is allowed to be lossy and unordered but localSend
+is required to be reliable and ordered. frame is `Buffer` for both. See
+[example2/](example2/) for a demo using TCP between nodes and Unix Domain
+Sockets between local processes.
 
 ### Application and patchset rules
 
@@ -84,7 +104,8 @@ its transport to deliver the message to `target.onReceive(senderId, message)`.
 may be synchronous or async. When `seq === 0n` create the application
 schema and return, MonsterFt ignores seq 0 result.
 
-MonsterFt uses SQLite's Session extension, so its standard rules apply:
+MonsterFt uses [SQLite's Session extension](https://sqlite.org/sessionintro.html),
+so its standard rules apply:
 
 - Give every replicated table a declared, non-NULL primary key.
 - Create schema during the sequence-zero callback; patchsets capture row
@@ -105,7 +126,7 @@ const [cmdSeq, value] = await node.append(buffer)
 const [cmdSeq, outcomes] = await node.appendBatch(buffers)
 ```
 
-Commands (buffers) may be appended through any node. `appendBatch()`
+Commands (buffers) may be appended through any node (gate). `appendBatch()`
 returns one `Promise.allSettled()`-style outcome for each command, in the
 same order. A command with error is rolled back without discarding
 successful commands; singular `append()` throws its application error
@@ -117,88 +138,71 @@ Public events include `change`, `warn`, and `error`.
 
 ### Retention
 
-In addition to integrity MonsterFt can be configured to limit growth of the
-Raft log to target limits. Each MonsterFt command adds two log entries: one
-`CMD` and one `SYNC`. Raft also comes with post-election no-op entries but
-in general `keepTarget` of 1,000 will retain 500 commands.
+MonsterFt can be configured to limit growth of the Raft log to target limits.
+Each MonsterFt command adds two log entries: one `CMD` and one `SYNC`. Raft
+also comes with post-election no-op entries but in general `keepTarget` of
+1,000 will retain 500 commands.
 
 ```js
-const node = new MonsterFt(id, nodeIds, send, databasePath, {
-  apply,
+const opts = {
   keepTarget: 1_000,
   keepTrigger: 1_500,
-})
+}
+const proc = new MonsterProc(
+  'procA', id, nodeIds, localSend, databasePath, opts
+)
 ```
 
-Supply both options or neither. The author chose to not implement Raft "Log
-Compaction" and to not implement Raft membership changes because both were
-deemed too complicated to justify what they bring. In the case of Log
-Compaction it also does not play well with storage-constrained systems. Readers
-who consult the [Raft PDF](https://raft.github.io/raft.pdf) will agree that
-both Log Compaction and membership changes are extensions outside of core.
+This author chose to not implement Raft "Log Compaction" and to not implement
+Raft membership changes because both were deemed too complicated to justify
+what they bring. Readers who consult the [Raft PDF](https://raft.github.io/raft.pdf)
+will agree that both Log Compaction and membership changes are extensions
+outside of core.
 
 ### Repair
 
-A node requires repair when an error with code `REPAIR_QUORUM_IMPOSSIBLE` or
-`REPAIR_OUTSIDE_AGREEMENT` is thrown or emit. Respectively these represent a
+A node requires repair when an error with code `REPAIR_NO_QUORUM` or
+`REPAIR_OUTSIDE` is thrown or emit. Respectively these represent a
 command for which no quorum can agree (most likely your app failed to use
 SQLite deterministically) and a command in which only a minority of nodes
 disagree. A node also requires repair if it falls behind retention.
 
 The MonsterFt repair protocol is an "offline" procedure to be carried out by
 an operator. [REPAIR.md](REPAIR.md) documents the procedure, in summary its
-an SQLite database copy from a designated healthy donor to an unhealthy
-node/nodes.
+SQLite database copies from a healthy donor to an unhealthy node/nodes.
 
 ### Examples
 
-- [example1.js](example1.js): in-process Raft cluster.
-- [example2.js](example2.js): Raft over encrypted TCP.
-- [example3.js](example3.js): in-process MonsterFt cluster.
-- [example4.js](example4.js): MonsterFt with HTTP side effects.
+- [example1/](example1/): in-process MonsterFt cluster.
+- [example2/](example2/): supervised child processes, Unix sockets, and TCP.
+- [example3/](example3/): supervised MonsterFt with HTTP side effects.
 
 ### Roadmap
 
-Without MonsterFt your application uses maybe 2GB of RAM and maybe 100GB of
-HDD. This is the surface area in which things can go wrong even if you are
-using Raft. With MonsterFt: the surface area vulnerable to bad things is on
-the order of 100 bytes. I'm using approximate language here because this
-repo is not MonsterFt in its final form and what is planned is looking
-like it can be truly fault tolerant in the sense that aerospace and the
-defense industry understand.
+MonsterFt has **big** ambitions on Earth and in orbit. A thorough reading of
+[DRAM Errors in the Wild: A Large-Scale Field Study](https://research.google/pubs/dram-errors-in-the-wild-a-large-scale-field-study/)
+will reveal that even server-grade ECC RAM has an error rate of 1 error
+per 100 server-years (Earth). Thus a 100 server fleet is 1 error per 1 year.
+What we're aiming for is on the order of 1 error per 100 Billion server-years
+and we think our current direction can get us there.
 
-Raft is a "strong leader" protocol and this means that if the leader node
-tells a follower to truncate log to X and append Y the follower is going to
-do this. Raft needs faultless HDD and we know how to do this with things
-like RAID but we do not have faultless CPU and RAM see: ECC RAM stats on
-[lock.host](https://lock.host/) and understand also that bit-flips increase
-with altitude and orbit and beyond.
-
-The planned work keeps Raft and SQLite and all MonsterFt protocol messages
-while borrowing an architecture from SpaceX: a minimum 3 node cluster
-remains but every node is running two copies of the app stack and
-these copies are forced to agree before they can RPC with the cluster.
-
-Actually you could ditch MonsterFt and do Raft core with this architecture
-and do pretty well but you would not see some benefits and you would need
-6X compute and 6X storage while MonsterFt I'm pretty sure can deliver on
-approx 3X compute and approx 3X storage.
+MonsterFt has these users in mind: space, aerospace, defense, fintech, ai
+(autonomy). `0.8.0` saw many big changes, next up on path to 100 Billion:
+upgrades to repairs. Soon after: Rust implementation.
 
 ### Collaborations
 
 The work is licensed `AGPL-3.0-only` to encourage collaborations while
 leaving open a path for negotiating commercial licenses and support
-packages.
-
-I incorporated [Lock Host, Inc](https://lock.host/) for some works years
-ago and they led to this. Write to hello@lock.host for commercial
-licenses and other inquiries. Opening GitHub issues is also encouraged.
+packages. I incorporated [Lock Host, Inc](https://lock.host/) for some works
+years ago and led to this. Write to hello@lock.host for commercial licenses
+and other inquiries. Opening GitHub issues is also encouraged.
 
 ### Install
 
-This software is on NPM with version `0.7.0` for educational purposes. It
-may be the case that I cut a `1.0.0` release before releasing what is on
-the roadmap as `2.0.0` but I don't feel pressured to commit to this now.
+This software is on NPM with version `0.8.0` for educational purposes. The
+primary purpose of this README is introductory, not exhaustive. `1.0.0` will
+aim for exhaustive doc.
 
 ```sh
 npm install monsterft

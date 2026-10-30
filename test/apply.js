@@ -1,0 +1,859 @@
+import test from 'tape'
+import xxhash from 'xxhash-addon'
+import fs from 'node:fs'
+import os from 'node:os'
+import path from 'node:path'
+import { DatabaseSync } from 'node:sqlite'
+import { pack } from 'msgpackr'
+import { MonsterApply } from '../src/apply.js'
+import { ProtocolStore } from '../src/storage.js'
+import { readApply } from '../src/utils.js'
+import { digestCmd, digestEntry, outcomesPublic } from '../src/utilm.js'
+import { encodeFrame, decodeFrame } from '../src/wire.js'
+import * as Err from '../src/error.js'
+
+const { XXHash128 } = xxhash
+const seed = Buffer.alloc(16, 1)
+const schema = 'CREATE TABLE items (id INTEGER PRIMARY KEY, value INTEGER NOT NULL)'
+const buf = (value) => Buffer.from(value)
+const deferred = () => {
+  let resolve
+  const promise = new Promise((done) => { resolve = done })
+  return { promise, resolve }
+}
+
+function fixture(apply) {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'monster-apply-'))
+  const base = path.join(dir, 'node')
+  for (const role of ['procA', 'procB', 'procC']) {
+    const store = new ProtocolStore(role, base)
+    store.open(seed)
+    store.close()
+  }
+  const replies = []
+  const diagnostics = []
+  const component = new MonsterApply('node', (to, frame) => {
+    if (to !== 'gate') { throw new Error('unexpected destination') }
+    replies.push(decodeFrame(frame))
+  }, base, apply)
+  for (const type of ['warn', 'error', 'fatal']) {
+    component.on(type, (err) => diagnostics.push({ type, err }))
+  }
+  let cid = 0
+  let tick = 0n
+  const request = async (msg) => {
+    msg = { cid: `request-${++cid}`, ...msg }
+    await component.onReceive('gate', encodeFrame(msg))
+    return replies.find((reply) => reply.cid === msg.cid)
+  }
+  return {
+    component, replies, diagnostics, dir, base, request,
+    async start() {
+      await request({ type: 'hello', seed })
+      await request({ type: 'open' })
+      await request({ type: 'ready' })
+    },
+    execute(seq, items, extra={}) {
+      return request({
+        type: 'execute', term: 3n, seq, entryHash: digestEntry(3n, buf(`${seq}`)),
+        tickCount: ++tick, items,
+        matchIndex: seq === 0n ? null : [-1n, 0n, seq - 1n], ...extra,
+      })
+    },
+    async close(failed = false) {
+      if (failed) { component.db?.close() }
+      else { await component.close() }
+      fs.rmSync(dir, { recursive: true, force: true })
+    },
+  }
+}
+
+test('Apply commits setup and CMD receipts without hashing receipt writes', async (t) => {
+  const calls = []
+  const f = fixture((db, data, term, seq, index, matchIndex) => {
+    calls.push({ data, term, seq, index, matchIndex })
+    if (seq === 0n) { db.exec(schema); return }
+    const value = Number(data.toString())
+    db.prepare('INSERT INTO items VALUES (?, ?)').run(index, value)
+    return value * 2
+  })
+  try {
+    await f.start()
+    const setup = await f.execute(0n, null)
+    t.equal(setup.type, 'ack')
+    t.deepEqual(setup.receipt.local_digest, Buffer.alloc(16), 'setup uses zero digest')
+    t.deepEqual(setup.receipt.entry_hash, digestEntry(3n, buf('0')), 'setup keeps requested entry hash')
+    t.deepEqual(calls[0], { data: null, term: 3n, seq: 0n, index: 0, matchIndex: null },
+      'setup callback arguments remain unchanged')
+    const result = await f.execute(5n, [buf('7'), buf('9')], { tickCount: 7n })
+    t.deepEqual(result.outcomes, [[0, 14], [0, 18]])
+    t.equal(f.component.tickCount, 7n, 'execution ticks may skip intervening Gate ticks')
+    t.equal(result.tickCount, 7n, 'a multi-item batch acknowledges one execution tick')
+    t.deepEqual(calls[2].matchIndex, [-1n, 0n, 4n])
+    t.ok(Buffer.isBuffer(calls[2].data), 'callback receives payload Buffer')
+    t.equal(readApply(f.component.db).seq, 5n, 'sequence gaps for intervening protocol entries are allowed')
+    const control = new DatabaseSync(path.join(f.dir, 'control'))
+    let patchset
+    try {
+      control.exec(schema)
+      const session = control.createSession()
+      control.exec('INSERT INTO items VALUES (0, 7), (1, 9)')
+      patchset = Buffer.from(session.patchset())
+      session.close()
+    } finally { control.close() }
+    const expected = XXHash128.hash(pack([3n, 5n, patchset, [[0, 14], [0, 18]]]))
+    t.deepEqual(result.receipt.local_digest, expected,
+      'XXH3-128 hashes the command tuple and excludes receipt metadata')
+    t.deepEqual(f.diagnostics, [], 'success emits no diagnostics')
+  } finally { await f.close() }
+  t.end()
+})
+
+test('Apply retains failed-item diagnostics, rolls back items, and preserves outcomes', async (t) => {
+  const original = new Err.ErrorWithCode('rejected item', 123, 456)
+  original.stack = 'custom application stack'
+  const f = fixture(async function applyItems(db, data, term, seq, index) {
+    if (seq === 0n) { db.exec(schema); return }
+    db.prepare('INSERT INTO items VALUES (?, ?)').run(index, index)
+    const kind = data.toString()
+    if (kind === 'reject') { await Promise.resolve(); throw original }
+    if (kind === 'sqlite') { db.exec('INSERT INTO items VALUES (0, 9)') }
+    if (kind === 'encoding') { return Symbol('unencodable') }
+    return index
+  })
+  try {
+    await f.start()
+    await f.execute(0n, null)
+    const warnings = []
+    f.component.on('warn', (warning) => {
+      warnings.push({ message: warning.message, code: warning.code, stack: warning.stack })
+      warning.message = 'listener mutation'
+      warning.code = 999
+      warning.stack = 'changed stack'
+    })
+    let laterWarnings = 0
+    f.component.on('warn', () => { laterWarnings++ })
+    const result = await f.execute(1n, [buf('ok'), buf('reject'), buf('sqlite'), buf('encoding')])
+    t.equal(result.type, 'ack', 'ordinary failures are agreed outcomes')
+    t.notOk(Object.hasOwn(result, 'warnings'), 'execution ACK carries no diagnostics')
+    t.equal(warnings.length, 3)
+    t.equal(laterWarnings, 3, 'every warning reaches later listeners')
+    t.equal(f.diagnostics.filter(({ type }) => type === 'error').length, 0)
+    t.ok(f.component.isOpen, 'ordinary rejected items leave Apply running')
+    t.ok(warnings.every((warning) => warning.code === Err.APPLY_ERROR))
+    t.deepEqual(result.outcomes[1], [1, 'rejected item', 123, 456, original.stack])
+    t.equal(warnings[0].stack, original.stack)
+    t.equal(warnings[0].message, 'rejected item')
+    t.equal(result.outcomes[2][2], Err.SQLITE_ERROR)
+    t.equal(result.outcomes[2][3], 1555)
+    t.equal(result.outcomes[3][2], Err.APPLY_ERROR)
+    t.deepEqual(f.component.db.prepare('SELECT id FROM items').all().map((row) => row.id), [0n],
+      'failed item writes roll back while successful writes survive')
+    t.equal(f.diagnostics.filter((event) => event.type === 'fatal').length, 0)
+    const publicOutcomes = outcomesPublic(result.outcomes)
+    t.equal(publicOutcomes[1].reason.stack, original.stack)
+  } finally { await f.close() }
+  t.end()
+})
+
+test('command digests exclude stacks while rejected result tuples preserve them', (t) => {
+  const outcome = (stack) => [{ status: 'rejected', error: {
+    message: 'failure', code: 55, sqlCode: null, stack,
+  } }]
+  const patchset = buf('independent patch bytes')
+  const expected = XXHash128.hash(pack([9n, 13n, patchset, [[1, 'failure', 55, null]]]))
+  t.deepEqual(digestCmd(9n, 13n, patchset, outcome('A trace')), expected)
+  t.deepEqual(digestCmd(9n, 13n, patchset, outcome('B trace')), expected)
+  t.end()
+})
+
+test('Apply fatal transaction loss and rollback failures preserve the original error', async (t) => {
+  for (const mode of ['transaction loss', 'rollback failure']) {
+    const original = new Error('original apply failure')
+    const f = fixture((db, data, term, seq, index) => {
+      if (seq === 0n) { db.exec(`${schema}; INSERT INTO items VALUES (0, 1)`); return }
+      if (index === 0) { db.exec('INSERT INTO items VALUES (1, 2)'); return }
+      if (mode === 'transaction loss') {
+        db.exec('INSERT OR ROLLBACK INTO items VALUES (0, 3)')
+      }
+      throw original
+    })
+    try {
+      await f.start()
+      await f.execute(0n, null)
+      const events = []
+      f.component.on('error', () => {
+        t.notOk(f.component.isOpen, 'Apply stops before reporting an error')
+        events.push('error')
+      })
+      f.component.on('close', () => { events.push('close') })
+      if (mode === 'rollback failure') {
+        const exec = f.component.db.exec.bind(f.component.db)
+        f.component.db.exec = (sql) => {
+          if (sql === 'ROLLBACK TO monsterft_item') { throw new Error('rollback failed') }
+          return exec(sql)
+        }
+      }
+      const reply = await f.execute(1n, [buf('first'), buf('second')])
+      await f.component.close()
+      t.equal(reply, undefined, `${mode} sends no execution reply`)
+      const fatal = f.diagnostics.filter(({ type }) => type === 'error').at(-1).err
+      t.equal(fatal.code, Err.APPLY_ERROR)
+      t.equal(f.diagnostics.filter(({ type }) => type === 'warn').length, 1)
+      t.equal(f.diagnostics[0].type, 'warn', 'item warning precedes fatal reporting')
+      t.deepEqual(events, ['error', 'close'], 'one terminal error precedes cleanup notification')
+      if (mode === 'rollback failure') {
+        t.ok(f.diagnostics.some(({ err }) => err.stack === original.stack),
+          'rollback failure does not hide the original trace')
+        t.match(fatal.message, /rollback failed/)
+      } else {
+        t.equal(fatal.sqlCode, 1555)
+      }
+      const db = new DatabaseSync(`${f.base}2`, { readOnly: true, readBigInts: true })
+      try {
+        t.equal(readApply(db).seq, 0n, 'failed execution does not advance receipt')
+        t.deepEqual(db.prepare('SELECT id FROM items').all().map((row) => row.id), [0n],
+          'fatal shutdown rolls back the complete batch')
+      } finally { db.close() }
+    } finally { await f.close() }
+  }
+  t.end()
+})
+
+test('Apply close waits for callbacks and suppresses late completion', async (t) => {
+  const entered = deferred()
+  const resume = deferred()
+  const f = fixture(async (db, data, term, seq) => {
+    if (seq === 0n) { db.exec(schema); return }
+    db.exec('INSERT INTO items VALUES (1, 2)')
+    entered.resolve()
+    await resume.promise
+    db.exec('INSERT INTO items VALUES (2, 3)')
+    throw new Error('late error')
+  })
+  try {
+    await f.start()
+    await f.execute(0n, null)
+    const execution = f.execute(1n, [buf('work')])
+    await entered.promise
+    let stopped = false
+    const closing = f.component.close().then(() => { stopped = true })
+    await Promise.resolve()
+    t.notOk(stopped, 'close cannot claim the callback has stopped early')
+    resume.resolve()
+    t.equal(await execution, undefined, 'no reply escapes shutdown')
+    await closing
+    t.deepEqual(f.diagnostics, [], 'late application failure remains quiet')
+    const db = new DatabaseSync(`${f.base}2`, { readOnly: true, readBigInts: true })
+    try {
+      t.equal(db.prepare('SELECT count(*) AS count FROM items').get().count, 0n)
+      t.equal(readApply(db).seq, 0n)
+    } finally { db.close() }
+  } finally { await f.close() }
+  t.end()
+})
+
+test('Apply retains its failed close and never retries or acknowledges cleanup', async (t) => {
+  const f = fixture(() => null)
+  let db
+  let close
+  try {
+    await f.start()
+    let closed = 0
+    let attempts = 0
+    let reentrant
+    f.component.on('close', () => { closed++ })
+    f.component.on('error', () => {
+      t.notOk(f.component.isOpen, 'failed cleanup reports after Apply stops')
+      reentrant = f.component.close()
+    })
+    db = f.component.db
+    close = db.close.bind(db)
+    const original = new Err.ErrorWithCode('injected close failure', Err.SQLITE_ERROR, 10)
+    db.close = () => { attempts++; throw original }
+    const reply = await f.request({ type: 'close', cid: 'failed-close' })
+    t.equal(reply?.type, 'err', 'failed teardown returns ERR instead of timing out')
+    t.equal(reply?.cid, 'failed-close', 'error refers to the close request')
+    t.equal(reply?.message, 'DB2 close injected close failure')
+    t.equal(reply?.code, Err.SQLITE_ERROR)
+    t.equal(reply?.sqlCode, 10)
+    t.equal(reply?.stack, original.stack, 'error keeps the original trace')
+    t.equal(f.component.db, db, 'failed close retains the unclosed connection')
+    t.equal(f.diagnostics.filter(({ type }) => type === 'error').length, 1,
+      'close failure is also reported locally once')
+    t.equal(closed, 0, 'failed cleanup cannot emit close')
+    const work = f.component.close()
+    t.equal(reentrant, work, 'reentrant close shares the original cleanup promise')
+    t.equal(f.component.close(), work, 'later close shares the original cleanup promise')
+    await work.then(() => t.fail('failed cleanup cannot resolve'), (err) => {
+      t.equal(err, original, 'later close preserves the original failure object')
+    })
+    db.close = close
+    const repeated = await f.request({ type: 'close' })
+    t.equal(repeated.type, 'err', 'removing the fault cannot make a later close succeed')
+    t.equal(repeated.message, reply.message)
+    t.equal(repeated.code, reply.code)
+    t.equal(repeated.sqlCode, reply.sqlCode)
+    t.equal(repeated.stack, reply.stack)
+    t.equal(attempts, 1, 'cleanup executes once')
+    t.equal(f.component.db, db, 'later calls leave the failed owner unchanged')
+    t.equal(closed, 0)
+    t.equal(f.diagnostics.filter(({ type }) => type === 'error').length, 1,
+      'repeated close does not emit the cleanup diagnostic again')
+  } finally {
+    if (db && close) { db.close = close }
+    await f.close(true)
+  }
+  t.end()
+})
+
+test('Apply warning listeners may close without subsequent item work', async (t) => {
+  let calls = 0
+  const f = fixture((db, data, term, seq) => {
+    if (seq === 0n) { db.exec(schema); return }
+    calls++
+    db.exec('INSERT INTO items VALUES (1, 2)')
+    throw new Error('stop after warning')
+  })
+  try {
+    await f.start()
+    await f.execute(0n, null)
+    f.component.on('warn', () => { f.component.close() })
+    const reply = await f.execute(1n, [buf('first'), buf('second')])
+    await f.component.close()
+    t.equal(reply, undefined)
+    t.equal(calls, 1)
+    t.equal(f.diagnostics.length, 1, 'shutdown prevents additional errors and warnings')
+    const db = new DatabaseSync(`${f.base}2`, { readOnly: true, readBigInts: true })
+    try {
+      t.equal(db.prepare('SELECT count(*) AS count FROM items').get().count, 0n)
+      t.equal(readApply(db).seq, 0n)
+    } finally { db.close() }
+  } finally { await f.close() }
+  t.end()
+})
+
+test('Apply stops when a warning listener throws, including during reentrant close', async (t) => {
+  for (const closeFirst of [false, true]) {
+    let calls = 0
+    const f = fixture((db, data, term, seq) => {
+      if (seq === 0n) { db.exec(schema); return }
+      calls++
+      db.exec('INSERT INTO items VALUES (1, 2)')
+      throw new Error('rejected item')
+    })
+    try {
+      await f.start()
+      await f.execute(0n, null)
+      const original = new Err.ErrorWithCode('warning listener failed', 321, 654)
+      const events = []
+      const laterSql = []
+      let reported = false
+      let repeatedClose
+      let reentrantExecution
+      const exec = f.component.db.exec.bind(f.component.db)
+      f.component.db.exec = (sql) => {
+        if (reported) { laterSql.push(sql) }
+        return exec(sql)
+      }
+      f.component.prependListener('error', () => { throw new Error('error listener failed') })
+      f.component.on('error', (err) => {
+        reported = true
+        events.push('error')
+        t.notOk(f.component.isOpen, 'error listeners observe stopped Apply')
+        t.equal(err, original, 'existing ErrorWithCode is preserved')
+        repeatedClose = f.component.close()
+        reentrantExecution = f.execute(2n, [buf('reentrant')])
+      })
+      f.component.on('close', () => { events.push('close') })
+      f.component.on('warn', () => {
+        if (closeFirst) { f.component.close() }
+        throw original
+      })
+      let laterWarnings = 0
+      f.component.on('warn', () => { laterWarnings++ })
+      t.equal(await f.execute(1n, [buf('first'), buf('second')]), undefined)
+      await f.component.close()
+      t.equal(repeatedClose, f.component.close(), 'reentrant close reuses the same teardown')
+      t.equal(await reentrantExecution, undefined, 'reentrant execution is rejected quietly')
+      t.equal(calls, 1, 'no later item or reentrant callback runs')
+      t.equal(laterWarnings, 1, 'remaining warning listeners receive the current warning')
+      t.deepEqual(laterSql, [], 'no item SQL or commit follows the listener failure')
+      t.deepEqual(events, ['error', 'close'], 'error precedes a single cleanup notification')
+      const diagnostic = f.diagnostics.find(({ type }) => type === 'error').err
+      t.equal(diagnostic.code, 321)
+      t.equal(diagnostic.sqlCode, 654)
+      t.equal(diagnostic.stack, original.stack)
+      const db = new DatabaseSync(`${f.base}2`, { readOnly: true, readBigInts: true })
+      try {
+        t.equal(readApply(db).seq, 0n, 'the receipt remains at setup')
+        t.equal(db.prepare('SELECT count(*) AS n FROM items').get().n, 0n,
+          'shutdown rolls back all uncommitted item writes')
+      } finally { db.close() }
+    } finally { await f.close() }
+  }
+  t.end()
+})
+
+test('Apply reports close listener failures without repeating teardown', async (t) => {
+  const f = fixture(() => null)
+  try {
+    await f.start()
+    const original = Object.assign(new Error('close listener failed'), {
+      code: 'ERR_SQLITE_ERROR', errcode: 5,
+    })
+    const events = []
+    let closes = 0
+    let repeatedClose
+    const close = f.component.db.close.bind(f.component.db)
+    f.component.db.close = () => { closes++; close() }
+    f.component.prependListener('error', () => { throw new Error('error listener failed') })
+    f.component.on('error', (err) => {
+      events.push('error')
+      t.notOk(f.component.isOpen)
+      t.equal(f.component.db, null, 'cleanup succeeded before the close listener ran')
+      t.equal(err.code, Err.SQLITE_ERROR, 'listener errors are normalized')
+      t.equal(err.sqlCode, 5)
+      t.equal(err.stack, original.stack)
+      repeatedClose = f.component.close()
+    })
+    f.component.on('close', () => { events.push('close'); throw original })
+    f.component.on('close', () => { events.push('later close listener') })
+    const closing = f.component.close()
+    await closing
+    t.equal(repeatedClose, closing)
+    t.equal(closes, 1, 'an error from close cannot restart database teardown')
+    t.deepEqual(events, ['close', 'error', 'later close listener'])
+    t.equal(f.diagnostics.length, 1, 'a throwing error listener cannot hide the original error')
+  } finally { await f.close() }
+  t.end()
+})
+
+test('Apply setup errors stay fatal without per-item warnings and cannot commit ended transactions', async (t) => {
+  for (const mode of ['throw', 'ended']) {
+    const f = fixture((db) => {
+      db.exec(schema)
+      if (mode === 'throw') { throw new Error('setup error') }
+      db.exec('ROLLBACK')
+    })
+    try {
+      await f.start()
+      const events = []
+      f.component.on('error', () => {
+        t.notOk(f.component.isOpen, 'fatal setup error observes stopped Apply')
+        events.push('error')
+      })
+      f.component.on('close', () => { events.push('close') })
+      const reply = await f.execute(0n, null)
+      await f.component.close()
+      t.deepEqual(events, ['error', 'close'], 'setup failure reports before successful cleanup')
+      t.equal(reply, undefined, 'fatal setup failure sends no reply')
+      const diagnostic = f.diagnostics.find(({ type }) => type === 'error').err
+      t.equal(diagnostic.code, Err.APPLY_ERROR)
+      t.match(diagnostic.message, mode === 'throw' ? /setup error/ : /DB2 seq0 transaction ended/)
+      t.equal(f.diagnostics.filter((event) => event.type === 'warn').length, 0)
+      t.equal(f.diagnostics.filter((event) => event.type === 'fatal').length, 0)
+      const db = new DatabaseSync(`${f.base}2`, { readOnly: true, readBigInts: true })
+      try { t.equal(readApply(db).seq, -1n) } finally { db.close() }
+    } finally { await f.close() }
+  }
+  t.end()
+})
+
+test('Apply reports setup failures locally without attempting error transmission', async (t) => {
+  for (const asynchronous of [false, true]) {
+    const original = new Error('original setup failure')
+    const f = fixture(() => {
+      if (asynchronous) { return Promise.reject(original) }
+      throw original
+    })
+    try {
+      await f.start()
+      let sends = 0
+      f.component._localSend = () => { sends++; throw new Error('transport is broken') }
+      t.equal(await f.execute(0n, null), undefined)
+      await f.component.close()
+      t.equal(sends, 0, 'fatal reporting does not depend on local transport')
+      t.equal(f.diagnostics.length, 1, 'the original error is reported once')
+      const { type, err } = f.diagnostics[0]
+      t.equal(type, 'error')
+      t.equal(err.message, '(apply) original setup failure')
+      t.equal(err.code, Err.APPLY_ERROR)
+      t.equal(err.stack, original.stack, 'the original trace survives fatal reporting')
+      t.equal(f.component.db, null, 'Apply closes its own database')
+    } finally { await f.close() }
+  }
+  t.end()
+})
+
+test('Apply distinguishes malformed startup requests from lifecycle violations', async (t) => {
+  for (const [step, request, code] of [
+    ['new', { type: 'open' }, Err.MONSTER_ILLEGAL],
+    ['new', { type: 'hello', seed: Buffer.alloc(16) }, Err.RPC_ILLEGAL],
+    ['hello', { type: 'ready' }, Err.MONSTER_ILLEGAL],
+    ['open', { type: 'execute' }, Err.MONSTER_ILLEGAL],
+    ['ready', { type: 'open' }, Err.MONSTER_ILLEGAL],
+    ['ready', { type: 'ready' }, Err.MONSTER_ILLEGAL],
+  ]) {
+    let calls = 0
+    const f = fixture(() => { calls++ })
+    try {
+      if (step !== 'new') { await f.request({ type: 'hello', seed }) }
+      if (step === 'open' || step === 'ready') { await f.request({ type: 'open' }) }
+      if (step === 'ready') { await f.request({ type: 'ready' }) }
+      const reply = request.type === 'execute' ? await f.execute(0n, null) : await f.request(request)
+      t.equal(reply, undefined, `${request.type} at ${step}: rejected without ACK`)
+      t.deepEqual(f.diagnostics.map(({ type, err }) => [type, err.code]), [['error', code]])
+      t.notOk(f.component.isOpen, 'invalid startup request stops Apply')
+      t.equal(f.component.tickCount, 0n, 'invalid startup request cannot advance execution')
+      t.equal(calls, 0, 'invalid startup request cannot invoke a callback')
+    } finally { await f.close() }
+  }
+  t.end()
+})
+
+test('Apply rejects unsupported operations before hello and after startup', async (t) => {
+  for (const started of [false, true]) for (const type of ['unknown', 'capture', 'tick']) {
+    let calls = 0
+    const f = fixture(() => { calls++ })
+    try {
+      if (started) { await f.start() }
+      t.equal(await f.request({ type }), undefined, `${type}: unsupported request has no ACK`)
+      t.deepEqual(f.diagnostics.map(({ type, err }) => [type, err.code]), [['error', Err.RPC_ILLEGAL]])
+      t.notOk(f.component.isOpen, 'unsupported request stops Apply')
+      t.equal(f.component.tickCount, 0n, 'unsupported request cannot advance execution')
+      t.equal(calls, 0, 'unsupported request cannot invoke a callback')
+    } finally { await f.close() }
+  }
+  t.end()
+})
+
+test('Apply rejects duplicate execution and hello after startup', async (t) => {
+  let calls = 0
+  const f = fixture(() => { calls++ })
+  try {
+    const hello1 = await f.request({ type: 'hello', seed })
+    const hello2 = await f.request({ type: 'hello', seed })
+    t.equal(hello1.type, 'ack')
+    t.equal(hello2.type, 'ack')
+    await f.request({ type: 'open' })
+    await f.request({ type: 'ready' })
+    await f.execute(0n, null)
+    const reply = await f.execute(0n, null)
+    t.equal(reply, undefined, 'invalid execution sends no ERR')
+    t.equal(f.diagnostics.find(({ type }) => type === 'error').err.code, Err.MONSTER_ILLEGAL)
+    t.equal(calls, 1, 'completed setup is never reapplied')
+  } finally { await f.close() }
+  const second = fixture(() => {})
+  try {
+    await second.start()
+    t.equal(await second.request({ type: 'hello', seed }), undefined, 'post-startup hello has no ACK')
+    t.notOk(second.component.isOpen)
+    t.equal(second.diagnostics.filter((event) => event.type === 'error').length, 1)
+    t.equal(second.diagnostics.find(({ type }) => type === 'error').err.code, Err.MONSTER_ILLEGAL)
+    t.equal(second.diagnostics.filter((event) => event.type === 'fatal').length, 0)
+  } finally { await second.close() }
+  t.end()
+})
+
+test('Apply rejects nonadvancing execution ticks before SQL or callbacks', async (t) => {
+  for (const [label, tickCount, initialized] of [
+    ['initial zero', 0n, false], ['equal', 5n, true], ['lower', 4n, true],
+  ]) {
+    let calls = 0
+    const f = fixture((db, data, term, seq) => {
+      calls++
+      if (seq === 0n) { db.exec(schema); return }
+      db.exec('INSERT INTO items VALUES (1, 2)')
+    })
+    try {
+      await f.start()
+      if (initialized) { await f.execute(0n, null, { tickCount: 5n }) }
+      const previous = readApply(f.component.db)
+      const previousCalls = calls
+      const sql = []
+      const exec = f.component.db.exec.bind(f.component.db)
+      f.component.db.exec = (statement) => { sql.push(statement); return exec(statement) }
+      let stoppedAtError = false
+      f.component.on('error', () => { stoppedAtError = !f.component.isOpen })
+      const reply = await f.execute(initialized ? 1n : 0n,
+        initialized ? [buf('new command')] : null, { tickCount })
+      await f.component.close()
+      t.equal(reply, undefined, `${label} tick sends no execution reply`)
+      t.deepEqual(f.diagnostics.map(({ type, err }) => [type, err.code, err.message]),
+        [['error', Err.MONSTER_ILLEGAL, 'Apply execution tickCount is not advancing']],
+        `${label} tick reports one ordering error`)
+      t.ok(stoppedAtError, `${label} tick stops Apply before reporting the error`)
+      t.equal(calls, previousCalls, `${label} tick cannot invoke a callback`)
+      t.deepEqual(sql, [], `${label} tick cannot begin a transaction or execute SQL`)
+      t.equal(f.component.tickCount, initialized ? 5n : 0n, 'rejection preserves the prior tick')
+      const db = new DatabaseSync(`${f.base}2`, { readOnly: true, readBigInts: true })
+      try {
+        t.deepEqual(readApply(db), previous, `${label} tick preserves the durable receipt`)
+        if (initialized) {
+          t.equal(db.prepare('SELECT count(*) AS n FROM items').get().n, 0n,
+            'the rejected command leaves application data unchanged')
+        }
+      } finally { db.close() }
+    } finally { await f.close() }
+  }
+  t.end()
+})
+
+test('Apply rejects execution while another callback is active', async (t) => {
+  const entered = deferred()
+  const release = deferred()
+  let calls = 0
+  const f = fixture(async () => {
+    calls++
+    entered.resolve()
+    await release.promise
+  })
+  try {
+    await f.start()
+    const first = f.execute(0n, null)
+    await entered.promise
+    t.equal(await f.execute(1n, [buf('overlap')]), undefined, 'overlapping execution has no ACK')
+    t.deepEqual(f.diagnostics.map(({ type, err }) => [type, err.code, err.message]),
+      [['error', Err.MONSTER_ILLEGAL, 'Apply is already executing']])
+    t.notOk(f.component.isOpen, 'overlapping execution stops Apply')
+    t.equal(f.component.tickCount, 1n, 'overlapping execution cannot consume its tick')
+    t.equal(calls, 1, 'only the original callback runs')
+    release.resolve()
+    t.equal(await first, undefined, 'the stopped execution has no ACK')
+  } finally {
+    release.resolve()
+    await f.close()
+  }
+  t.end()
+})
+
+test('Apply preserves the correct receipt on either side of COMMIT failure', async (t) => {
+  for (const committed of [false, true]) {
+    let executions = 0
+    const f = fixture((db, data, term, seq) => {
+      if (seq === 0n) { db.exec(schema); return }
+      executions++
+      db.exec('INSERT INTO items VALUES (1, 2)')
+    })
+    let reopened = null
+    try {
+      await f.start()
+      await f.execute(0n, null)
+      const exec = f.component.db.exec.bind(f.component.db)
+      f.component.db.exec = (sql) => {
+        if (sql === 'COMMIT') {
+          if (committed) { exec(sql) }
+          throw new Error('injected commit failure')
+        }
+        return exec(sql)
+      }
+      const reply = await f.execute(1n, [buf('work')])
+      await f.component.close()
+      t.equal(reply, undefined, 'failed commit sends no execution reply')
+      t.match(f.diagnostics.find(({ type }) => type === 'error').err.message, /injected commit failure/)
+      const closeReply = await f.request({ type: 'close' })
+      t.equal(closeReply.type, 'ack', 'a fatally closed Apply still confirms completed teardown')
+      const replies = []
+      const errors = []
+      reopened = new MonsterApply('node', (to, frame) => replies.push(decodeFrame(frame)),
+        f.base, () => { executions++ })
+      reopened.on('error', (err) => errors.push(err))
+      const receive = async (msg) => {
+        await reopened.onReceive('gate', encodeFrame(msg))
+        return replies.find((reply) => reply.cid === msg.cid)
+      }
+      await receive({ type: 'hello', cid: 'h', seed })
+      await receive({ type: 'open', cid: 'o' })
+      await receive({ type: 'ready', cid: 'r' })
+      t.equal(readApply(reopened.db).seq, committed ? 1n : 0n)
+      t.equal(reopened.db.prepare('SELECT count(*) AS count FROM items').get().count,
+        committed ? 1n : 0n, 'data and receipt share the same commit boundary')
+      t.equal(executions, 1, 'opening never executes old apply work')
+      if (committed) {
+        const duplicate = await receive({
+          type: 'execute', cid: 'duplicate', tickCount: 1n, term: 3n, seq: 1n,
+          entryHash: digestEntry(3n, buf('1')), items: [buf('work')], matchIndex: [0n],
+        })
+        t.equal(duplicate, undefined, 'duplicate execution cannot produce a reply')
+        t.equal(errors[0].code, Err.MONSTER_ILLEGAL)
+        t.equal(executions, 1, 'committed execution cannot be repeated after a lost ACK')
+      }
+    } finally {
+      if (reopened !== null) { await reopened.close() }
+      await f.close()
+    }
+  }
+  t.end()
+})
+
+test('Apply validates execution and frame checksums before invoking user code', async (t) => {
+  for (const kind of ['invalid items', 'corrupt frame', 8, 15, 17, 32]) {
+    let calls = 0
+    const f = fixture(() => { calls++ })
+    try {
+      await f.start()
+      if (kind !== 'corrupt frame') {
+        const reply = kind === 'invalid items'
+          ? await f.execute(0n, [buf('not setup')])
+          : await f.execute(0n, null, { entryHash: Buffer.alloc(kind) })
+        t.equal(reply, undefined)
+        t.equal(f.diagnostics.find(({ type }) => type === 'error').err.code, Err.RPC_ILLEGAL)
+      } else {
+        const frame = encodeFrame({ type: 'execute', cid: 'corrupt' })
+        frame[0] ^= 1
+        await f.component.onReceive('gate', frame)
+        t.equal(f.diagnostics.find(({ type }) => type === 'error').err.code, Err.FRAME_CORRUPT)
+      }
+      await f.component.close()
+      t.equal(calls, 0)
+      const db = new DatabaseSync(`${f.base}2`, { readOnly: true, readBigInts: true })
+      try { t.equal(readApply(db).seq, -1n) } finally { db.close() }
+    } finally { await f.close() }
+  }
+  t.end()
+})
+
+test('Apply validates execution fields before changing its receipt', async (t) => {
+  const malformed = [
+    { cid: undefined }, { cid: '' }, { type: 1 },
+    { tickCount: -1n }, { tickCount: 1 }, { tickCount: undefined },
+    { term: -1n }, { term: 9_223_372_036_854_775_808n }, { term: 1 },
+    { seq: -1n }, { seq: 0 }, { entryHash: 'hash' },
+    { matchIndex: [] }, { items: [] },
+  ]
+  for (const extra of malformed) {
+    let calls = 0
+    const f = fixture(() => { calls++ })
+    try {
+      await f.start()
+      t.equal(await f.execute(0n, null, extra), undefined, 'invalid execute has no success reply')
+      await f.component.close()
+      t.equal(f.diagnostics.find(({ type }) => type === 'error').err.code, Err.RPC_ILLEGAL)
+      t.equal(calls, 0, 'invalid execute cannot invoke apply')
+      const db = new DatabaseSync(`${f.base}2`, { readOnly: true, readBigInts: true })
+      try { t.equal(readApply(db).seq, -1n, 'receipt remains initial') } finally { db.close() }
+    } finally { await f.close() }
+  }
+  t.end()
+})
+
+test('one CMD session captures only the successful net batch transition', async (t) => {
+  const f = fixture((db, data, term, seq, index) => {
+    if (seq === 0n) { db.exec(schema); return }
+    if (index === 0) { db.exec('INSERT INTO items VALUES (1, 10), (2, 20)') }
+    if (index === 1) { db.exec('DELETE FROM items WHERE id = 1') }
+    if (index === 2) {
+      db.exec('UPDATE items SET value = 99; INSERT INTO items VALUES (3, 30)')
+      throw new Error('rollback this item')
+    }
+    return index
+  })
+  try {
+    await f.start()
+    await f.execute(0n, null)
+    const events = []
+    let patchset
+    const create = f.component.db.createSession.bind(f.component.db)
+    f.component.db.createSession = (...args) => {
+      events.push('create')
+      const session = create(...args)
+      const extract = session.patchset.bind(session)
+      const close = session.close.bind(session)
+      session.patchset = () => {
+        events.push('patchset')
+        patchset = Buffer.from(extract())
+        return patchset
+      }
+      session.close = () => { events.push('close'); close() }
+      return session
+    }
+    const write = f.component._writeReceipt.bind(f.component)
+    f.component._writeReceipt = (receipt) => { events.push('receipt'); write(receipt) }
+    const result = await f.execute(1n, [buf('insert'), buf('delete'), buf('reject')])
+    t.deepEqual(events, ['create', 'patchset', 'close', 'receipt'])
+    t.deepEqual(result.outcomes.map((item) => item[0]), [0, 0, 1])
+    const copy = new DatabaseSync(path.join(f.dir, 'patchset-copy'))
+    try {
+      copy.exec(schema)
+      const tables = []
+      t.ok(copy.applyChangeset(patchset, { filter: (table) => { tables.push(table); return true } }))
+      t.deepEqual(tables, ['items'], 'receipt table is absent from the patchset')
+      t.deepEqual(copy.prepare('SELECT * FROM items').all().map((row) => ({ ...row })),
+        [{ id: 2, value: 20 }], 'insert/delete cancel and rejected writes leave no changes')
+    } finally { copy.close() }
+  } finally { await f.close() }
+  t.end()
+})
+
+test('session, receipt, disk-full and RELEASE failures abort the entire CMD', async (t) => {
+  for (const mode of ['patchset', 'receipt error', 'receipt ignored', 'disk full', 'release']) {
+    const original = new Error('original failed item')
+    let lostTransaction = false
+    let calls = 0
+    const f = fixture((db, data, term, seq, index) => {
+      if (seq === 0n) { db.exec(schema); return }
+      calls++
+      if (mode === 'disk full' && index === 1) {
+        try { db.exec('INSERT INTO items VALUES (2, zeroblob(1000000))') }
+        catch (err) { lostTransaction = !db.isTransaction; throw err }
+      }
+      db.prepare('INSERT INTO items VALUES (?, ?)').run(index, index)
+      if (mode === 'release' && index === 1) { throw original }
+      return index
+    })
+    try {
+      await f.start()
+      await f.execute(0n, null)
+      let closed = 0
+      const create = f.component.db.createSession.bind(f.component.db)
+      f.component.db.createSession = (...args) => {
+        const session = create(...args)
+        const close = session.close.bind(session)
+        session.close = () => { closed++; close() }
+        if (mode === 'patchset') {
+          session.patchset = () => { throw new Error('patchset failed') }
+        }
+        return session
+      }
+      if (mode.startsWith('receipt')) {
+        f.component.db.exec(`CREATE TRIGGER bad_receipt BEFORE UPDATE ON monsterft_meta_apply
+          BEGIN SELECT RAISE(${mode === 'receipt ignored' ? 'IGNORE' : "ABORT, 'receipt failed'"}); END`)
+      }
+      if (mode === 'disk full') {
+        const pages = f.component.db.prepare('PRAGMA page_count').get().page_count
+        f.component.db.exec(`PRAGMA max_page_count = ${pages}`)
+      }
+      if (mode === 'release') {
+        const exec = f.component.db.exec.bind(f.component.db)
+        f.component.db.exec = (sql) => {
+          if (sql === 'RELEASE monsterft_item' && calls === 2) { throw new Error('release failed') }
+          return exec(sql)
+        }
+      }
+      t.equal(await f.execute(1n, [buf('first'), buf('second')]), undefined, `${mode}: no ACK`)
+      await f.component.close()
+      t.equal(closed, 1, `${mode}: session closed exactly once`)
+      const errors = f.diagnostics.filter(({ type }) => type === 'error').map(({ err }) => err)
+      const last = errors.at(-1)
+      t.equal(last.code, Err.APPLY_ERROR)
+      if (mode === 'release') {
+        t.equal(errors.length, 1, 'rollback failure produces one terminal error')
+        t.ok(f.diagnostics.some(({ type, err }) => type === 'warn' && err.stack === original.stack),
+          'the original callback trace remains in its warning')
+        t.match(last.message, /DB2 item rollback release failed/)
+      } else if (mode === 'disk full') {
+        t.ok(lostTransaction, 'real SQLITE_FULL ends the transaction')
+        t.equal(last.sqlCode, 13)
+      } else {
+        t.match(last.message, mode === 'patchset' ? /patchset failed/ : /DB2 write apply/)
+      }
+      const db = new DatabaseSync(`${f.base}2`, { readOnly: true, readBigInts: true })
+      try {
+        t.equal(readApply(db).seq, 0n, 'receipt stays at setup')
+        t.equal(db.prepare('SELECT count(*) AS n FROM items').get().n, 0n, 'all item work rolled back')
+      } finally { db.close() }
+    } finally { await f.close() }
+  }
+  t.end()
+})

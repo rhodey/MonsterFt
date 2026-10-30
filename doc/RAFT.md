@@ -1,623 +1,247 @@
-# RaftNode
+# RaftEngine
 
-Function notes for [src/node.js](../src/node.js), in source order, followed by
-the error, TCP, and stream helpers it depends on. Trivial getters and direct
-delegation helpers are omitted, and nested callbacks are covered with their
-enclosing method. Each findings area lists only unresolved items: open,
-deferred, skipped by decision, or accepted. "None" means no unresolved item
-is recorded.
-
-## Review rules
-
-- Report a finding only when a supported trigger reaches it: public
-  operations, real election timers, genuine protocol messages, transport
-  delivery, or documented callbacks. Read-only instrumentation is useful,
-  but tests that call private methods or edit internal state do not show
-  that a failure is reachable.
-- Keep the accepted and deferred items here, in [AGENTS.md](../AGENTS.md),
-  [LOG.md](LOG.md), and [MONSTER.md](MONSTER.md) unless the user
-  reopens them.
-
-## Accepted limitations
-
-- **Exotic thrown values:** a frozen `ErrorWithCode` or a null-prototype
-  object makes `wrapError` throw. See `_apply` and `wrapError`.
-- **Sparse arrays:** out of scope under AGENTS.md. See `_routeApply`.
-- **Input ownership:** callers must not change submitted Buffers or batch
-  arrays until the operation settles. See `_fwdToLeader` and LOG.md.
-- **Timer bounds:** timeout options require positive safe integers, with no
-  upper bound. Values beyond Node's timer range, 2^31-1 ms, are accepted, and
-  Node then fires those timers after 1 ms with a warning.
-- **Clock:** a backwards `Date.now()` jump can disrupt elections, as noted in
-  AGENTS.md.
-- **Versions:** mixed-version clusters are unsupported.
+Function notes for [src/raft.js](../src/raft.js), in source
+order. Trivial helpers are omitted, and nested callbacks are covered with their
+enclosing function.
 
 ## `constructor`
 
-Validates node configuration and initializes the log, transport, and Raft
-state. Establishes transport-error reporting and fatal shutdown handling.
+Prepares the Raft engine for a Proc and its cluster.
 
 ### findings
 
-- **Deferred: an explicit `undefined` does not select a default.**
-  `{ ...defaults, ...opts }` keeps it, so `electionTimeout`, `appendTimeout`,
-  `rpcMax`, `rpcMaxBytes`, `applyMax`, and SQLiteLog's `iterStepSize` throw
-  `ARGUMENT_ILLEGAL`. `apply` and `quorum` do fall back to their defaults.
-  Decision: valid, but not a current focus.
+- **Deferred: an explicit `undefined` does not select some defaults.**
+  `electionTimeout`, `appendTimeout`, `rpcMax`, and `rpcMaxBytes` override their
+  defaults with `undefined` and then fail validation. Leave this behavior
+  unchanged for now.
 
-## `_throwIfClosing`
+## `followers`
 
-Throws `NODE_NOT_OPEN` once shutdown has begun.
-
-### findings
-
-None.
-
-## `_emitSafe`
-
-Emits an event without letting a listener's exception prevent delivery to
-later listeners. Reports listener failures as error events.
+Returns the leader's live peers, sorted by node ID. Other roles return an empty
+array.
 
 ### findings
 
-None.
+no findings
 
-## `_change`
+## `entry`
 
-Emits a `change` event describing the node's current state.
-
-### findings
-
-None.
-
-## `_stopTimers`
-
-Clears the election timeout and heartbeat interval.
+Returns a retained log record at the requested sequence, or null when it is
+unavailable.
 
 ### findings
 
-None.
+no findings
 
-## `_isQuorum`
+## `warn`
 
-Checks whether the supplied peers and eligible local node form a quorum.
-Defaults to the current followers.
-
-### findings
-
-None.
-
-## `_isQuorumErr`
-
-Checks whether the supplied peer failures make quorum impossible.
+Reports a warning locally through the owning Proc.
 
 ### findings
 
-None.
+no findings
 
-## `_persistElection`
+## `event`
 
-Saves the current election term and vote when they have changed. Returns
-whether persistence succeeded, reporting failure as fatal.
-
-### findings
-
-None.
-
-## `_replyVote`
-
-Replies to a vote request only after ensuring any granted vote is durable.
+Publishes a protocol event for Gate with a snapshot of node status.
 
 ### findings
 
-None.
+no findings
 
-## `_raceShutdown`
+## `change`
 
-Cancels an operation's wait on shutdown while allowing an already-completing
-operation to surface its more specific result.
-
-### findings
-
-None.
-
-## `_delay`
-
-Waits for a delay, rejecting if shutdown begins first.
+Publishes a completed input's final node status, suppressing unchanged snapshots.
 
 ### findings
 
-None.
+no findings
 
-## `_awaitResponse`
+## `finishAppend`
 
-Waits for a valid response from the expected peer to a particular request.
-Rejects on cancellation or deadline failure.
-
-### findings
-
-None.
-
-## `_sendAndAwaitResponse`
-
-Sends an RPC and waits for its response within the supplied timeout. Rejects
-new requests after shutdown begins.
+Notifies a pending append's caller of completion or failure.
 
 ### findings
 
-None.
+no findings
 
-## `_sendAndAwaitAck`
+## `request`
 
-Sends ping, replication, or forwarded-append requests and validates their
-acknowledgements. Reports RPC errors and updates peer liveness for replies
-in the current term.
+Sends an RPC and reports its reply or timeout to the caller.
 
 ### findings
 
-None.
+no findings
 
-## `_subscribeApply`
+## `stop`
 
-Creates a waiter for application results covering an inclusive sequence range.
-
-### findings
-
-None.
-
-## `_routeApply`
-
-Delivers application results to matching waiters and resolves completed waits.
+Stops Raft protocol work.
 
 ### findings
 
-- **Accepted: holes in an application result array are never routed.**
-  `forEach` skips holes, and `_apply` checks only the array length. A waiter
-  covering a hole never resolves, and no deadline rescues it because
-  replication has already succeeded. Results filled only for non-null
-  payloads leak one never-settled no-op waiter per leadership. A fully sparse
-  `new Array(n)` leaves leader-local appends pending, and forwarded appends
-  time out, although the commands were applied. Decision: the application
-  must return one result per entry; Arrays with holes remain out of scope.
+no findings
 
-## `_rejectApplyWaiters`
+## `resetElection`
 
-Rejects every currently registered application waiter with the supplied
-error.
+Schedules a new election deadline for a node that is not the leader.
 
 ### findings
 
-None.
+no findings
 
-## `_apply`
+## `start`
 
-Applies committed entries in order through the configured callback. Delivers
-results, advances the applied boundary, and emits `apply`. Failures reject
-application waiters and trigger fatal shutdown.
+Starts election timing.
 
 ### findings
 
-- **Accepted limitation: exotic thrown values can stall application.** The
-  catch block calls `wrapError` before rejecting waiters or starting fatal
-  shutdown. If the application throws a frozen `ErrorWithCode` or a
-  null-prototype object, `wrapError` throws and skips both steps.
-  `_applyPrev` stays rejected, so all later application is skipped. The
-  node stays open with no error event, and the leader's append never
-  settles. Decision: leave unchanged as a JavaScript-specific case.
+no findings
 
-## `_beginLeaderReady`
+## `cancelLeadership`
 
-Creates a readiness waiter for the supplied leadership term.
+Cancels leader replication work and rejects pending appends.
 
 ### findings
 
-None.
+no findings
 
-## `_cancelLeaderReady`
+## `follower`
 
-Rejects and clears the current leadership readiness waiter if one exists.
-
-### findings
-
-None.
-
-## `_replicationActive`
-
-Checks whether peer replication remains valid for the current leadership.
+Transitions the node to follower state.
 
 ### findings
 
-None.
+no findings
 
-## `_replicationState`
+## `advanceTerm`
 
-Returns or creates a peer's replication state for the requested term.
-
-### findings
-
-None.
-
-## `_resolveReplicationWaiters`
-
-Resolves waits for log ranges that a peer has confirmed replicated.
+Adopts a newer election term as a follower.
 
 ### findings
 
-None.
+no findings
 
-## `_cancelReplicationState`
+## `voteSelf`
 
-Cancels a peer's replication work and rejects its pending waits.
-
-### findings
-
-None.
-
-## `_cancelReplication`
-
-Cancels leadership readiness and all peer replication work with the supplied
-error.
+Starts an election for this node.
 
 ### findings
 
-None.
+no findings
 
-## `_reset`
+## `voteRequest`
 
-Resets volatile Raft state and cancels timers and replication work.
-
-### findings
-
-None.
-
-## `_toFollower`
-
-Transitions to follower state under the supplied leader, ending prior
-leadership work. Optionally restarts the election timer and announces the
-state change.
+Responds to a candidate's request for a vote.
 
 ### findings
 
-None.
+no findings
 
-## `_advanceTerm`
+## `voteReply`
 
-Adopts a higher term durably and becomes a follower. Returns whether the
-transition completed without shutdown.
-
-### findings
-
-None.
-
-## `_pruneFollowers`
-
-Removes inactive followers and reports whether quorum remains. Announces
-changes to the surviving follower set while quorum is available.
+Processes peer votes to determine whether this node has won its election.
 
 ### findings
 
-None.
+no findings
 
-## `_startElectionTimer`
+## `appendEntry`
 
-Schedules election attempts when leader activity has been absent long enough.
-
-### findings
-
-None.
-
-## `_startPingTimer`
-
-Starts periodic heartbeats and sends an initial round immediately.
+Appends a leader entry and waits for quorum commitment or failure.
 
 ### findings
 
-None.
+- **Accepted: an append can wait for its deadline when peers cannot provide
+  quorum.** Peer replication failures do not by themselves reject the append
+  early; commitment, leadership change, shutdown, or its timeout settles it.
 
-## `_voteForSelf`
+## `appendNoop`
 
-Starts an election in a new term, durably votes for itself, and requests votes
-from the other members.
-
-### findings
-
-None.
-
-## `_rxVoteRequest`
-
-Evaluates a candidate's vote request against the local election state and log.
-Persists any election changes and replies with the decision.
+Appends the leader's election no-op.
 
 ### findings
 
-None.
+no findings
 
-## `_rxVote`
+## `checkCommit`
 
-Processes vote responses, becoming leader on quorum or stepping down for a
-higher term. Establishes replication and readiness for new leadership.
-
-### findings
-
-None.
-
-## `_pingFollowers`
-
-Sends heartbeats and initiates follower catch-up. Warns about failed requests
-and steps down if active followers no longer provide quorum.
+Advances the committed log position when replication permits it.
 
 ### findings
 
-None.
+no findings
 
-## `_checkCommit`
+## `heartbeatFollower`
 
-Advances the commit boundary when a current-term entry reaches replication
-quorum. Resolves leadership readiness, announces commitment, and starts
-application.
+Checks a follower's liveness and communicates the leader's log and commit positions.
 
 ### findings
 
-None.
+no findings
 
-## `_replicationPage`
+## `heartbeat`
 
-Sends a bounded page of log entries to a follower and updates its replication
-progress, skipping missing history using the follower's head hint. Handles
-retries, unavailable history, and fatal log failures.
+Checks leader liveness and sends periodic heartbeats.
 
 ### findings
 
-None.
+no findings
 
-## `_runReplication`
+## `replicate`
 
-Replicates entries to a peer until it reaches the target or replication stops.
-
-### findings
-
-None.
-
-## `_startReplication`
-
-Starts or resumes peer replication, keeping at most one worker active for
-each peer state.
+Replicates log entries to one follower.
 
 ### findings
 
-None.
+- **Deferred: retention can cancel replication to a caught-up follower after
+  a lost page ACK.** This behavior is reproduced in both v1 and v2. A missing
+  ACK causes a timeout and retry from the same position; only an explicit
+  `REPL_BACKTRACK` reply moves that position backward. If retention removes
+  the predecessor needed to construct the retry, the leader locally raises
+  `REPL_FORGOT` and cancels replication to that follower for the current
+  leadership, without receiving a rejection from it.
 
-## `_catchUpFollower`
+  With `keepTarget: 2` and `keepTrigger: 5`, delayed delivery and a lost ACK
+  left all three nodes applied through 4 with identical retained entries 3–4.
+  Heartbeats had communicated the commit, but the leader's unconfirmed retry
+  still required deleted predecessor 2. Later appends advanced the other two
+  nodes while that follower stayed at 4.
 
-Initiates replication to bring a follower up to the leader's current log head.
+  Leave this unchanged for now. Retention settings should leave generous room
+  for replication delays and retries, reducing the risk of deleting history
+  before confirmation arrives. This is a mitigation, not a guarantee under
+  prolonged message loss; revisit the behavior with a broader retention
+  redesign.
 
-### findings
+  A possible smaller fix is to include `matched` in heartbeat ACKs, reporting
+  the existing cached head sequence-and-term comparison without another SQL
+  read. A matching reply in the current leader term could advance `matchIndex`
+  and `nextIndex` using that heartbeat request's captured sequence and resume
+  replication cancelled by retention. A nonmatching reply would still confirm
+  only liveness. Older replies and retries must not undo the confirmed progress.
+  This could address the caught-up follower case, but would not recover missing
+  history or locate a shared prefix in divergent logs. This idea is also deferred;
+  no implementation change is planned now.
 
-None.
+- **Deferred: donor-copy repair can also require a leadership reset.** Once
+  retention cancels replication to a target, copying a donor's databases and
+  restarting only the donor and target does not reset the surviving leader's
+  cancelled state. The target can remain at the copied checkpoint until the
+  leader restarts or leadership changes. This requirement is still absent
+  from [REPAIR.md](../REPAIR.md); it remains deferred with retention redesign.
 
-## `_appendToFollower`
+## `appendRequest`
 
-Replicates a requested log range to one peer and waits for confirmation within
-the append timeout.
-
-### findings
-
-None.
-
-## `_appendToFollowers`
-
-Replicates a log range to quorum and verifies its commitment within the
-append timeout. Announces new commitment to followers and rejects if the
-operation fails or shutdown begins.
-
-### findings
-
-- **Accepted: early quorum failure follows membership, not selected
-  followers.** Aggregation rejects early only when the failed peers make
-  quorum impossible for the whole cluster. If the followers selected for an
-  append are exhausted while other members are merely absent, the request
-  waits for the append timeout. Decision: keep this behavior.
-
-## `_appendToSelfAndFollowers`
-
-Appends payloads locally and replicates them to quorum. Returns the starting
-sequence and results after application; local storage failures are fatal.
-
-### findings
-
-None.
-
-## `_leaderAppendNoOp`
-
-Appends an election no-op to establish readiness for the current leadership.
-Warns and retries while that leadership still needs the entry.
+Processes incoming log replication and heartbeat requests.
 
 ### findings
 
-None.
+no findings
 
-## `_fwdToLeader`
+## `receive`
 
-Forwards a single append or batch to the known leader and returns its sequence
-and validated results. Rejects when no leader is known.
-
-### findings
-
-- **Accepted: callers must leave a submitted batch unchanged until it
-  settles.** The outgoing message keeps the caller's array, and the result
-  count is checked against `data.length` after the reply. The local leader
-  path copies the batch into its own records immediately. Clearing or
-  reusing the array while a forwarded append is pending can therefore fail
-  with `RAFT_ILLEGAL` after the commands were applied. Decision: no
-  defensive copy; this is the input-ownership policy.
-
-## `_rxFwdAppend`
-
-Validates and handles forwarded append requests as leader. Replies with the
-appended sequence and application results or an error.
+Handles incoming Raft messages and reports whether their type is recognized.
 
 ### findings
 
-None.
-
-## `_rxAppendToFollower`
-
-Handles replication and heartbeats, including term and leader changes.
-Reconciles incoming history without replacing committed entries, then
-advances commitment and starts application. Acknowledges accepted requests
-or reports why replication cannot proceed.
-
-### findings
-
-None.
-
-## `onReceive`
-
-Routes valid member messages by protocol type and adopts higher response
-terms. APPEND handles replication and heartbeats; FWD_APPEND handles
-forwarded commands.
-
-### findings
-
-None.
-
-## `awaitEvent`
-
-Waits for a future event value accepted by the supplied callback. Rejects if
-the callback throws or shutdown begins.
-
-### findings
-
-None.
-
-## `awaitLeader`
-
-Waits until the node is leader or knows a leader, optionally requiring a
-committed entry from that term. Rejects on shutdown.
-
-### findings
-
-None.
-
-## `append`
-
-Submits one valid payload to the local or remote leader. Returns its sequence
-and application result after commitment and application.
-
-### findings
-
-None.
-
-## `appendBatch`
-
-Submits a valid payload batch to the local or remote leader. Returns its
-starting sequence and results after commitment and application.
-
-### findings
-
-None.
-
-## `_startRaft`
-
-Starts Raft as a follower using the persisted election state. Begins election
-monitoring and announces the open state.
-
-### findings
-
-- **Skipped by decision: the election term is not compared with the log
-  head.** `log.elec.term >= log.term` is not enforced.
-- **Skipped by decision: a saved vote is not checked against membership.**
-  Any vote that SQLiteLog accepts is restored: null or a nonempty string.
-
-## `_stopRaft`
-
-Stops Raft, cancels pending work, and announces closure.
-
-### findings
-
-None.
-
-## `_closeAfterOpenFailure`
-
-Cleans up after startup failure while preserving error reporting through
-closure.
-
-### findings
-
-None.
-
-## `_removeListenersAfterClose`
-
-Removes event listeners once closure and pending fatal reporting permit it.
-
-### findings
-
-None.
-
-## `_fatalClose`
-
-Closes the node after fatal failure and emits the original errors and any
-close failures before removing listeners.
-
-### findings
-
-None.
-
-## `open`
-
-Opens the log and starts Raft unless automatic startup is disabled. Cleans up
-and reports the original error if startup fails.
-
-### findings
-
-None.
-
-## `close`
-
-Stops Raft and closes the log, reporting any close failure.
-
-### findings
-
-None.
-
-## Dependency: `wrapError` (`src/error.js`)
-
-Normalizes thrown values and RPC error envelopes into coded errors while
-preserving available stacks.
-
-### findings
-
-- **Accepted limitation: exotic thrown values make normalization throw.**
-  `String(err)` throws for `Object.create(null)`, and mutating a frozen
-  `ErrorWithCode` throws. The consequences are a stalled application in
-  `_apply` and a permanent outage in MonsterNode command application; see
-  MONSTER.md. The same helper runs in the send-error handler and
-  `util.errorRpc`, where it can escape warning handling or prevent an error
-  reply. Decision: leave unchanged as JavaScript-specific.
-
-## Dependency: `tcpServer` (`src/tcp.js`)
-
-Creates a server for encrypted MessagePack messages. Delivers messages and
-errors to the supplied callbacks and closes failed connections.
-
-### findings
-
-None.
-
-## Dependency: `DecryptingStream._drain` (`src/stream.js`)
-
-Delivers decrypted data from complete buffered frames, respecting downstream
-backpressure and reporting processing errors.
-
-### findings
-
-None.
-
-## Dependency: encrypted-stream destruction (`src/stream.js`)
-
-Releases encryption resources when either stream is destroyed. Decryption
-also discards buffered input and settles any pending transform.
-
-### findings
-
-None.
+no findings
