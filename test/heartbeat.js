@@ -134,19 +134,26 @@ for (const delay of [0, 2]) {
       t.ok(['a', 'b'].every((id) => c.nodes.get(id).procA.log.begin > 0n),
         'both healthy members have pruned the empty follower\'s missing history')
 
-      // Begin replication from the retained head when the empty follower returns.
-      await Promise.all(['a', 'b'].map((id) => c.nodes.get(id).gate.close()))
-      for (const id of ['a', 'b']) { c.makeNode(id) }
-      await Promise.all(['a', 'b'].map((id) => c.nodes.get(id).gate.open()))
-      const leader = await until(() => c.leader(['c']), 'retained leader')
-      const term = leader.term
       const empty = c.makeNode('c')
       c.blocked.delete('c')
       await empty.gate.open()
-      await until(() => c.warnings.some(({ id, error }) => id === leader.id && error.code === Err.REPL_FORGOT),
-        'retention cancels data replication')
+      // Startup can change leadership. Begin observing only when the current
+      // leader has cancelled replication of the empty follower's missing history.
+      const leader = await until(() => {
+        const current = c.leader(['c'])
+        return current && c.warnings.some(({ id, error }) => id === current.id && error.code === Err.REPL_FORGOT) &&
+          roles.every((role) => c.nodes.get(current.id)[role].engine.replication.get('c')?.cancelled) && current
+      }, 'retention cancels data replication')
+      const term = leader.term
       const before = c.history.length
-      await pause(500)
+      // Eight periodic heartbeats span more than two election timeouts.
+      await until(() => {
+        const traffic = c.history.slice(before)
+        const heartbeats = new Set(traffic.filter(({ from, to, message }) => from === leader.id &&
+          to === 'c' && message.type === 'append' && message.data === undefined).map(({ message }) => message.cid))
+        return traffic.filter(({ from, to, message }) => from === 'c' && to === leader.id &&
+          message.type === 'ack' && heartbeats.has(message.cid)).length >= 8
+      }, 'acknowledged heartbeats after retention cancellation')
       const traffic = c.history.slice(before)
       const appends = traffic.filter(({ from, to, message }) => from === leader.id &&
         to === 'c' && message.type === 'append')

@@ -18,7 +18,8 @@ test('public components are explicitly wired and preserve command APIs', async (
       const components = new Map()
       const localSend = (from) => (to, frame) => components.get(to).onReceive(from, frame)
       const base = path.join(directory, id)
-      const opts = { electionTimeout: 150, appendTimeout: 1_000, tickInterval: 2 }
+      // Match the helper's budget for nine durable Procs sharing one event loop.
+      const opts = { electionTimeout: 500, appendTimeout: 1_000, tickInterval: 10 }
       const gate = new api.Gate(id, ids,
         (to, frame) => nodes.get(to)?.gate.onReceive(id, frame), localSend('gate'), () => opts)
       components.set('gate', gate)

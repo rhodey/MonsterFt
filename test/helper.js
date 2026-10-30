@@ -44,9 +44,11 @@ function cluster(options = {}) {
     db.prepare('INSERT INTO items (value) VALUES (?)').run(buffer)
     return buffer.toString()
   }
+  // All cluster nodes share this event loop and perform synchronous SQLite IO.
+  // Leave room for durable inputs on slower CI runners.
   const settings = {
-    electionTimeout: 150, appendTimeout: 1_000,
-    tickInterval: 2, localTimeout: 2_000, applyTimeout: 3_000,
+    electionTimeout: 500, appendTimeout: 1_000,
+    tickInterval: 10, localTimeout: 2_000, applyTimeout: 3_000,
     ...options.opts,
   }
 
