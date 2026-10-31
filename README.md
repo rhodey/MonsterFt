@@ -200,7 +200,7 @@ and other inquiries. Opening GitHub issues is also encouraged.
 
 ### Install
 
-This software is on NPM with version `0.8.0` for educational purposes. The
+This software is on NPM with version `0.8.1` for educational purposes. The
 primary purpose of this README is introductory, not exhaustive. `1.0.0` will
 aim for exhaustive doc.
 
