@@ -1,7 +1,12 @@
 import test from 'tape'
+import fs from 'node:fs'
+import path from 'node:path'
+import { DatabaseSync } from 'node:sqlite'
 import { fileURLToPath } from 'node:url'
 import { Supervisor } from '../src/supervisor.js'
 import { Gate } from '../src/gate.js'
+import { UdxRouter } from '../src/net/udxrouter.js'
+import { databasePaths } from '../src/storage.js'
 import * as Err from '../src/error.js'
 import * as wire from '../src/wire.js'
 import { isInputType } from '../src/utilm.js'
@@ -164,6 +169,301 @@ test('Supervisor launches four children with a transport-independent Gate and fo
     const reopened = await h.supervisor.open().catch((err) => err)
     t.equal(reopened.code, Err.NODE_NOT_OPEN, 'shutdown is terminal')
   } finally { await h.supervisor.close() }
+  t.end()
+})
+
+test('Supervisor graceful close keeps transports and owners alive until Gate closes', async (t) => {
+  const held = []
+  const h = harness({
+    local(run, to, message, reply) {
+      if (message.type !== 'close') { return }
+      held.push(() => reply(to, { type: 'ack', cid: message.cid }))
+      return true
+    },
+    stop(run) { t.equal(run.gateClosed, 1, 'Gate closes before the transport stops') },
+  })
+  try {
+    await h.supervisor.open()
+    const run = h.runs[0]
+    let gateReentrant
+    let supervisorReentrant
+    run.gate.on('close', () => { gateReentrant = h.supervisor.close() })
+    h.supervisor.on('close', () => { supervisorReentrant = h.supervisor.close(false) })
+    const closing = h.supervisor.close(true)
+    t.ok(h.supervisor.isStopped, 'graceful close disables retries immediately')
+    t.notOk(run.gate.isOpen, 'graceful close stops command admission immediately')
+    t.equal(h.supervisor.close(), closing, 'later forceful close shares the chosen operation')
+    await until(() => held.length === 4, 'all owner close requests')
+    t.equal(run.stopped, 0, 'transport remains available for owner replies')
+    t.equal(run.cleaned, 0)
+    t.ok([...run.children.values()].every((child) => !exited(child)),
+      'owners are not killed while their close replies are pending')
+    for (const reply of held) { reply() }
+    await closing
+    t.equal(gateReentrant, closing, 'Gate close listeners share the original close operation')
+    t.equal(supervisorReentrant, closing, 'Supervisor close listeners share the original operation')
+    t.equal(h.supervisor.close(true), closing, 'successful close remains cached after settlement')
+    t.equal(run.gateClosed, 1)
+    t.equal(run.stopped, 1)
+    t.ok(run.ownersAliveAtStop, 'owners are killed only after the transport stop hook')
+    t.ok([...run.children.values()].every((child) => child.signalCode === 'SIGKILL'))
+    t.ok(run.exitedAtCleanup)
+    t.equal(run.cleaned, 1)
+    t.equal(h.closes, 1)
+    t.equal(h.runs.length, 1)
+    t.deepEqual(h.errors, [])
+  } finally {
+    for (const reply of held) { reply() }
+    await h.supervisor.close().catch(() => {})
+  }
+  t.end()
+})
+
+test('Supervisor first forceful close cannot be upgraded by a later graceful close', async (t) => {
+  const h = harness()
+  try {
+    await h.supervisor.open()
+    const closing = h.supervisor.close(false)
+    t.equal(h.supervisor.close(true), closing)
+    await closing
+    const run = h.runs[0]
+    t.equal(run.requests.filter(({ message }) => message.type === 'close').length, 0)
+    t.equal(run.gateClosed, 0)
+    t.equal(run.stopped, 1)
+    t.ok(run.exitedAtCleanup)
+    t.equal(h.closes, 1)
+  } finally { await h.supervisor.close() }
+  t.end()
+})
+
+test('Supervisor graceful close preserves owner errors and timeouts after forced cleanup', async (t) => {
+  for (const fault of ['error', 'timeout']) {
+    const cleanup = deferred()
+    const reason = new Err.ErrorWithCode('database close failed', Err.SQLITE_ERROR, 10)
+    reason.stack = 'original owner close trace'
+    const h = harness({
+      local(run, to, message, reply) {
+        if (message.type !== 'close' || to !== 'apply') { return }
+        if (fault === 'error') {
+          reply(to, { type: 'err', cid: message.cid, error: wire.errorToWire(reason) })
+        }
+        return true
+      },
+      cleanup: () => cleanup.promise,
+    })
+    try {
+      await h.supervisor.open()
+      const run = h.runs[0]
+      let settled = false
+      const closing = h.supervisor.close(true)
+      const result = closing.then(() => { settled = true }, (err) => { settled = true; return err })
+      await until(() => run.cleaned === 1, `${fault}: forced cleanup started`)
+      t.notOk(settled, `${fault}: close waits for host cleanup before rejecting`)
+      t.ok([...run.children.values()].every(exited), `${fault}: every child is already reaped`)
+      t.equal(run.stopped, 1)
+      t.ok(run.exitedAtCleanup)
+      cleanup.resolve()
+      const error = await result
+      t.equal(error?.code, fault === 'error' ? Err.SQLITE_ERROR : Err.LOCAL_TIMEOUT,
+        `${fault}: graceful failure code is preserved`)
+      if (fault === 'error') {
+        t.equal(error.message, reason.message)
+        t.equal(error.sqlCode, reason.sqlCode)
+        t.equal(error.stack, reason.stack)
+      } else { t.match(error.message, /apply close timeout/) }
+      t.equal(h.supervisor.close(false), closing, `${fault}: failed close is cached`)
+      t.equal(await h.supervisor.close(true).catch((err) => err), error)
+      t.equal(run.requests.filter(({ message }) => message.type === 'close').length, 4,
+        `${fault}: close requests are not retried`)
+      t.equal(run.cleaned, 1)
+      t.equal(run.gateClosed, 0)
+      t.equal(h.closes, 0, `${fault}: failure cannot advertise successful close`)
+      t.equal(h.runs.length, 1)
+    } finally {
+      cleanup.resolve()
+      await h.supervisor.close().catch(() => {})
+    }
+  }
+  t.end()
+})
+
+test('Supervisor graceful close cancels startup in factory, readiness, hello and open', async (t) => {
+  for (const phase of ['factory', 'ready', 'hello', 'open']) {
+    const waiting = deferred()
+    const entered = deferred()
+    const h = harness({
+      before() {
+        if (phase !== 'factory') { return }
+        entered.resolve()
+        return waiting.promise
+      },
+      ready() {
+        if (phase !== 'ready') { return }
+        entered.resolve()
+        return waiting.promise
+      },
+      local(run, to, message) {
+        if ((phase === 'hello' && to === 'apply' && message.type === 'hello') ||
+            (phase === 'open' && to === 'procA' && message.type === 'open')) {
+          entered.resolve()
+          return true
+        }
+      },
+    })
+    try {
+      const opening = h.supervisor.open().catch((err) => err)
+      await entered.promise
+      const closing = h.supervisor.close(true)
+      waiting.resolve()
+      await closing
+      t.equal((await opening).code, Err.NODE_NOT_OPEN, `${phase}: initial open is cancelled`)
+      const run = h.runs[0]
+      const closed = run.requests.filter(({ message }) => message.type === 'close').map(({ to }) => to)
+      t.deepEqual(closed.sort(), phase === 'hello' ? roles.slice(0, 3).sort()
+        : phase === 'open' ? [...roles].sort() : [], `${phase}: only acknowledged owners close`)
+      t.equal(run.stopped, 1)
+      t.equal(run.cleaned, 1)
+      t.ok(run.exitedAtCleanup)
+      t.equal(h.opens.length, 0, `${phase}: late startup never publishes open`)
+      t.equal(h.runs.length, 1)
+      t.equal(h.closes, 1)
+      t.deepEqual(h.errors, [])
+      if (phase === 'factory') { t.equal(run.children, null, 'late factory launches no children') }
+    } finally {
+      waiting.resolve()
+      await h.supervisor.close().catch(() => {})
+    }
+  }
+  t.end()
+})
+
+test('Supervisor graceful close still reaps owners after transport failure or child exit', async (t) => {
+  for (const fault of ['transport', 'exit']) {
+    const requested = deferred()
+    const h = harness({
+      local(run, to, message) {
+        if (to !== 'apply' || message.type !== 'close') { return }
+        requested.resolve()
+        return true
+      },
+    })
+    try {
+      await h.supervisor.open()
+      const run = h.runs[0]
+      const closing = h.supervisor.close(true).catch((err) => err)
+      await requested.promise
+      if (fault === 'transport') { run.transportFailed.reject(new Error('transport lost during close')) }
+      else { run.children.get('apply').kill('SIGKILL') }
+      const error = await closing
+      t.equal(error?.code, Err.LOCAL_TIMEOUT, `${fault}: pending Gate close remains bounded`)
+      t.ok([...run.children.values()].every(exited), `${fault}: every child is reaped`)
+      t.equal(run.stopped, 1)
+      t.equal(run.cleaned, 1)
+      t.ok(run.exitedAtCleanup)
+      t.equal(h.runs.length, 1, `${fault}: no restart during graceful close`)
+      t.equal(h.closes, 0)
+      t.equal(run.gateClosed, 0)
+    } finally { await h.supervisor.close().catch(() => {}) }
+  }
+  t.end()
+})
+
+test('Supervisor graceful close releases real SQLite owners and reopens retained work', async (t) => {
+  const directory = fs.mkdtempSync('/tmp/mf-supervisor-close-')
+  const owner = new URL('./fixtures/supervisor-owner.js', import.meta.url)
+  const ids = ['a', 'b', 'c']
+  const databases = ids.flatMap((id) => Object.values(databasePaths(path.join(directory, id))))
+  const sidecars = databases.flatMap((file) => [`${file}-wal`, `${file}-shm`])
+  const supervisors = []
+  const runs = []
+  const errors = []
+  let current = new Map()
+  const values = (id) => {
+    const db = new DatabaseSync(databasePaths(path.join(directory, id)).apply, { readOnly: true })
+    try {
+      if (!db.prepare("SELECT name FROM sqlite_schema WHERE name = 'items'").get()) { return [] }
+      return db.prepare('SELECT value FROM items ORDER BY id').all()
+        .map((row) => Buffer.from(row.value).toString())
+    } finally { db.close() }
+  }
+  const open = async () => {
+    current = new Map(ids.map((id) => {
+      const supervisor = new Supervisor(async () => {
+        const base = path.join(directory, id)
+        const local = new UdxRouter(roles, { directory })
+        const run = { gate: null, children: null, cleaned: false, closed: false }
+        local.on('error', (error) => errors.push(error))
+        await local.open()
+        const gate = new Gate(id, ids,
+          (to, frame) => current.get(to)?.gate?.onReceive(id, frame),
+          (to, frame) => local.send(to, frame), {
+            tickInterval: 5, localTimeout: 3_000, applyTimeout: 3_000,
+          })
+        gate.on('error', (error) => errors.push(error))
+        gate.on('close', () => { run.closed = true })
+        local.on('message', (role, frame) => gate.onReceive(role, frame))
+        run.gate = gate
+        runs.push(run)
+        return {
+          gate,
+          children: Object.fromEntries(roles.map((role) => [role, {
+            file: owner, args: [role, id, base, local.paths[role]],
+          }])),
+          ready: async (children) => { run.children = children; await local.ready() },
+          failed: local.failed,
+          stop: () => {
+            run.closedAtStop = run.closed
+            run.sidecarsAtStop = Object.values(databasePaths(base))
+              .flatMap((file) => [`${file}-wal`, `${file}-shm`]).filter((file) => fs.existsSync(file))
+            local.stop()
+          },
+          cleanup: async () => {
+            run.exitedAtCleanup = [...run.children.values()].every(exited)
+            await local.close()
+            run.cleaned = true
+          },
+        }
+      }, { restartDelay: 10, startupTimeout: 5_000 })
+      supervisor.on('error', (error) => {
+        errors.push(error)
+        supervisor.close().catch(() => {})
+      })
+      supervisors.push(supervisor)
+      return [id, supervisor]
+    }))
+    await Promise.all([...current.values()].map((supervisor) => supervisor.open()))
+    return until(() => [...current.values()].map((supervisor) => supervisor.gate).find((gate) =>
+      gate?.isOpen && gate.state === 'leader' && gate.commitTerm === gate.term),
+    'real owner cluster leader', 10_000)
+  }
+  try {
+    const first = await open()
+    t.ok(sidecars.every((file) => fs.existsSync(file)), 'each live SQLite owner has WAL and SHM files')
+    t.equal((await first.append(Buffer.from('retained')))[1], 'retained')
+    await until(() => ids.every((id) => values(id).includes('retained')), 'retained work on every Apply')
+    await Promise.all([...current.values()].map((supervisor) => supervisor.close(true)))
+    t.ok(sidecars.every((file) => !fs.existsSync(file)), 'graceful owner close removes every WAL and SHM')
+    t.ok(runs.every((run) => run.closedAtStop && run.sidecarsAtStop.length === 0),
+      'databases close before local transports are stopped')
+    t.ok(runs.every((run) => run.exitedAtCleanup && run.cleaned), 'cleanup follows every owner exit')
+    t.ok(databases.every((file) => fs.existsSync(file)), 'database files are retained')
+    t.deepEqual(values(first.id), ['retained'])
+    const reopened = await open()
+    t.equal((await reopened.append(Buffer.from('continued')))[1], 'continued')
+    await until(() => ids.every((id) => values(id).includes('continued')), 'reopened work on every Apply')
+    await Promise.all([...current.values()].map((supervisor) => supervisor.close(true)))
+    t.ok(sidecars.every((file) => !fs.existsSync(file)), 'reopened owners also close their SQLite handles')
+    for (const id of ids) {
+      t.deepEqual(values(id), ['retained', 'continued'], `${id}: retained work survives reopening`)
+      const calls = fs.readFileSync(`${path.join(directory, id)}.calls`, 'utf8').trim().split('\n')
+      t.equal(calls.filter((seq) => seq === '0').length, 1, `${id}: reopening does not replay setup`)
+    }
+    t.equal(runs.length, 6, 'only the two explicitly created owner groups run')
+    t.deepEqual(errors, [])
+  } finally {
+    await Promise.all(supervisors.map((supervisor) => supervisor.close().catch(() => {})))
+    fs.rmSync(directory, { recursive: true, force: true })
+  }
   t.end()
 })
 

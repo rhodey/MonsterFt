@@ -36,7 +36,8 @@ only when You are a Legal Entity.
 Project and in which You own or assert ownership of the Copyright. If You do
 not own the Copyright in the entire work of authorship, identify the third-party
 material, its owner, its license, and any other restrictions in the contribution's
-pull request so that We can resolve the necessary permissions before accepting it.
+pull request or another written notice accompanying Your submission so that We
+can resolve the necessary permissions before accepting it.
 
 "Copyright" means all rights protecting works of authorship owned or controlled
 by You or Your Affiliates, including copyright, moral and neighboring rights,
