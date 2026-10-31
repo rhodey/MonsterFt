@@ -20,7 +20,6 @@ trap 'exit 143' TERM
 export MONSTERFT_HTTP_PORT="${MONSTERFT_HTTP_PORT:-43000}"
 export MONSTERFT_FACT_URL="http://127.0.0.1:${MONSTERFT_HTTP_PORT}/facts"
 "$node_bin" server.js & server_pid="$!"
-sleep 1
 if ! kill -0 "$server_pid" 2>/dev/null; then
   wait "$server_pid"
   exit 1
