@@ -73,6 +73,8 @@ no findings
 ## `_stopRun`
 
 Stops a supervision attempt and waits for child termination and host cleanup.
+Optional graceful shutdown gives the database owners a chance to close first;
+forced cleanup still runs if that fails.
 
 ### findings
 
@@ -81,6 +83,8 @@ no findings
 ## `close`
 
 Permanently stops supervision and waits for the current attempt to shut down.
+`close(true)` requests graceful owner closure first; `close()` remains forceful.
+The first call selects the shutdown mode, and failures are retained without retries.
 
 ### findings
 

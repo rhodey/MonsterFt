@@ -75,7 +75,7 @@ const stopped = Promise.withResolvers()
 const close = () => {
   if (closeWork) { return closeWork }
   stopping = true
-  closeWork = supervisor.close().finally(() => stopped.resolve())
+  closeWork = supervisor.close(true).finally(() => stopped.resolve())
   return closeWork
 }
 for (const signal of ['SIGINT', 'SIGTERM']) {

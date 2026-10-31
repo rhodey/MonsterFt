@@ -143,17 +143,22 @@ class Supervisor extends EventEmitter {
     }
   }
 
-  _stopRun(run) {
+  _stopRun(run, graceful = false) {
     if (run.stopWork !== null) { return run.stopWork }
     run.stopping = true
     clearTimeout(run.timer)
     this._gate = null
     run.failed.resolve(closed())
+    let closeError = null
     // Publish the promise before Gate cancellation or cleanup can reenter.
     run.stopWork = Promise.resolve().then(async () => {
       if (run.setup?.gate instanceof Gate) {
         if (run.onError) { run.setup.gate.removeListener('error', run.onError) }
         run.setup.gate.stop()
+        if (graceful) {
+          try { await run.setup.gate.close() }
+          catch (err) { closeError = Err.wrapError(err) }
+        }
       }
       let stopError = null
       try {
@@ -174,24 +179,32 @@ class Supervisor extends EventEmitter {
       if (this._run === run) { this._run = null }
     }).catch((err) => {
       throw Err.wrapError(err, Err.SUPERVISOR_ERROR)
+    }).then(() => {
+      if (closeError !== null) { throw closeError }
     })
     return run.stopWork
   }
 
-  close() {
+  close(graceful = false) {
     this._stopped = true
     this._openWait?.reject(closed())
     this._wake?.()
-    this._gate?.stop()
-    if (this._closed) { return Promise.resolve() }
     if (this._closeWork !== null) { return this._closeWork }
-    this._closeWork = Promise.resolve().then(async () => {
-      if (this._run !== null) { await this._stopRun(this._run) }
+    if (this._closed) { return Promise.resolve() }
+    const closing = oneShot()
+    this._closeWork = closing.promise
+    const gate = this._gate
+    // Reserve this shutdown before stopping Gate can wake the supervision loop.
+    const stopping = this._run === null ? null : this._stopRun(this._run, graceful)
+    gate?.stop()
+    const finish = async () => {
+      await stopping
       await this._loopWork
-      if (this._run !== null) { await this._stopRun(this._run) }
+      if (this._run !== null) { await this._stopRun(this._run, graceful) }
       this._closed = true
       this._emitSafe('close')
-    })
+    }
+    finish().then(closing.resolve, closing.reject)
     return this._closeWork
   }
 
