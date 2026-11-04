@@ -53,26 +53,17 @@ objects in testing, but `vfs=` itself is untested from Node. Build it with
 - The existing `journal_mode = WAL` and `synchronous = FULL` pragmas stay as they are.
   Leave `page_size` alone: the default of 4096 matches the VFS default `mv_block`.
 - A file shorter than 8 KiB counts as an unfinished creation. A read/write open
-  silently replaces it. The `unreadable` case in
-  [test/storage.js:223](test/storage.js#L223) writes such a file, so check what it
-  proves afterwards.
+  silently replaces it. A read-only open matches native: an empty file reads as empty,
+  and any other short file fails with `SQLITE_NOTADB` (26), which is what the
+  `unreadable` case in [test/storage.js:223](test/storage.js#L223) relies on.
+- `readOnly: true` needs no change, so `readDatabase`, `checkLocals`, `capture` and
+  `adopt` keep working. A read-only connection behaves as on the native VFS and never
+  changes the database or its WAL.
+- Keep setting WAL before the first table, as [src/log.js:311](src/log.js#L311) and
+  [src/storage.js:146](src/storage.js#L146) do today. Work done in rollback mode can
+  leave never-written free pages behind.
 
-### 3. Stop opening read-only, or get the VFS to allow it
-
-[src/storage.js:60](src/storage.js#L60) opens with `readOnly: true`, and `checkLocals`,
-`capture` and `adopt` all depend on it. The VFS rejects this with `SQLITE_READONLY` (8).
-
-**Decision needed.** Either:
-
-- **Change the VFS.** A prototype accepts read-only connections on writable files, so
-  `readDatabase` stays as it is. Files that cannot be written stay rejected, and so
-  does a file too short to hold a header.
-- **Change `readDatabase`.** This works today: open with `mode=rw` in the URI, then run
-  `PRAGMA query_only = ON`. Reads work, writes fail with 8, and a missing file still
-  fails. Unlike a true read-only open, closing the last connection checkpoints and
-  removes the WAL.
-
-### 4. Set a busy timeout
+### 3. Set a busy timeout
 
 Every connection runs at `timeout: 0`. Add a timeout at each open from item 2.
 
@@ -91,7 +82,7 @@ Every connection runs at `timeout: 0`. Add a timeout at each open from item 2.
 
 ## Failures MonsterFt must handle
 
-### 5. Keep storage errors out of application outcomes
+### 4. Keep storage errors out of application outcomes
 
 **Fix this first.** It does not need the VFS: a native I/O error takes the same path
 today.
@@ -115,7 +106,7 @@ failure.
 `BEGIN IMMEDIATE` at [src/apply.js:254](src/apply.js#L254) already keeps `SQLITE_BUSY`
 out of `apply()`.
 
-### 6. Handle `MONSTERVFS_CORRUPT_BACKFILLED` (19723)
+### 5. Handle `MONSTERVFS_CORRUPT_BACKFILLED` (19723)
 
 WAL recovery found a damaged frame that a checkpoint may already have copied into
 main. Cutting there could keep half of a transaction, so the VFS refuses and changes
@@ -127,26 +118,27 @@ It appears on the first read after a crash, so in `readDatabase`, `log.open` and
 until it is stopped.
 
 - Add a distinct error code, and stop restarting when it appears.
-- DB2 has no local copy, so it needs [REPAIR.md](REPAIR.md).
-- **Decision needed:** one damaged DB1 could be rebuilt from its two siblings instead.
-  This is not possible today. `capture()` must read all three, `checkLocals` rejects a
-  missing DB1 beside established state, and a Proc cannot open its own damaged
-  database to adopt. Until that is designed, use REPAIR.md.
+- Repair follows [REPAIR.md](REPAIR.md), for DB1 and DB2 alike. The VFS knows only its
+  own database, so rebuilding one database from another is not its job.
 
-### 7. Handle `SQLITE_IOERR_DATA` (8202)
+### 6. Handle `SQLITE_IOERR_DATA` (8202)
 
 A slot failed verification and parity could not correct it. Other pages stay readable.
 Reading that page fails every time, so a Proc that needs it would die and restart
-forever. Route it to repair, as in item 6.
+forever. Route it to repair, as in item 5.
 
-The exception is the scrub in item 9, which should record it and move on to the next
+The exception is the scrub in item 8, which should record it and move on to the next
 page.
 
-### 8. Know that a WAL cutoff can remove committed rows
+### 7. Know that a WAL cutoff can remove committed rows
 
 If a damaged frame is above the checkpoint watermark, recovery truncates the WAL at
 that frame. That removes every later transaction, including acknowledged ones, and
 reads then succeed with no error. This is the chosen availability policy.
+
+A read-only connection cannot cut. It stops reading at the damage and leaves the file
+alone, and the next writer's recovery makes the cut. `readDatabase` is usually the
+first reader after a crash, so expect `wal_cutoffs` from it before any cut has happened.
 
 - **DB1:** one regressed copy loses the `capture()` majority and is replaced by
   `adopt()`. Two copies losing the same suffix would be believed.
@@ -157,12 +149,12 @@ reads then succeed with no error. This is the chosen availability policy.
 - Consider treating a database that reports a cut as a non-voter in `capture()`.
 
 Node cannot read `sqlite3_log`, and `wal_cutoffs` is per process, so the process that
-sees the cut may not be the one that owns the database. Item 11 covers the durable
+sees the cut may not be the one that owns the database. Item 10 covers the durable
 signal.
 
 ## Should add
 
-### 9. Scrub cold pages
+### 8. Scrub cold pages
 
 The VFS only checks pages that get read, so MonsterFt must read the rest. Any read
 that reaches a damaged page queues its repair.
@@ -178,7 +170,7 @@ SELECT data FROM sqlite_dbpage WHERE schema = 'main' AND pgno = ?;
 - On `SQLITE_IOERR_DATA`, record the page and continue.
 - This needs item 1, because `sqlite_dbpage` is what stock Node lacks.
 
-### 10. Report `PRAGMA monstervfs_maintenance`
+### 9. Report `PRAGMA monstervfs_maintenance`
 
 It returns one row holding JSON, per process. Emit these as `warn` events:
 
@@ -190,11 +182,11 @@ It returns one row holding JSON, per process. Emit these as `warn` events:
 | `queue_full` | Repairs were dropped; a later read queues them again |
 | `prefix_pending`, `prefix_degraded` | A file header copy needs repair |
 | `zero_slot_reads` | All-zero main slots were read as holes |
-| `wal_cutoffs`, `wal_cutoff_bytes`, `wal_cutoff_commits`, `wal_last_cutoff` | Item 8 |
-| `wal_refusals` | Item 6 |
+| `wal_cutoffs`, `wal_cutoff_bytes`, `wal_cutoff_commits`, `wal_last_cutoff` | Item 7 |
+| `wal_refusals` | Item 5 |
 | `last_error` | Newest maintenance failure |
 
-### 11. Decide what to do with `<db>-wal.cut-<n>` files
+### 10. Decide what to do with `<db>-wal.cut-<n>` files
 
 When a cut discards commit records, the VFS copies the discarded slots to this file.
 Nothing reads or removes them.
@@ -202,13 +194,14 @@ Nothing reads or removes them.
 **Decision needed**, in step with the VFS. If they stay:
 
 - Check for them at startup. They are the only record of a cut that survives a restart
-  and is visible to every process.
+  and is visible to every process. Read-only connections do not write them; the writer
+  that makes the cut does.
 - Add them to `deleteSQLiteFiles` in [src/util.js:111](src/util.js#L111), and cap or
   remove them. An ordinary crash can leave one.
 
 ## Docs and tests
 
-### 12. Update REPAIR.md and the README
+### 11. Update REPAIR.md and the README
 
 - **[REPAIR.md](REPAIR.md) step 4:** say to remove the recipient's `-wal`, `-shm` and
   any `.cut-` files, and to copy a donor `-wal` if one exists. A stale WAL beside a
@@ -216,15 +209,18 @@ Nothing reads or removes them.
 - **Storage:** REPAIR.md says a cluster "uses approx 3x storage". Each 4 KiB page now
   takes an 8 KiB slot, so the files double.
 - **Cost:** on macOS/APFS with real full syncs on both sides, a small commit cost
-  1.06x native because the sync dominates, a 2,000-row batch about 4.4x, and a
-  checkpoint about 6.7x. Linux is not measured yet. State this next to any throughput
-  numbers, and re-check `wal_autocheckpoint`, which is at the default of 1,000 pages.
+  1.06x native because the sync dominates. Otherwise cost follows pages written, not
+  rows: about 60 us per page against 9 to 16 us native. A transaction of 2,000 rows of
+  4 KiB (2,250 pages) took 4 to 6x, the same rows at 128 bytes (71 pages) 2.4x, and a
+  checkpoint 6 to 8x. Most of that is Reed-Solomon encoding. Linux is not measured yet.
+  State this next to any throughput numbers, and re-check `wal_autocheckpoint`, which is
+  at the default of 1,000 pages.
 - **Certify:** `locking_mode = EXCLUSIVE` in [src/certify.js:49](src/certify.js#L49)
   works and recovers correctly, but it blocks repairs while held.
 - **Shutdown:** `monstervfs_shutdown()` must run before `sqlite3_shutdown()` and is a
   C call. Check whether our Node build needs it. A process that just exits only loses
   queued repairs, which later reads queue again.
-- **Tests:** run the whole suite on the VFS, and add tests for items 5 to 8.
+- **Tests:** run the whole suite on the VFS, and add tests for items 4 to 7.
 
 ## Error codes
 
@@ -246,8 +242,9 @@ Nothing reads or removes them.
 | 1034 | `SQLITE_IOERR_FSYNC` | Sync failed, handle stopped for good | Close and reopen |
 | 1546 | `SQLITE_IOERR_TRUNCATE` | Truncate failed, handle stopped for good | Close and reopen |
 | 5386 | `SQLITE_IOERR_SHMMAP` | Shared memory unusable, handle stopped for good | Close and reopen; check `-shm` permissions |
-| 8 | `SQLITE_READONLY` | Read-only open, or a write under `query_only` | Programming error; see item 3 |
-| 14 | `SQLITE_CANTOPEN` | `immutable`, `nolock` or `readonly_shm` set; `mv_*` differs from the file | Programming error |
+| 8 | `SQLITE_READONLY` | A write on a read-only connection or under `query_only` | Programming error |
+| 14 | `SQLITE_CANTOPEN` | Missing file on a read-only open, `nolock` set, or `mv_*` differs from the file | Programming error, or handle the missing file |
+| 26 | `SQLITE_NOTADB` | Read-only open of a file too short to hold a header | Unfinished creation; repair or recreate |
 | 21 | `SQLITE_MISUSE` | Illegal `mv_*` value | Programming error |
 | 1 | `SQLITE_ERROR` | Rejected PRAGMA: not WAL/FULL, wrong page size, or mmap | Programming error |
 
@@ -256,4 +253,4 @@ A failed extension load has no `errcode`. Check for
 
 The VFS also logs through `sqlite3_log`: `SQLITE_WARNING` (28) for a cut that discarded
 commits or a refusal, and `SQLITE_NOTICE_RECOVER_WAL` (283) for a cut that did not.
-`node:sqlite` cannot read this log, so use items 10 and 11.
+`node:sqlite` cannot read this log, so use items 9 and 10.
