@@ -4,9 +4,9 @@ MonsterVfs is the SQLite VFS, in its own repository, that adds checksums and
 Reed-Solomon parity to the database and WAL. This file lists what MonsterFt must
 change to run on it. Nothing here is done yet.
 
-Everything below was checked against MonsterVfs, on macOS with Node 26.13, unless a
-line says otherwise. Stock Node cannot load the extension (item 1), so the VFS
-behavior was checked from C against the same SQLite.
+Everything below was checked against MonsterVfs, on macOS with Node 26.13 and on
+Ubuntu 24.04 with ext4, unless a line says otherwise. Stock Node cannot load the extension
+(item 1), so the VFS behavior was checked from C against the same SQLite.
 
 ## Blocking: MonsterFt cannot run on it until these are done
 
@@ -196,7 +196,8 @@ It returns one row holding JSON, per process. Emit these as `warn` events:
   1.06x native because the sync dominates. Otherwise cost follows pages written, not
   rows: about 60 us per page against 9 to 16 us native. A transaction of 2,000 rows of
   4 KiB (2,250 pages) took 4 to 6x, the same rows at 128 bytes (71 pages) 2.4x, and a
-  checkpoint 6 to 8x. Most of that is Reed-Solomon encoding. Linux is not measured yet.
+  checkpoint 6 to 8x. Most of that is Reed-Solomon encoding. On a 2-vCPU x86 EC2 box
+  with ext4, one run of three repeats gave 1.24x, 9.9x and 13.8x for the same work.
   State this next to any throughput numbers, and re-check `wal_autocheckpoint`, which is
   at the default of 1,000 pages.
 - **Certify:** `locking_mode = EXCLUSIVE` in [src/certify.js:49](src/certify.js#L49)
@@ -219,6 +220,7 @@ It returns one row holding JSON, per process. Emit these as `warn` events:
 | 517 | `SQLITE_BUSY_SNAPSHOT` | Snapshot went stale before a write | Restart the transaction |
 | 15 | `SQLITE_PROTOCOL` | Lost a WAL lock race repeatedly | Retry the operation |
 | 8202 | `SQLITE_IOERR_DATA` | Slot is unrecoverable, or the file is not in this format | Repair; a scrub continues |
+| 8458 | `SQLITE_IOERR_CORRUPTFS` | The storage refused to return a page: a bad sector | Repair; a scrub continues. SQLite can report this as `SQLITE_CORRUPT` |
 | 19723 | `MONSTERVFS_CORRUPT_BACKFILLED` | Recovery refused, nothing changed | Repair; never retry |
 | 11 | `SQLITE_CORRUPT` | SQLite itself found bad content | Repair |
 | 778 | `SQLITE_IOERR_WRITE` | Write failed, handle still usable | Fatal is fine; a reopen works |
