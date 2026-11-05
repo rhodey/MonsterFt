@@ -52,6 +52,11 @@ objects in testing, but `vfs=` itself is untested from Node. Build it with
   in-place migration, which matches the policy in [doc/STORAGE.md](doc/STORAGE.md).
 - The existing `journal_mode = WAL` and `synchronous = FULL` pragmas stay as they are.
   Leave `page_size` alone: the default of 4096 matches the VFS default `mv_block`.
+- Every page gives its last 48 bytes to the VFS, which sets this itself on each new
+  connection once the extension is loaded, so MonsterFt sets nothing. `page_size` stays
+  4096, SQLite fills 4,048 bytes of each page, and the same rows take about 1.2% more
+  pages. `VACUUM`, `VACUUM INTO` and backup keep the setting. `ATTACH` of a new file
+  through the VFS fails at its first write; MonsterFt uses none of these today.
 - A file with no room for content and no usable header counts as an unfinished
   creation, because a crash can leave one. A read/write open silently replaces it. A
   read-only open matches native: an empty file reads as empty, and any other such file
