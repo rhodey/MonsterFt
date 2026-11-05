@@ -133,6 +133,18 @@ forever. Route it to repair, as in item 5.
 The exception is the scrub in item 8, which should record it and move on to the next
 page.
 
+On Linux, one bad sector can also fail reads of good pages near it. Before the VFS
+retried such reads, real I/O errors on Linux 7.0 lost pages and WAL frames whose own bytes
+were fine. We suspect large folios, which ext4 has used since Linux 6.16: the page cache
+keeps neighbouring sectors as one unit, so one bad sector fails the whole unit. The retry
+is proven to fix it, but the folio explanation is not proven yet.
+
+- MonsterFt has nothing to set. The VFS retries a failed read with `O_DIRECT`, which asks
+  the device directly, so good pages near a bad sector stay readable.
+- Those reads may be slower until the kernel drops that unit from its cache. This is
+  unmeasured.
+- Large folios do not need disabling for this, and we found no general switch for it.
+
 ### 7. Know that a WAL cutoff can remove committed rows
 
 If a damaged frame is above the checkpoint watermark, recovery truncates the WAL at
