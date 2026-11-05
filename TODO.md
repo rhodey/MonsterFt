@@ -52,16 +52,14 @@ objects in testing, but `vfs=` itself is untested from Node. Build it with
   in-place migration, which matches the policy in [doc/STORAGE.md](doc/STORAGE.md).
 - The existing `journal_mode = WAL` and `synchronous = FULL` pragmas stay as they are.
   Leave `page_size` alone: the default of 4096 matches the VFS default `mv_block`.
-- A file shorter than 8 KiB counts as an unfinished creation. A read/write open
-  silently replaces it. A read-only open matches native: an empty file reads as empty,
-  and any other short file fails with `SQLITE_NOTADB` (26), which is what the
-  `unreadable` case in [test/storage.js:223](test/storage.js#L223) relies on.
+- A file with no room for content and no usable header counts as an unfinished
+  creation, because a crash can leave one. A read/write open silently replaces it. A
+  read-only open matches native: an empty file reads as empty, and any other such file
+  fails with `SQLITE_NOTADB` (26), which is what the `unreadable` case in
+  [test/storage.js:223](test/storage.js#L223) relies on.
 - `readOnly: true` needs no change, so `readDatabase`, `checkLocals`, `capture` and
   `adopt` keep working. A read-only connection behaves as on the native VFS and never
   changes the database or its WAL.
-- Keep setting WAL before the first table, as [src/log.js:311](src/log.js#L311) and
-  [src/storage.js:146](src/storage.js#L146) do today. Work done in rollback mode can
-  leave never-written free pages behind.
 
 ### 3. Set a busy timeout
 
@@ -146,11 +144,9 @@ first reader after a crash, so expect `wal_cutoffs` from it before any cut has h
   repair, and not in a restart loop.
 - `stateDigest` covers only election, metadata and the log head. Because a cut removes
   a suffix, the log head does catch it.
-- Consider treating a database that reports a cut as a non-voter in `capture()`.
 
-Node cannot read `sqlite3_log`, and `wal_cutoffs` is per process, so the process that
-sees the cut may not be the one that owns the database. Item 10 covers the durable
-signal.
+Node cannot read `sqlite3_log`, so read these through item 9. They are per process and
+reset on restart, which is accepted: MonsterFt notices a regressed node without them.
 
 ## Should add
 
@@ -181,31 +177,19 @@ It returns one row holding JSON, per process. Emit these as `warn` events:
 | `blocked` | Exclusive locking is stopping repairs |
 | `queue_full` | Repairs were dropped; a later read queues them again |
 | `prefix_pending`, `prefix_degraded` | A file header copy needs repair |
-| `zero_slot_reads` | All-zero main slots were read as holes |
-| `wal_cutoffs`, `wal_cutoff_bytes`, `wal_cutoff_commits`, `wal_last_cutoff` | Item 7 |
+| `zero_slot_reads` | All-zero main slots were read as holes. MonsterFt sets WAL before its first table, so only an erased slot should cause this |
+| `wal_cutoffs`, `wal_cutoff_bytes`, `wal_last_cutoff` | Item 7. An ordinary crash can cause these |
+| `wal_cutoff_commits` | Finished commits certainly lost. An ordinary crash never raises it |
 | `wal_refusals` | Item 5 |
 | `last_error` | Newest maintenance failure |
 
-### 10. Decide what to do with `<db>-wal.cut-<n>` files
-
-When a cut discards commit records, the VFS copies the discarded slots to this file.
-Nothing reads or removes them.
-
-**Decision needed**, in step with the VFS. If they stay:
-
-- Check for them at startup. They are the only record of a cut that survives a restart
-  and is visible to every process. Read-only connections do not write them; the writer
-  that makes the cut does.
-- Add them to `deleteSQLiteFiles` in [src/util.js:111](src/util.js#L111), and cap or
-  remove them. An ordinary crash can leave one.
-
 ## Docs and tests
 
-### 11. Update REPAIR.md and the README
+### 10. Update REPAIR.md and the README
 
-- **[REPAIR.md](REPAIR.md) step 4:** say to remove the recipient's `-wal`, `-shm` and
-  any `.cut-` files, and to copy a donor `-wal` if one exists. A stale WAL beside a
-  donor main is not detected.
+- **[REPAIR.md](REPAIR.md) step 4:** say to remove the recipient's `-wal` and `-shm`,
+  and to copy a donor `-wal` if one exists. A stale WAL beside a donor main is not
+  detected.
 - **Storage:** REPAIR.md says a cluster "uses approx 3x storage". Each 4 KiB page now
   takes an 8 KiB slot, so the files double.
 - **Cost:** on macOS/APFS with real full syncs on both sides, a small commit cost
@@ -251,6 +235,6 @@ Nothing reads or removes them.
 A failed extension load has no `errcode`. Check for
 `err.code === 'ERR_LOAD_SQLITE_EXTENSION'`.
 
-The VFS also logs through `sqlite3_log`: `SQLITE_WARNING` (28) for a cut that discarded
-commits or a refusal, and `SQLITE_NOTICE_RECOVER_WAL` (283) for a cut that did not.
-`node:sqlite` cannot read this log, so use items 9 and 10.
+The VFS also logs through `sqlite3_log`: `SQLITE_WARNING` (28) for a refusal or a cut
+that lost a finished commit, and `SQLITE_NOTICE_RECOVER_WAL` (283) for any other cut.
+`node:sqlite` cannot read this log, so use item 9.
