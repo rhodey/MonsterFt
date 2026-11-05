@@ -135,9 +135,10 @@ page.
 
 On Linux, one bad sector can also fail reads of good pages near it. Before the VFS
 retried such reads, real I/O errors on Linux 7.0 lost pages and WAL frames whose own bytes
-were fine. We suspect large folios, which ext4 has used since Linux 6.16: the page cache
-keeps neighbouring sectors as one unit, so one bad sector fails the whole unit. The retry
-is proven to fix it, but the folio explanation is not proven yet.
+were fine. The cause is large folios, which ext4 has used since Linux 6.16: the page cache
+keeps neighbouring sectors as one unit, so one bad sector fails the whole unit. Kernel
+tracing showed bad sectors inside 16, 32 and 64 KiB folios, and the failures stopped with
+`read_ahead_kb=0`, which kept folios to one page.
 
 - MonsterFt has nothing to set. The VFS retries a failed read with `O_DIRECT`, which asks
   the device directly, so good pages near a bad sector stay readable.
