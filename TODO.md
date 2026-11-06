@@ -199,6 +199,7 @@ It returns one row holding JSON, per process. Emit these as `warn` events:
 | `wal_cutoffs`, `wal_cutoff_bytes`, `wal_last_cutoff` | Item 7. An ordinary crash can cause these |
 | `wal_cutoff_commits` | Finished commits certainly lost. An ordinary crash never raises it |
 | `wal_refusals` | Item 5 |
+| `main_sync_failures` | Checkpoints that did not finish. The connection keeps working, but if this keeps rising the WAL grows and the device needs attention |
 | `last_error` | Newest maintenance failure |
 
 ## Docs and tests
