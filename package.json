@@ -2,7 +2,7 @@
   "name": "monsterft",
   "author": "rhodey",
   "description": "Write apps that survive cosmic radiation.",
-  "version": "0.8.2",
+  "version": "0.8.3",
   "license": "AGPL-3.0-only",
   "type": "module",
   "main": "src/index.js",
@@ -32,7 +32,6 @@
     "monsterft",
     "consensus",
     "replication",
-    "append",
-    "log"
+    "sqlite"
   ]
 }
