@@ -144,23 +144,24 @@ test('concurrent local and forwarded commands preserve item association and matc
       const message = decodeFrame(frame)
       if (from !== 'gate' || to !== 'procA' || !isInputType(message.type)) { return }
       const engine = members.procA.engine
-      if (!engine || members.procA.log.append.observed) { return }
+      if (!engine || engine.appendEntries.observed) { return }
       // The engine records the exact snapshot when a CMD is appended, which
       // can happen in a continuation after this input's ACK advances a peer.
-      const append = members.procA.log.append.bind(members.procA.log)
-      members.procA.log.append = (record, ...args) => {
-        if (record.entry.length) {
-          const value = unpack(record.entry)
+      const append = engine.appendEntries.bind(engine)
+      engine.appendEntries = (entries, ...args) => {
+        entries.forEach((entry, index) => {
+          if (!entry.length) { return }
+          const value = unpack(entry)
           if (value.type === 'cmd') {
             const current = engine.nodes.map((peer) => peer === id
-              ? engine.seq : engine.replication.get(peer)?.matchIndex ?? -1n)
-            expectedSnapshots.set(`${id}:${engine.seq + 1n}`, current)
+              ? engine.seq + BigInt(index) : engine.replication.get(peer)?.matchIndex ?? -1n)
+            expectedSnapshots.set(`${id}:${engine.seq + BigInt(index) + 1n}`, current)
           }
-        }
-        return append(record, ...args)
+        })
+        return append(entries, ...args)
       }
       // Install once per fresh owner rather than wrapping once per input.
-      members.procA.log.append.observed = true
+      engine.appendEntries.observed = true
     },
   })
   try {

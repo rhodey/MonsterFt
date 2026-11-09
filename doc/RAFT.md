@@ -151,6 +151,15 @@ Appends a leader entry and waits for quorum commitment or failure.
 
 ### findings
 
+no findings
+
+## `appendEntries`
+
+Appends consecutive leader entries together and waits for quorum commitment
+through the final entry or failure.
+
+### findings
+
 - **Accepted: an append can wait for its deadline when peers cannot provide
   quorum.** Peer replication failures do not by themselves reject the append
   early; commitment, leadership change, shutdown, or its timeout settles it.

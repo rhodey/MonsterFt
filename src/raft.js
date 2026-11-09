@@ -257,8 +257,13 @@ class RaftEngine {
   }
 
   appendEntry(entry, callback) {
+    return this.appendEntries([entry], callback)
+  }
+
+  appendEntries(entries, callback) {
     if (this.state !== LEADER) { callback(failure('node not leader', Err.NOT_LEADER)); return }
-    const seq = this.log.append({ term: this.term, entry })
+    this.log.appendBatch(entries.map((entry) => ({ term: this.term, entry })))
+    const seq = this.seq
     const waiter = { seq, term: this.term, callback, timer: null }
     waiter.timer = this.executor.after(this.opts.appendTimeout, () =>
       this.finishAppend(waiter, failure('quorum append timeout', Err.APPEND_TIMEOUT)))

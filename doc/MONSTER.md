@@ -149,9 +149,18 @@ Reports this node’s pending command digest to the leader.
 
 no findings
 
+## `appendCommand`
+
+Starts a leader command, optionally paired with the preceding SYNC decision.
+
+### findings
+
+no findings
+
 ## `decide`
 
-Decides whether command outcomes have quorum agreement.
+Decides command agreement and pairs an agreeing SYNC with the next queued
+command when available.
 
 ### findings
 
