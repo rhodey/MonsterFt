@@ -242,7 +242,7 @@ test('a fresh engine publishes its initial change snapshot on every restart', (t
   t.end()
 })
 
-test('applying SYNC still pumps queued commands and reports the resulting append', (t) => {
+test('paired SYNC and CMD report one final change with captured commit status', (t) => {
   const f = protocol().leader()
   const page = (reply) => messages(reply, 'append', 'b').find((msg) => msg.data)
   const ack = (message) => f.rpc({
@@ -258,6 +258,8 @@ test('applying SYNC still pumps queued commands and reports the resulting append
     f.complete(messages(committed, 'execute', 'apply')[0])
     f.input('append', { clientId: 'second', items: [Buffer.from('second')] })
     const decision = f.rpc({ type: 'monster_outcome', cmdSeq: 1n, digest: Buffer.alloc(16) }, 'b')
+    t.equal(messages(decision, 'change', 'gate').at(-1).status.seq, 3n,
+      'the decision input appends both SYNC and the queued CMD')
     const finished = ack(page(decision))
     t.equal(f.proc.engine.appliedSeq, 2n, 'SYNC advances internal applied progress')
     t.equal(f.proc.engine.leaderCommand.cmdSeq, 3n, 'next command is started')
@@ -266,8 +268,8 @@ test('applying SYNC still pumps queued commands and reports the resulting append
     t.equal(messages(finished, 'sync', 'gate')[0].syncSeq, 2n)
     t.deepEqual(outputs(finished).filter(({ to, message }) =>
       to === 'gate' && ['change', 'commit', 'cmd', 'sync'].includes(message.type)).map(({ message }) =>
-      [message.type, message.status.seq]), [['commit', 2n], ['sync', 2n], ['change', 3n]],
-    'progress events retain capture-time status before the final change')
+      [message.type, message.status.seq]), [['commit', 3n], ['sync', 3n], ['change', 3n]],
+    'progress events retain the paired log head and commitment at capture time')
     t.equal(outputs(finished).at(-1).message.type, 'change')
   } finally { f.close() }
   t.end()

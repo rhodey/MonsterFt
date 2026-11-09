@@ -178,6 +178,19 @@ class MonsterEngine extends RaftEngine {
     }
   }
 
+  appendCommand(request, sync = null) {
+    const entries = sync === null ? [] : [pack(sync)]
+    const leaderCommand = { term: this.term, request, cmdSeq: null, outcomes: null, phase: PHASE_CMD }
+    this.leaderCommand = leaderCommand
+    const previousSeq = this.seq + BigInt(entries.length)
+    const matchIndex = this.nodes.map((id) => id === this.id ? previousSeq : this.replication.get(id)?.matchIndex ?? -1n)
+    entries.push(pack({ type: 'cmd', items: request.items, matchIndex }))
+    leaderCommand.cmdSeq = this.appendEntries(entries, (err) => {
+      if (err) { this.protocolFailure(leaderCommand, err) }
+      else { this.pumpLeader() }
+    })
+  }
+
   decide() {
     const leaderCommand = this.leaderCommand
     if (!leaderCommand || leaderCommand.phase !== PHASE_DECISION || this.state !== LEADER || this.term !== leaderCommand.term) { return }
@@ -208,6 +221,10 @@ class MonsterEngine extends RaftEngine {
       agrees ? null : this.repairError(sync.quorum ? Err.REPAIR_OUTSIDE : Err.REPAIR_NO_QUORUM),
       leaderCommand.cmdSeq, leaderCommand.outcomes)
     if (sync.quorum && !agrees) { this.fenceLeader(); return }
+    if (agrees && !this.draining && this.commands.length > 0) {
+      this.appendCommand(this.commands.shift(), sync)
+      return
+    }
     leaderCommand.phase = PHASE_SYNC
     leaderCommand.syncSeq = null
     leaderCommand.syncSeq = this.appendEntry(pack(sync), (err) => {
@@ -273,13 +290,7 @@ class MonsterEngine extends RaftEngine {
     if (this.finishDrain()) { return }
     const request = this.commands.shift()
     if (!request) { return }
-    const leaderCommand = { term: this.term, request, cmdSeq: null, outcomes: null, phase: PHASE_CMD }
-    this.leaderCommand = leaderCommand
-    const matchIndex = this.nodes.map((id) => id === this.id ? this.seq : this.replication.get(id)?.matchIndex ?? -1n)
-    leaderCommand.cmdSeq = this.appendEntry(pack({ type: 'cmd', items: request.items, matchIndex }), (err) => {
-      if (err) { this.protocolFailure(leaderCommand, err) }
-      else { this.pumpLeader() }
-    })
+    this.appendCommand(request)
   }
 
   applyReady() {
