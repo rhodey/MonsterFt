@@ -21,25 +21,25 @@ cargo test --all-targets
 
 ## Bench
 
-[bench/README.md](bench/README.md)
+[bench/README.md](bench/README.md) (complete)
 
-### Latency (p95)
-
-| Batch size | Same-AZ | Multi-AZ |
-| ---: | ---: | ---: |
-| 1 | 1.660 ms | 2.543 ms |
-| 256 | 3.485 ms | 4.890 ms |
-| 512 | 5.652 ms | 7.295 ms |
-| 1024 | 9.838 ms | 11.369 ms |
-
-### Throughput (CMD/s)
+#### Latency (p95)
 
 | Batch size | Same-AZ | Multi-AZ |
 | ---: | ---: | ---: |
-| 1 | 1,082 | 545 |
-| 256 | 84,293 | 72,596 |
-| 512 | 98,447 | 81,113 |
-| 1024 | 108,323 | 96,999 |
+| 1 | 1.660ms | 2.543ms |
+| 256 | 3.485ms | 4.890ms |
+| 512 | 5.652ms | 7.295ms |
+| 1024 | 9.838ms | 11.369ms |
+
+#### Throughput
+
+| Batch size | Same-AZ | Multi-AZ |
+| ---: | ---: | ---: |
+| 1 | 1,082/s | 545/s |
+| 256 | 84,293/s | 72,596/s |
+| 512 | 98,447/s | 81,113/s |
+| 1024 | 108,323/s | 96,999/s |
 
 ## License
 
