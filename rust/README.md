@@ -10,6 +10,8 @@ IPC on linux uses [shmem-ipc](https://github.com/diwic/shmem-ipc). IPC on macOS 
 
 ## Tests
 
+[test/README.md](test/README.md)
+
 ```sh
 cargo test --all-targets
 ./example1/entry.sh
@@ -17,11 +19,27 @@ cargo test --all-targets
 ./example3/entry.sh
 ```
 
-## Docs
+## Bench
 
-+ [AGENTS.md](AGENTS.md)
-+ [test/README.md](test/README.md)
-+ [bench/README.md](bench/README.md)
+[bench/README.md](bench/README.md)
+
+### Latency (p95)
+
+| Batch size | Same-AZ | Multi-AZ |
+| ---: | ---: | ---: |
+| 1 | 1.660 ms | 2.543 ms |
+| 256 | 3.485 ms | 4.890 ms |
+| 512 | 5.652 ms | 7.295 ms |
+| 1024 | 9.838 ms | 11.369 ms |
+
+### Throughput (CMD/s)
+
+| Batch size | Same-AZ | Multi-AZ |
+| ---: | ---: | ---: |
+| 1 | 1,082 | 545 |
+| 256 | 84,293 | 72,596 |
+| 512 | 98,447 | 81,113 |
+| 1024 | 108,323 | 96,999 |
 
 ## License
 
