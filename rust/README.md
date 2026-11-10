@@ -2,7 +2,7 @@
 
 MonsterFt for Rust lives here. The Rust crate is given version `0.5.0` to start even though it follows JS `0.8.x`.
 
-MonsterFt is architected around 5 processes: Gate, Proc A/B/C, Apply and with `send` and `localSend` for IPC.
+MonsterFt is architected around 5 processes: Gate, Proc A/B/C, Apply and `send` and `localSend` for IPC.
 
 This design lends itself to a very literal JS-to-Rust port with one current-thread Tokio loop per process.
 
