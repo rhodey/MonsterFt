@@ -22,3 +22,6 @@ jobs:
         run: |
           npm install
           npm run test
+
+      - name: Types
+        run: npm run test:types
