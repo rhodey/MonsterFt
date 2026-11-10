@@ -1,7 +1,7 @@
 # Tests
 
 Tests live here and are registered in `Cargo.toml`, outside implementation files.
-See [../README.md](../README.md) for build prerequisites. From the crate root:
+From the crate root:
 
 ```sh
 cargo test --locked --test protocol
