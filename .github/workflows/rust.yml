@@ -1,0 +1,47 @@
+name: Rust tests
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
+    branches:
+      - main
+permissions:
+  contents: read
+jobs:
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, macos-15]
+    runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        working-directory: rust
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@1.94.0
+        with:
+          components: rustfmt, clippy
+      - name: Install SQLite Session build prerequisites
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y clang libclang-dev
+      - run: cargo fmt --all --check
+      - run: cargo clippy --locked --all-targets -- -D warnings
+      - run: cargo test --locked --all-targets
+      - name: In-process example, fresh and retained
+        run: |
+          ./example1/entry.sh
+          ./example1/entry.sh
+      - name: Supervised example, fresh and retained
+        run: |
+          ./example2/entry.sh
+          ./example2/entry.sh
+      - name: HTTP side-effect example, fresh and retained
+        run: |
+          ./example3/entry.sh
+          ./example3/entry.sh
+      - name: Supervised crash and hung-Apply recovery
+        run: python3 test/supervised_fault_smoke.py --no-build
