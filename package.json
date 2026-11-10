@@ -2,10 +2,11 @@
   "name": "monsterft",
   "author": "rhodey",
   "description": "Write apps that survive cosmic radiation.",
-  "version": "0.8.3",
+  "version": "0.8.4",
   "license": "AGPL-3.0-only",
   "type": "module",
   "main": "src/index.js",
+  "types": "src/index.d.ts",
   "repository": {
     "type": "git",
     "url": "git://github.com/rhodey/monsterft.git"
@@ -15,16 +16,19 @@
     "node": ">=24.15"
   },
   "scripts": {
-    "test": "tape test/*.js"
+    "test": "tape test/*.js",
+    "test:types": "node test/types/run.js"
   },
   "dependencies": {
+    "@types/node": "24.19.2",
     "msgpackr": "^1.11.2",
     "pure-rand": "8.4.2",
     "xxhash-addon": "2.1.0",
     "zod": "4.6.7"
   },
   "devDependencies": {
-    "tape": "^5.9.0"
+    "tape": "^5.9.0",
+    "typescript": "7.0.2"
   },
   "keywords": [
     "raft",
