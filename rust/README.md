@@ -1,17 +1,14 @@
 # MonsterFt
 
-A Rust port of MonsterFt: replicated SQLite application execution, with three
-independent local protocol owners checking their outputs before publication.
-This port is new and is not yet production ready.
+MonsterFt for Rust lives here. The Rust crate is given version `0.5.0` to start even though it follows JS `0.8.x`.
 
-Gate, Proc A/B/C, Apply, and Supervisor are explicit components. Run them together
-for a demonstration, or supervise four compiled database-owner processes with
-shared-memory IPC and TCP between cluster nodes. Application callbacks can be
-synchronous or asynchronous.
+MonsterFt is architected around 5 processes: Gate, Proc A/B/C, Apply and with `send` and `localSend` for IPC.
 
-Build with Rust 1.94 or newer, a C compiler, and libclang. SQLite is bundled with
-its Session extension enabled.
-Run the following commands from `rust/`.
+This design lends itself to a very literal JS-to-Rust port with one current-thread Tokio loop per process.
+
+IPC on linux uses [shmem-ipc](https://github.com/diwic/shmem-ipc). IPC on macOS uses [iceoryx2](https://github.com/eclipse-iceoryx/iceoryx2).
+
+## Tests
 
 ```sh
 cargo test --all-targets
@@ -20,12 +17,12 @@ cargo test --all-targets
 ./example3/entry.sh
 ```
 
-[Example3](example3/README.md) demonstrates async HTTP side effects with a quorum-aware fact service.
+## Docs
 
-Examples keep their databases under their respective `data/` directories. Both
-Linux and macOS are supported. See [AGENTS.md](AGENTS.md) for architecture and
-contributor guidance, and [test/README.md](test/README.md) for validation commands.
++ [AGENTS.md](AGENTS.md)
++ [test/README.md](test/README.md)
++ [bench/README.md](bench/README.md)
 
-See [bench/README.md](bench/README.md) for benchmark results and run instructions.
+## License
 
-Licensed under AGPL-3.0-only.
+LOCK HOST, INC. 2026. AGPL-3.0-only.
