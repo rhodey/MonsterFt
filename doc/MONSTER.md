@@ -135,7 +135,8 @@ no findings
 
 ## `rememberReport`
 
-Accepts a node's first command outcome report.
+Accepts a node's first outcome report for the current command, including while
+local Apply is still running. Agreement requires the local receipt.
 
 ### findings
 
@@ -168,7 +169,8 @@ no findings
 
 ## `awaitDecision`
 
-Waits for the command outcome reports needed to decide agreement.
+Waits for outcome announcements and retries missing reports. Inherited commands
+query immediately because their announcements may already have passed.
 
 ### findings
 

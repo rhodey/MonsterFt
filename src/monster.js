@@ -130,6 +130,8 @@ class MonsterEngine extends RaftEngine {
 
   execute(record, seq, hash, entry) {
     const cid = this.random.cid()
+    // Reports belong to this execution, including any received before Apply finishes.
+    this.reports.clear()
     this.pendingApply = { cid, seq, hash, tickCount: this.tickCount, count: entry?.items.length ?? 0 }
     this.output('apply', {
       type: 'execute', cid, tickCount: this.tickCount, term: record.term, seq,
@@ -240,10 +242,13 @@ class MonsterEngine extends RaftEngine {
     const ask = () => {
       if (this.state !== LEADER || this.leaderCommand?.phase !== PHASE_DECISION) { return }
       for (const to of this.nodes) {
-        if (to !== this.id) { this.send(to, { type: MONSTER_OUTCOME_REQUEST, cmdSeq: this.leaderCommand.cmdSeq }) }
+        if (to !== this.id && !this.reports.has(to)) {
+          this.send(to, { type: MONSTER_OUTCOME_REQUEST, cmdSeq: this.leaderCommand.cmdSeq })
+        }
       }
     }
-    ask()
+    // An inherited CMD has no caller; its followers may have already announced.
+    if (!this.leaderCommand.request) { ask() }
     this.executor.cancel(this.reportTimer)
     this.reportTimer = this.executor.after(this.retryms, ask, this.retryms)
   }
@@ -344,7 +349,6 @@ class MonsterEngine extends RaftEngine {
     this.pendingApply = null
     if (receipt.seq > 0n) {
       this.pendingCommand = { cmdSeq: receipt.seq, localDigest: utilm.asBuffer(receipt.local_digest) }
-      this.reports.clear()
       if (this.leaderCommand?.cmdSeq === receipt.seq) { this.leaderCommand.outcomes = reply.outcomes }
       this.event('cmd', { cmdSeq: receipt.seq, cmdCount: pending.count })
       this.announceOutcome()
@@ -413,7 +417,8 @@ class MonsterEngine extends RaftEngine {
       }
     } else if (msg.type === MONSTER_OUTCOME) {
       try { utilm.validateOutcomeMsg(msg) } catch (err) { this.warn(err); return }
-      if (this.state === LEADER && this.pendingCommand?.cmdSeq === msg.cmdSeq) {
+      if (this.state === LEADER &&
+          (this.pendingCommand?.cmdSeq === msg.cmdSeq || this.pendingApply?.seq === msg.cmdSeq)) {
         this.rememberReport(from, msg.digest)
       }
     } else {
