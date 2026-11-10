@@ -3,7 +3,7 @@ mod common;
 use monsterft::{
     error::{Code, Error, Result},
     local::{Received, SendFrame},
-    proc::{Options, Proc},
+    proc::Proc,
     storage::ProcRole,
 };
 use tokio::{sync::mpsc, task::LocalSet};
@@ -26,9 +26,6 @@ async fn run() -> Result<()> {
     let local_send: SendFrame =
         Box::new(move |_, frame| sender.send(frame).map_err(common::send_error));
 
-    let mut options = Options::default();
-    options.protocol.election_timeout = 100;
-
     let nodes = common::NODES.iter().map(|id| (*id).into()).collect();
 
     let mut proc = Proc::new(
@@ -37,7 +34,7 @@ async fn run() -> Result<()> {
         nodes,
         local_send,
         &args.database_path,
-        options,
+        common::timeouts::proc_options(),
     )?;
 
     let stopped = proc.stop_handle();

@@ -32,14 +32,20 @@ jobs:
       - run: cargo clippy --locked --all-targets -- -D warnings
       - run: cargo test --locked --all-targets
       - name: In-process example, fresh and retained
+        env:
+          MONSTERFT_CI: '1'
         run: |
           ./example1/entry.sh
           ./example1/entry.sh
       - name: Supervised example, fresh and retained
+        env:
+          MONSTERFT_CI: '1'
         run: |
           ./example2/entry.sh
           ./example2/entry.sh
       - name: HTTP side-effect example, fresh and retained
+        env:
+          MONSTERFT_CI: '1'
         run: |
           ./example3/entry.sh
           ./example3/entry.sh

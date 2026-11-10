@@ -1,5 +1,8 @@
 #![allow(dead_code)] // Shared by separate binaries, each using its own role helpers.
 
+#[path = "../example1/timeouts.rs"]
+pub mod timeouts;
+
 use bytes::Bytes;
 use monsterft::{
     error::{Code, Error, Result},

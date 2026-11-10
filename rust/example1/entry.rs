@@ -1,11 +1,13 @@
+mod timeouts;
+
 use bytes::Bytes;
 use monsterft::{
     Value,
     apply::{Apply, apply_sync},
     error::{Code, Error, Result},
-    gate::{Gate, GateOptions},
+    gate::Gate,
     local::{Received, SendFrame},
-    proc::{Options, Proc},
+    proc::Proc,
     storage::ProcRole,
 };
 use std::{cell::RefCell, collections::BTreeMap, path::PathBuf, rc::Rc, time::Duration};
@@ -74,7 +76,7 @@ async fn run() -> Result<()> {
         });
 
         let (gate, mut driver) =
-            Gate::new(id, ids.clone(), send, local_send, GateOptions::default())?;
+            Gate::new(id, ids.clone(), send, local_send, timeouts::gate_options())?;
 
         let name = id.clone();
         driver.diagnostics().on_error(move |error| {
@@ -100,10 +102,14 @@ async fn run() -> Result<()> {
                     let local_send: SendFrame =
                         Box::new(move |_, frame| deliver(&to_gate, role.as_str(), frame));
 
-                    let mut options = Options::default();
-                    options.protocol.election_timeout = 100;
-
-                    let mut proc = Proc::new(role, &node, nodes, local_send, path, options)?;
+                    let mut proc = Proc::new(
+                        role,
+                        &node,
+                        nodes,
+                        local_send,
+                        path,
+                        timeouts::proc_options(),
+                    )?;
                     proc.diagnostics.on_error(move |error| {
                         eprintln!("{node}/{}: {error}", role.as_str());
                     });

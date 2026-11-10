@@ -3,7 +3,7 @@ use super::common;
 use futures_util::FutureExt;
 use monsterft::{
     error::{Code, Error, Result},
-    gate::{Gate, GateOptions},
+    gate::Gate,
     local::{COMPONENTS, SendFrame},
     net::{
         ipc::{IpcEndpoint, IpcNamespace, IpcOptions, cleanup_namespace},
@@ -158,7 +158,13 @@ pub async fn setup(
 
         let nodes = common::NODES.iter().map(|id| (*id).to_owned()).collect();
 
-        let (gate, mut driver) = Gate::new(&id, nodes, send, local_send, GateOptions::default())?;
+        let (gate, mut driver) = Gate::new(
+            &id,
+            nodes,
+            send,
+            local_send,
+            common::timeouts::gate_options(),
+        )?;
 
         let diagnostic_id = id.clone();
         driver.diagnostics().on_error(move |error| {
