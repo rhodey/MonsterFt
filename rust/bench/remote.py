@@ -288,7 +288,7 @@ def main():
     assert len(args.hosts)==len(args.private_hosts)==3
     assert all(Path(p).is_absolute() for p in (args.remote_root,args.remote_source,args.binary))
     for host in args.hosts+args.private_hosts:ipaddress.ip_address(host)
-    assert 1<=args.base_port<=65513 and args.warmup>=0 and args.seconds>0 and args.repeats>0
+    assert 1<=args.base_port<=65533 and args.warmup>=0 and args.seconds>0 and args.repeats>0
     assert 1<=args.batch_size<=1024
     windows=[int(w) for w in args.windows.split(',')];assert all(1<=w<=256 for w in windows)
     args.artifacts=args.artifacts.resolve();args.artifacts.mkdir(parents=True,exist_ok=False)

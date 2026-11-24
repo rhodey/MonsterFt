@@ -42,29 +42,16 @@ fn peers(ids: &[&str]) -> BTreeMap<String, TcpPeer> {
     let mut reservations = Vec::new();
     let mut result = BTreeMap::new();
     for id in ids {
-        loop {
-            let first = std::net::TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
-            let base = first.local_addr().unwrap().port();
-            let mut group = vec![first];
-            for index in 1..ids.len() {
-                if let Some(port) = base.checked_add(index as u16)
-                    && let Ok(listener) = std::net::TcpListener::bind((Ipv4Addr::LOCALHOST, port))
-                {
-                    group.push(listener);
-                }
-            }
-            if group.len() == ids.len() {
-                reservations.extend(group);
-                result.insert(
-                    (*id).into(),
-                    TcpPeer {
-                        host: "127.0.0.1".into(),
-                        base_port: base,
-                    },
-                );
-                break;
-            }
-        }
+        let listener = std::net::TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+        let port = listener.local_addr().unwrap().port();
+        reservations.push(listener);
+        result.insert(
+            (*id).into(),
+            TcpPeer {
+                host: "127.0.0.1".into(),
+                port,
+            },
+        );
     }
     result
 }
@@ -155,18 +142,9 @@ fn arbitrary_membership_routes_all_pairs_without_greetings() {
             .send("zebra", Bytes::from_static(b"m-z"))
             .unwrap();
         z.sender().send("alpha", Bytes::new()).unwrap();
-        assert_eq!(
-            m.recv().await.unwrap(),
-            Some(("alpha".into(), Bytes::from_static(b"a-m")))
-        );
-        assert_eq!(
-            z.recv().await.unwrap(),
-            Some(("middle".into(), Bytes::from_static(b"m-z")))
-        );
-        assert_eq!(
-            a.recv().await.unwrap(),
-            Some(("zebra".into(), Bytes::new()))
-        );
+        assert_eq!(m.recv().await.unwrap(), Some(Bytes::from_static(b"a-m")));
+        assert_eq!(z.recv().await.unwrap(), Some(Bytes::from_static(b"m-z")));
+        assert_eq!(a.recv().await.unwrap(), Some(Bytes::new()));
         a.close().await.unwrap();
         m.close().await.unwrap();
         z.close().await.unwrap();
@@ -190,7 +168,7 @@ fn open_is_local_and_delayed_peer_reconnects() {
         connected(&a.sender(), &["b"]).await;
         a.sender().send("b", Bytes::from_static(b"first")).unwrap();
         assert_eq!(
-            b.recv().await.unwrap().unwrap().1,
+            b.recv().await.unwrap().unwrap(),
             Bytes::from_static(b"first")
         );
         b.close().await.unwrap();
@@ -206,7 +184,7 @@ fn open_is_local_and_delayed_peer_reconnects() {
         connected(&a.sender(), &["b"]).await;
         a.sender().send("b", Bytes::from_static(b"second")).unwrap();
         assert_eq!(
-            b.recv().await.unwrap().unwrap().1,
+            b.recv().await.unwrap().unwrap(),
             Bytes::from_static(b"second")
         );
         a.close().await.unwrap();
@@ -214,22 +192,20 @@ fn open_is_local_and_delayed_peer_reconnects() {
     });
 }
 #[test]
-fn incoming_replacement_discards_stale_queued_frames() {
+fn overlapping_connections_both_deliver_to_one_listener() {
     run(async {
         let members = peers(&["a", "b"]);
-        let address = (Ipv4Addr::LOCALHOST, members["b"].base_port);
+        let address = (Ipv4Addr::LOCALHOST, members["b"].port);
         let mut b = TcpCluster::open("b", members, options()).await.unwrap();
-        let mut old = TcpStream::connect(address).await.unwrap();
-        tcp::write_frame(&mut old, b"old", 100).await.unwrap();
-        tokio::time::sleep(Duration::from_millis(10)).await;
-        let mut new = TcpStream::connect(address).await.unwrap();
-        tcp::write_frame(&mut new, b"new", 100).await.unwrap();
-        let mut byte = [0];
-        assert_eq!(old.read(&mut byte).await.unwrap(), 0);
-        assert_eq!(
-            b.recv().await.unwrap(),
-            Some(("a".into(), Bytes::from_static(b"new")))
-        );
+        let mut first = TcpStream::connect(address).await.unwrap();
+        let mut second = TcpStream::connect(address).await.unwrap();
+        tcp::write_frame(&mut second, b"second", 100).await.unwrap();
+        assert_eq!(b.recv().await.unwrap(), Some(Bytes::from_static(b"second")));
+        tcp::write_frame(&mut first, b"first", 100).await.unwrap();
+        assert_eq!(b.recv().await.unwrap(), Some(Bytes::from_static(b"first")));
+        first.shutdown().await.unwrap();
+        tcp::write_frame(&mut second, b"again", 100).await.unwrap();
+        assert_eq!(b.recv().await.unwrap(), Some(Bytes::from_static(b"again")));
         b.close().await.unwrap();
     });
 }
@@ -237,7 +213,7 @@ fn incoming_replacement_discards_stale_queued_frames() {
 fn malformed_peer_warns_without_stopping_local_transport() {
     run(async {
         let members = peers(&["a", "b"]);
-        let address = (Ipv4Addr::LOCALHOST, members["b"].base_port);
+        let address = (Ipv4Addr::LOCALHOST, members["b"].port);
         let opts = TcpOptions {
             frames: FrameOptions {
                 max_frame_bytes: 8,
@@ -264,25 +240,20 @@ fn malformed_peer_warns_without_stopping_local_transport() {
         let mut good = TcpStream::connect(address).await.unwrap();
         tcp::write_frame(&mut good, b"good", 8).await.unwrap();
         assert_eq!(
-            b.recv().await.unwrap().unwrap().1,
+            b.recv().await.unwrap().unwrap(),
             Bytes::from_static(b"good")
         );
         b.close().await.unwrap();
     });
 }
 #[test]
-fn partial_listener_startup_releases_bound_ports() {
+fn occupied_member_port_fails_open() {
     run(async {
         let members = peers(&["a", "b", "c"]);
-        let base = members["a"].base_port;
-        let occupied = TcpListener::bind((Ipv4Addr::LOCALHOST, base + 2))
+        let _occupied = TcpListener::bind((Ipv4Addr::LOCALHOST, members["a"].port))
             .await
             .unwrap();
         assert!(TcpCluster::open("a", members, options()).await.is_err());
-        let _first = TcpListener::bind((Ipv4Addr::LOCALHOST, base + 1))
-            .await
-            .unwrap();
-        drop(occupied);
     });
 }
 #[test]
@@ -300,14 +271,14 @@ fn queue_budget_includes_prefix_until_write_completion() {
         assert!(!sender.send("b", Bytes::new()).unwrap());
         assert!(a.is_open());
         assert_eq!(
-            b.recv().await.unwrap().unwrap().1,
+            b.recv().await.unwrap().unwrap(),
             Bytes::from_static(b"1234")
         );
         while sender.queued_bytes("b") != 0 {
             tokio::task::yield_now().await;
         }
         assert!(sender.send("b", Bytes::new()).unwrap());
-        assert!(b.recv().await.unwrap().unwrap().1.is_empty());
+        assert!(b.recv().await.unwrap().unwrap().is_empty());
         a.close().await.unwrap();
         b.close().await.unwrap();
     });
@@ -362,7 +333,7 @@ fn stop_cancels_dialing_without_reporting_terminal_failure() {
 fn connection_carries_raw_length_then_payload() {
     run(async {
         let members = peers(&["a", "b"]);
-        let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, members["b"].base_port))
+        let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, members["b"].port))
             .await
             .unwrap();
         let mut a = TcpCluster::open("a", members, options()).await.unwrap();
@@ -386,12 +357,12 @@ fn connection_carries_raw_length_then_payload() {
 fn dropped_close_waiter_keeps_cleanup_owned() {
     run(async {
         let members = peers(&["a", "b"]);
-        let base = members["a"].base_port;
+        let base = members["a"].port;
         let mut a = TcpCluster::open("a", members, options()).await.unwrap();
         drop(a.close());
         assert!(a.is_stopped());
         a.close().await.unwrap();
-        let _listener = TcpListener::bind((Ipv4Addr::LOCALHOST, base + 1))
+        let _listener = TcpListener::bind((Ipv4Addr::LOCALHOST, base))
             .await
             .unwrap();
     });
@@ -401,7 +372,7 @@ fn dropped_close_waiter_keeps_cleanup_owned() {
 fn reconnect_never_replays_old_connection_queue() {
     run(async {
         let members = peers(&["a", "b"]);
-        let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, members["b"].base_port))
+        let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, members["b"].port))
             .await
             .unwrap();
         let mut a = TcpCluster::open("a", members, options()).await.unwrap();

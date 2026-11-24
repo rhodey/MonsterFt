@@ -20,7 +20,7 @@ process.on('message', (message) => {
     }, message.delay)
   } else if (message.type === 'frame') {
     // Before this component comes online, the startup hello may be lost.
-    component?.onReceive('gate', message.frame)
+    component?.onReceive(message.frame, 'gate')
   } else if (message.type === 'exit') {
     clearTimeout(starting)
     component?.close()

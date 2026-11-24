@@ -259,9 +259,13 @@ test('replication validation covers overflow, later bad records, and unrelated t
       const other = protocol().setup()
       try {
         const saved = stateDigest(other.state())
+        const beforeWarnings = other.diagnostics.length
         other.rpc(append({ term: 50n, data: [record(50n)] }), from)
         t.ok(stateDigest(other.state()).equals(saved), `${from} cannot change durable state`)
-        t.equal(other.proc._fatalError.code, Err.RPC_ILLEGAL, 'invalid Gate input stops the Proc')
+        t.ok(other.procs.every(proc => proc.isOpen), 'an invalid remote sender leaves the Procs running')
+        t.deepEqual(other.diagnostics.slice(beforeWarnings).map(({ role, type, error }) => [role, type, error.code]),
+          other.procs.map(({ role }) => [role, 'warn', Err.RPC_ILLEGAL]),
+          'each Proc reports the invalid sender')
       } finally { other.close() }
     }
     for (const message of [

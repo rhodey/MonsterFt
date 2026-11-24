@@ -2,8 +2,9 @@ use bytes::Bytes;
 use monsterft::{
     Value,
     error::{Code, Error, Result},
+    gate::GateMessage,
     gate::{Gate, GateOptions},
-    local::{LocalReply, Received},
+    local::LocalReply,
     protocol::Envelope,
     rpc::ClientReply,
     storage::{Capture, ProcRole},
@@ -82,7 +83,7 @@ fn setup(
     stop_fails: bool,
     close_fails: bool,
 ) -> Result<Setup> {
-    let receiver: Rc<RefCell<Option<mpsc::Sender<Received>>>> = Rc::new(RefCell::new(None));
+    let receiver: Rc<RefCell<Option<mpsc::Sender<GateMessage>>>> = Rc::new(RefCell::new(None));
     let send_to = receiver.clone();
     let logs = record.clone();
     let local_send = Box::new(move |to: &str, frame: Bytes| -> Result<()> {
@@ -149,10 +150,7 @@ fn setup(
             LocalReply::ack(cid)
         };
         let receiver = send_to.borrow().as_ref().unwrap().clone();
-        let message = Received {
-            from: to.into(),
-            frame: wire::encode_frame(&reply)?,
-        };
+        let message = (wire::encode_frame(&reply)?, Some(to.to_owned()));
         let delay = if kind == "close" {
             logs.close_delay.get()
         } else {

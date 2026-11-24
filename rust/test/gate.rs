@@ -89,7 +89,7 @@ impl Harness {
                 });
             }
             self.gate
-                .on_receive(to, wire::encode_frame(&reply).unwrap())
+                .on_receive(wire::encode_frame(&reply).unwrap(), Some(&to))
                 .unwrap();
         }
         for (to, input) in starts {
@@ -107,7 +107,7 @@ impl Harness {
             outcomes: None,
         };
         self.gate
-            .on_receive(to, wire::encode_frame(&reply).unwrap())
+            .on_receive(wire::encode_frame(&reply).unwrap(), Some(to))
             .unwrap();
     }
     async fn next_input(&mut self) -> Vec<(String, OrderedInput)> {
@@ -120,7 +120,7 @@ impl Harness {
     }
     fn trigger(&self) {
         self.gate
-            .on_receive("b", wire::encode_frame(&remote_value()).unwrap())
+            .on_receive(wire::encode_frame(&remote_value()).unwrap(), None)
             .unwrap();
     }
     async fn close(&mut self) {
@@ -134,8 +134,8 @@ impl Harness {
             ));
             self.gate
                 .on_receive(
-                    to,
                     wire::encode_frame(&LocalReply::ack(request.cid())).unwrap(),
+                    Some(&to),
                 )
                 .unwrap();
         }
@@ -249,7 +249,7 @@ async fn stopped_gate_keeps_close_wait_until_explicit_successful_cleanup() {
             h.open().await;
             let wait = h.gate.await_event(EventKind::Close, |_| Ok(true));
             h.gate
-                .on_receive(PROCS[0], Bytes::from_static(b"bad local frame"))
+                .on_receive(Bytes::from_static(b"bad local frame"), Some(PROCS[0]))
                 .unwrap();
             assert_eq!(
                 h.errors.recv().await.unwrap().code,
@@ -383,7 +383,7 @@ async fn explicit_close_failure_preserves_details_and_is_not_retried() {
                     LocalReply::ack(request.cid())
                 };
                 h.gate
-                    .on_receive(to, wire::encode_frame(&reply).unwrap())
+                    .on_receive(wire::encode_frame(&reply).unwrap(), Some(&to))
                     .unwrap();
             }
             assert_eq!(closing.await.unwrap_err(), expected);
@@ -439,8 +439,8 @@ async fn dropped_drain_waiter_does_not_cancel_shutdown_or_skip_final_outputs() {
                 ));
                 h.gate
                     .on_receive(
-                        to,
                         wire::encode_frame(&LocalReply::ack(request.cid())).unwrap(),
+                        Some(&to),
                     )
                     .unwrap();
             }
@@ -601,7 +601,7 @@ async fn warning_listener_failure_stops_gate_before_later_listeners() {
             let driver = h.start();
             h.open().await;
             h.gate
-                .on_receive("b", Bytes::from_static(b"bad remote checksum"))
+                .on_receive(Bytes::from_static(b"bad remote checksum"), None)
                 .unwrap();
             received.recv().await.unwrap();
             assert!(h.gate.is_stopped());
@@ -833,7 +833,7 @@ async fn accepted_stop_is_immediate_and_preserves_existing_fatal_error() {
             let driver = h.start();
             h.open().await;
             h.gate
-                .on_receive("procA", Bytes::from_static(b"bad local frame"))
+                .on_receive(Bytes::from_static(b"bad local frame"), Some("procA"))
                 .unwrap();
             let error = h.errors.recv().await.unwrap();
             h.gate.stop().unwrap();

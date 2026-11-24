@@ -39,6 +39,6 @@ export class MonsterProc extends EventEmitter<DiagnosticEvents> {
   readonly isOpen: boolean
   readonly db: DatabaseSync | null
 
-  onReceive(from: string, frame: Buffer): void
+  onReceive(frame: Buffer, from: string): void
   close(): void
 }

@@ -29,7 +29,10 @@ const gate = new Gate<bigint>('a', nodes, queued, asynchronous, () => gateOption
 expect<Promise<void>>(gate.open())
 expect<Promise<void>>(gate.awaitLeader())
 expect<Promise<void>>(gate.awaitLeader(true))
-expect<void>(gate.onReceive('b', frame))
+expect<void>(gate.onReceive(frame))
+expect<void>(gate.onReceive(frame, undefined))
+expect<void>(gate.onReceive(frame, null))
+expect<void>(gate.onReceive(frame, 'procA'))
 expect<string>(gate.id)
 expect<string[]>(gate.nodes)
 expect<boolean>(gate.isOpen)
@@ -110,6 +113,8 @@ expect<Equal<typeof unknownResult, unknown>>(true)
 expect<bigint>(unknownResult)
 // @ts-expect-error append requires a Buffer, not an arbitrary Uint8Array.
 gate.append(new Uint8Array(2))
+// @ts-expect-error Gate takes the frame first.
+gate.onReceive('procA', frame)
 // @ts-expect-error Batch items must be Buffers.
 gate.appendBatch(['increment'])
 // @ts-expect-error Timeouts are numbers of milliseconds.
@@ -136,7 +141,9 @@ const proc = new MonsterProc(role, 'a', nodes, send, '/tmp/a', () => procOptions
 expect<ProcRole>(proc.role)
 expect<DatabaseSync | null>(proc.db)
 expect<boolean>(proc.isOpen)
-expect<void>(proc.onReceive('gate', frame))
+expect<void>(proc.onReceive(frame, 'gate'))
+// @ts-expect-error Local delivery requires the sender.
+proc.onReceive(frame)
 expect<void>(proc.close())
 proc.on('warn', error => expect<ErrorWithCode>(error))
 proc.once('close', () => {})
@@ -171,16 +178,18 @@ new MonsterApply<bigint>('a', send, '/tmp/a', async (db, data) => {
 // @ts-expect-error A specified result type also checks the Apply callback's return value.
 new MonsterApply<bigint>('a', send, '/tmp/a', () => 'not a bigint')
 expect<DatabaseSync | null>(apply.db)
-expect<Promise<void>>(apply.onReceive('gate', frame))
+expect<Promise<void>>(apply.onReceive(frame, 'gate'))
+// @ts-expect-error Local delivery requires the sender.
+apply.onReceive(frame)
 expect<Promise<void>>(apply.close())
 apply.on('error', error => expect<ErrorWithCode>(error))
 // @ts-expect-error Callback command data is nullable.
 new MonsterApply('a', send, '/tmp/a', (db: DatabaseSync, data: Buffer) => 1)
 
 const peers: Record<string, TcpPeer> = {
-  a: { host: '127.0.0.1', basePort: 41000 },
-  b: { host: '127.0.0.1', basePort: 41010 },
-  c: { host: '127.0.0.1', basePort: 41020 },
+  a: { host: '127.0.0.1', port: 41000 },
+  b: { host: '127.0.0.1', port: 41001 },
+  c: { host: '127.0.0.1', port: 41002 },
 }
 const tcpOptions: TcpClusterOptions = {
   bindHost: '0.0.0.0', reconnectDelay: 250, connectTimeout: 5000,
@@ -194,14 +203,16 @@ for (const transport of [tcp, udx]) {
   expect<boolean>(transport.isOpen)
   expect<boolean>(transport.isStopped)
   expect<Promise<never>>(transport.failed)
-  transport.on('message', (from, buffer) => {
-    expect<Equal<typeof from, string>>(true)
-    expect<Equal<typeof buffer, Buffer>>(true)
-  })
-  transport.on('warn', error => expect<ErrorWithCode>(error))
   expect<void>(transport.stop())
   expect<Promise<void>>(transport.close())
 }
+tcp.on('message', buffer => expect<Equal<typeof buffer, Buffer>>(true))
+udx.on('message', (from, buffer) => {
+  expect<Equal<typeof from, string>>(true)
+  expect<Equal<typeof buffer, Buffer>>(true)
+})
+tcp.on('warn', error => expect<ErrorWithCode>(error))
+udx.on('warn', error => expect<ErrorWithCode>(error))
 expect<boolean>(tcp.send('b', frame))
 expect<true>(udx.send('apply', frame))
 expect<Promise<void>>(udx.ready())
@@ -209,7 +220,7 @@ expect<string | undefined>(udx.paths['apply'])
 const routedSend: Send = (to, buffer) => tcp.send(to, buffer)
 const routedLocalSend: Send = (to, buffer) => udx.send(to, buffer)
 // @ts-expect-error Router messages deliver Buffers.
-tcp.on('message', (from: string, data: string) => {})
+tcp.on('message', (data: string) => {})
 // @ts-expect-error UDX does not accept caller-selected socket paths.
 new UdxRouter(['apply'], { paths: { apply: '/tmp/apply' } })
 

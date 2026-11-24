@@ -20,7 +20,7 @@ export class MonsterApply<Result = unknown> extends EventEmitter<DiagnosticEvent
   db: DatabaseSync | null
   readonly isOpen: boolean
 
-  onReceive(from: string, frame: Buffer): Promise<void>
+  onReceive(frame: Buffer, from: string): Promise<void>
   close(): Promise<void>
 }
 

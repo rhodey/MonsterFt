@@ -236,38 +236,35 @@ impl Proc {
                 client_id: client_id.clone(),
             },
             Input::ApplyResult { reply } => Task::Apply(reply.clone()),
-            Input::ClusterMessage { from, frame } => {
-                if from == &self.id || !self.nodes.contains(from) {
-                    return Err(Error::new(
-                        Code::RpcIllegal,
-                        "Proc cluster sender is illegal",
-                    ));
-                }
+            Input::ClusterMessage { frame } => {
                 // Gate accepted this checksum already. A failure here is local and terminal.
                 let payload = wire::verify_frame(frame)?;
-                let parsed = (|| -> Result<Value> {
+                let parsed = (|| -> Result<Task> {
                     let envelope: protocol::Envelope<Value> = wire::decode_payload(payload)?;
-                    if envelope.to != self.id
-                        || local::field(&envelope.message, "from").and_then(Value::as_str)
-                            != Some(from.as_str())
-                    {
+                    let from = local::field(&envelope.message, "from").and_then(Value::as_str);
+                    let Some(from) = from
+                        .filter(|id| *id != self.id && self.nodes.iter().any(|peer| peer == id))
+                    else {
                         return Err(Error::new(
                             Code::RpcIllegal,
-                            "Proc cluster envelope is illegal",
+                            "Proc cluster sender is illegal",
+                        ));
+                    };
+                    if envelope.to != self.id {
+                        return Err(Error::new(
+                            Code::RpcIllegal,
+                            "Proc cluster destination is illegal",
                         ));
                     }
                     local::kind(&envelope.message)?;
-                    Ok(envelope.message)
+                    Ok(Task::Receive {
+                        from: from.to_owned(),
+                        message: envelope.message,
+                    })
                 })();
                 match parsed {
-                    Ok(message) => Task::Receive {
-                        from: from.clone(),
-                        message,
-                    },
-                    Err(mut error) => {
-                        error.message = format!("cluster frame from {from}: {}", error.message);
-                        return Ok((Task::Tick, Some(error)));
-                    }
+                    Ok(task) => task,
+                    Err(error) => return Ok((Task::Tick, Some(error.context("cluster frame: ")))),
                 }
             }
         };
@@ -401,7 +398,7 @@ impl Proc {
         Ok(())
     }
 
-    pub fn on_receive(&mut self, from: &str, frame: Bytes) {
+    pub fn on_receive(&mut self, frame: Bytes, from: &str) {
         if from != "gate" {
             if !self.is_stopped() {
                 self.warn(Error::new(
@@ -452,7 +449,7 @@ impl Proc {
             tokio::select! {
                 _=stop.stopped()=>{self.close()?;break;},
                 message=received.recv()=>match message {
-                    Some(message)=>self.on_receive(&message.from,message.frame),
+                    Some(message)=>self.on_receive(message.frame, &message.from),
                     None=>{self.close()?;break;},
                 },
                 _=async {match deadline {Some(deadline)=>tokio::time::sleep_until(deadline).await,None=>std::future::pending().await}}=>self.check_watchdog(tokio::time::Instant::now()),

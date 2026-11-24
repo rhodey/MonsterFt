@@ -39,7 +39,7 @@ function protocol(opts={}, nodes=['a', 'b', 'c'], id='a') {
     rows() { return readDatabase(paths.procA, (db) => db.prepare('SELECT * FROM raft_log ORDER BY seq').all()) },
     request(proc, msg) {
       const request = { cid: `local-${++cid}`, ...msg }
-      proc.onReceive('gate', encodeFrame(request))
+      proc.onReceive(encodeFrame(request), 'gate')
       return sent.find((item) => item.role === proc.role && item.reply.cid === request.cid)?.reply
     },
     open() {
@@ -74,7 +74,7 @@ function protocol(opts={}, nodes=['a', 'b', 'c'], id='a') {
       return procs.map((proc) => f.request(proc, request))[0]
     },
     rpc(message, from=nodes.find((peer) => peer !== id), timems=f.proc.executor.timems) {
-      return f.input('cluster_message', { from, timems,
+      return f.input('cluster_message', { timems,
         frame: encodeFrame({ to: id, message: { from, ...message } }),
       })
     },

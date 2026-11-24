@@ -513,11 +513,13 @@ test('closing a forwarded caller abandons its reply without affecting later call
     t.equal((await reopened.gate.append(buf('new caller')))[1], 'new caller')
     t.equal(settlements, 1)
     const before = reopened.gate.term
-    reopened.gate.onReceive('unknown', encodeFrame({ arbitrary: 'ignored' }))
-    reopened.gate.onReceive(caller, encodeFrame({ arbitrary: 'ignored' }))
-    t.equal(reopened.gate.term, before, 'unknown and self senders are ignored at Gate')
-    t.ok(reopened.gate.isOpen, 'unknown and self senders leave Gate running')
+    for (const from of ['unknown', caller, 'procA']) {
+      reopened.gate.onReceive(encodeFrame({ to: caller, message: {
+        type: 'vote_request', from, term: before + 100n, termP: 0n, seqP: 0n,
+      } }))
+    }
     t.equal((await reopened.gate.append(buf('after invalid senders')))[1], 'after invalid senders')
+    t.equal(reopened.gate.term, before, 'invalid remote sender claims do not change the election')
   } finally { await c.close() }
   t.end()
 })

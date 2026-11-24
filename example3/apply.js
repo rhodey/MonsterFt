@@ -44,7 +44,7 @@ proc.on('error', (err) => {
   console.error(`${id}/apply`, err.message, err)
   process.exit(1)
 })
-socket.on('data', (frame) => proc.onReceive('gate', frame))
+socket.on('data', (frame) => proc.onReceive(frame, 'gate'))
 socket.on('error', (err) => {
   console.error(`${id}/apply/socket`, err.message, err)
   process.exit(1)

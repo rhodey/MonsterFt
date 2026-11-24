@@ -19,7 +19,7 @@ const orderedRequests = () => [
   input('start'), input('tick'),
   input('append', { clientId: 'public', items: [Buffer.from('item')] }),
   input('drain', { clientId: 'draining' }),
-  input('cluster_message', { from: 'b', frame: wire.encodeFrame({
+  input('cluster_message', { frame: wire.encodeFrame({
     to: 'a', message: { from: 'b', type: 'vote', term: 2n, voteGranted: true },
   }) }),
   input('apply_result', { reply: { type: 'ack', cid: 'executed', tickCount: 0n } }),
@@ -155,39 +155,40 @@ test('every ordered request requires its tick-correlated Proc output completion'
 test('ordered input parsing distinguishes remote invalid messages from local corruption', (t) => {
   const envelope = { to: 'a', message: { from: 'b', type: 'vote', term: 2n, voteGranted: true } }
   const parsed = utilm.parseProcRequest(input('cluster_message', {
-    from: 'b', frame: wire.encodeFrame(envelope),
+    frame: wire.encodeFrame(envelope),
   }), 'a', nodes)
   t.deepEqual(parsed.clusterMessage, envelope.message)
   t.equal(parsed.warning, null)
   const malformed = Buffer.from([0xdb, 0, 0, 0, 10, 65])
   const badPayload = wire.framePayload(malformed, wire.checksum(malformed))
-  const ignored = utilm.parseProcRequest(input('cluster_message', { from: 'b', frame: badPayload }), 'a', nodes)
+  const ignored = utilm.parseProcRequest(input('cluster_message', { frame: badPayload }), 'a', nodes)
   t.equal(ignored.clusterMessage, null)
   t.equal(ignored.warning.code, Err.FRAME_CORRUPT)
-  t.match(ignored.warning.message, /^cluster frame from b:/)
+  t.match(ignored.warning.message, /^cluster frame:/)
   const corrupt = Buffer.from(badPayload)
   corrupt[0] ^= 1
-  t.throws(() => utilm.parseProcRequest(input('cluster_message', { from: 'b', frame: corrupt }), 'a', nodes),
+  t.throws(() => utilm.parseProcRequest(input('cluster_message', { frame: corrupt }), 'a', nodes),
     isError(Err.FRAME_CORRUPT), 'nested checksum failures are never downgraded')
   for (const changed of [
     null,
     { to: 'a' },
     { ...envelope, to: 'c' },
-    { ...envelope, message: { ...envelope.message, from: 'c' } },
+    ...['a', 'unknown', 'gate', 'procA', 'apply', undefined].map(from =>
+      ({ ...envelope, message: { ...envelope.message, from } })),
     { ...envelope, message: { from: 'b' } },
   ]) {
     const ignored = utilm.parseProcRequest(input('cluster_message', {
-      from: 'b', frame: wire.encodeFrame(changed),
+      frame: wire.encodeFrame(changed),
     }), 'a', nodes)
     t.equal(ignored.clusterMessage, null, 'invalid remote envelope is discarded')
     t.equal(ignored.warning.code, Err.RPC_ILLEGAL)
-    t.match(ignored.warning.message, /^cluster frame from b:/)
+    t.match(ignored.warning.message, /^cluster frame:/)
   }
-  for (const from of ['a', 'unknown']) {
-    t.throws(() => utilm.parseProcRequest(input('cluster_message', {
-      from, frame: wire.encodeFrame(envelope),
-    }), 'a', nodes), isError(Err.RPC_ILLEGAL), 'invalid local input sender remains fatal')
-  }
+  const other = { ...envelope.message, from: 'c' }
+  const received = utilm.parseProcRequest(input('cluster_message', {
+    frame: wire.encodeFrame({ to: 'a', message: other }),
+  }), 'a', nodes)
+  t.deepEqual(received.clusterMessage, other, 'remote member identity comes from the frame')
   t.end()
 })
 

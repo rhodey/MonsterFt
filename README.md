@@ -22,7 +22,7 @@ const nodesById = new Map()
 
 function createNode(id) {
   const send = (to, frame) => {
-    return nodesById.get(to).onReceive(id, frame)
+    return nodesById.get(to).onReceive(frame)
   }
 
   const apply = (db, data, term, seq, index) => {
@@ -53,7 +53,7 @@ function createNode(id) {
 
   const local = new Map()
   const localSend = (from) => (to, frame) => {
-    return local.get(to).onReceive(from, frame)
+    return local.get(to).onReceive(frame, from)
   }
 
   const gate = new Gate(id, nodeIds, send, localSend('gate'))

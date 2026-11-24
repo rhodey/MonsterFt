@@ -36,7 +36,7 @@ function fixture() {
         procs, replies, events,
         request(i, type, fields = {}) {
           const message = { cid: `cleanup-${++cid}`, type, ...fields }
-          procs[i].onReceive('gate', wire.encodeFrame(message))
+          procs[i].onReceive(wire.encodeFrame(message), 'gate')
           return replies[i].find((reply) => reply.cid === message.cid)
         },
         phase(type) {

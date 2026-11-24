@@ -16,7 +16,7 @@ mkdirSync(directory, { recursive: true })
 
 const basePort = Number(process.env.MONSTERFT_PORT ?? 41000)
 const peers = Object.fromEntries(nodeIds.map((nodeId, index) => [nodeId, {
-  host: '127.0.0.1', basePort: basePort + index * nodeIds.length,
+  host: '127.0.0.1', port: basePort + index,
 }]))
 
 const supervisor = new Supervisor(async () => {
@@ -26,8 +26,8 @@ const supervisor = new Supervisor(async () => {
   const localSend = (to, frame) => local.send(to, frame)
   const gate = new Gate(id, nodeIds, send, localSend)
 
-  cluster.on('message', (from, frame) => gate.onReceive(from, frame))
-  local.on('message', (from, frame) => gate.onReceive(from, frame))
+  cluster.on('message', (frame) => gate.onReceive(frame))
+  local.on('message', (from, frame) => gate.onReceive(frame, from))
   cluster.on('error', (err) => console.error(`${id}/tcp`, err))
   local.on('error', (err) => console.error(`${id}/udx`, err))
   gate.on('error', (err) => console.error(`${id}/gate`, err))

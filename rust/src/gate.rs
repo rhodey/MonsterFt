@@ -3,10 +3,7 @@ use crate::{
     Value,
     diagnostics::{Diagnostics, panic_error},
     error::{Code, Error, Result},
-    local::{
-        self, COMPONENTS, Input, LocalReply, OrderedInput, PROCS, Received, SendFrame,
-        StartupRequest,
-    },
+    local::{self, COMPONENTS, Input, LocalReply, OrderedInput, PROCS, SendFrame, StartupRequest},
     protocol::{
         self, ApplyCompletion, CommandResult, Envelope, Event, Execute, Outcome, State, Status,
     },
@@ -123,13 +120,15 @@ enum Command {
     Wait(EventKind, Condition, Reply<GateEvent>),
     Leader(bool, Reply<()>),
 }
+/// Gate mailbox entries contain a local component role or `None` for a cluster frame.
+pub type GateMessage = (Bytes, Option<String>);
 /// Local handle; event listeners and status access remain on its owner thread.
 #[derive(Clone)]
 pub struct Gate {
     id: String,
     nodes: Vec<String>,
     commands: mpsc::Sender<Command>,
-    incoming: mpsc::Sender<Received>,
+    incoming: mpsc::Sender<GateMessage>,
     view: Rc<RefCell<View>>,
 }
 impl Gate {
@@ -246,15 +245,12 @@ impl Gate {
             }
         }
     }
-    pub fn receiver(&self) -> mpsc::Sender<Received> {
+    pub fn receiver(&self) -> mpsc::Sender<GateMessage> {
         self.incoming.clone()
     }
-    pub fn on_receive(&self, from: impl Into<String>, frame: Bytes) -> Result<()> {
+    pub fn on_receive(&self, frame: Bytes, from: Option<&str>) -> Result<()> {
         self.incoming
-            .try_send(Received {
-                from: from.into(),
-                frame,
-            })
+            .try_send((frame, from.map(str::to_owned)))
             .map_err(|_| Error::new(Code::SendError, "Gate input queue is full or stopped"))
     }
     fn operation<T>(&self, make: impl FnOnce(Reply<T>) -> Command) -> Operation<T> {
@@ -390,7 +386,7 @@ pub struct GateRunner {
     options: GateOptions,
     view: Rc<RefCell<View>>,
     commands: mpsc::Receiver<Command>,
-    incoming: mpsc::Receiver<Received>,
+    incoming: mpsc::Receiver<GateMessage>,
     diagnostics: Diagnostics,
     seed: [u8; 16],
     stage: Stage,
@@ -901,115 +897,114 @@ impl GateRunner {
         }
         Ok(())
     }
-    fn receive(&mut self, received: Received) -> Result<()> {
-        let Received { from, frame } = received;
-        if COMPONENTS.contains(&from.as_str()) {
-            if self.stopped() && self.requests.is_empty() {
-                return Ok(());
+    fn receive(&mut self, (frame, from): GateMessage) -> Result<()> {
+        if let Some(role) = from {
+            return self.receive_local(frame, role);
+        }
+        if self.stopped() || self.stage == Stage::Idle {
+            return Ok(());
+        }
+        if let Err(error) = wire::verify_frame(&frame) {
+            return self.warning(error.context("cluster frame: "));
+        }
+        if self.queue.len() < self.options.mailbox_capacity {
+            self.enqueue(Input::ClusterMessage { frame })?;
+        }
+        Ok(())
+    }
+    fn receive_local(&mut self, frame: Bytes, from: String) -> Result<()> {
+        if !COMPONENTS.contains(&from.as_str()) {
+            return self.warning(Error::new(
+                Code::RpcIllegal,
+                "local reply has invalid sender",
+            ));
+        }
+        if self.stopped() && self.requests.is_empty() {
+            return Ok(());
+        }
+        let reply: LocalReply = wire::decode_frame(&frame)?;
+        if reply.cid().is_empty() {
+            return Err(Error::new(Code::RpcIllegal, "local ack_err cid is illegal"));
+        }
+        let key = (from.clone(), reply.cid().to_owned());
+        let Some(pending) = self.requests.get(&key) else {
+            return Ok(());
+        };
+        let purpose = pending.purpose.clone();
+        if let LocalReply::Ack {
+            tick_count,
+            outputs,
+            ..
+        } = &reply
+        {
+            match &purpose {
+                Purpose::Input(expected) => {
+                    if *tick_count != Some(*expected)
+                        || outputs.is_none()
+                        || from != "procA" && outputs.as_ref().unwrap().iter().any(|p| p.len() != 8)
+                    {
+                        return Err(Error::new(
+                            Code::MonsterIllegal,
+                            "Proc completion is illegal",
+                        ));
+                    }
+                }
+                Purpose::Apply(request) => {
+                    if *tick_count != Some(request.tick_count) {
+                        return Err(Error::new(
+                            Code::MonsterIllegal,
+                            "Apply completion tickCount is illegal",
+                        ));
+                    }
+                }
+                _ => {}
             }
-            let reply: LocalReply = wire::decode_frame(&frame)?;
-            if reply.cid().is_empty() {
-                return Err(Error::new(Code::RpcIllegal, "local ack_err cid is illegal"));
+        }
+        self.requests.remove(&key);
+        match reply {
+            LocalReply::Err { error, .. } => {
+                if matches!(purpose, Purpose::Close) {
+                    self.close_error.get_or_insert(error);
+                    self.finish_close();
+                    Ok(())
+                } else {
+                    Err(error)
+                }
             }
-            let key = (from.clone(), reply.cid().to_owned());
-            let Some(pending) = self.requests.get(&key) else {
-                return Ok(());
-            };
-            let purpose = pending.purpose.clone();
-            if let LocalReply::Ack {
+            LocalReply::Ack {
+                cid,
                 tick_count,
                 outputs,
-                ..
-            } = &reply
-            {
-                match &purpose {
-                    Purpose::Input(expected) => {
-                        if *tick_count != Some(*expected)
-                            || outputs.is_none()
-                            || from != "procA"
-                                && outputs.as_ref().unwrap().iter().any(|p| p.len() != 8)
-                        {
-                            return Err(Error::new(
-                                Code::MonsterIllegal,
-                                "Proc completion is illegal",
-                            ));
-                        }
+                selection,
+                receipt,
+                outcomes,
+            } => match purpose {
+                Purpose::Hello => {
+                    self.hello_done.insert(from);
+                    if self.hello_done.len() == 4 {
+                        self.startup(Stage::Open(0), &[COMPONENTS[0]])?;
                     }
-                    Purpose::Apply(request) => {
-                        if *tick_count != Some(request.tick_count) {
-                            return Err(Error::new(
-                                Code::MonsterIllegal,
-                                "Apply completion tickCount is illegal",
-                            ));
-                        }
-                    }
-                    _ => {}
+                    Ok(())
                 }
-            }
-            self.requests.remove(&key);
-            match reply {
-                LocalReply::Err { error, .. } => {
-                    if matches!(purpose, Purpose::Close) {
-                        self.close_error.get_or_insert(error);
-                        self.finish_close();
-                        Ok(())
-                    } else {
-                        Err(error)
-                    }
+                Purpose::Startup => self.startup_reply(&from, selection),
+                Purpose::Input(_) => self.input_reply(&from, outputs.unwrap()),
+                Purpose::Apply(_) => {
+                    let reply = ApplyCompletion {
+                        cid,
+                        tick_count: tick_count.unwrap(),
+                        receipt: receipt
+                            .ok_or_else(|| Error::new(Code::RpcIllegal, "Apply receipt missing"))?,
+                        outcomes: outcomes.ok_or_else(|| {
+                            Error::new(Code::RpcIllegal, "Apply outcomes missing")
+                        })?,
+                    };
+                    self.enqueue(Input::ApplyResult { reply })
                 }
-                LocalReply::Ack {
-                    cid,
-                    tick_count,
-                    outputs,
-                    selection,
-                    receipt,
-                    outcomes,
-                } => match purpose {
-                    Purpose::Hello => {
-                        self.hello_done.insert(from);
-                        if self.hello_done.len() == 4 {
-                            self.startup(Stage::Open(0), &[COMPONENTS[0]])?;
-                        }
-                        Ok(())
-                    }
-                    Purpose::Startup => self.startup_reply(&from, selection),
-                    Purpose::Input(_) => self.input_reply(&from, outputs.unwrap()),
-                    Purpose::Apply(_) => {
-                        let reply = ApplyCompletion {
-                            cid,
-                            tick_count: tick_count.unwrap(),
-                            receipt: receipt.ok_or_else(|| {
-                                Error::new(Code::RpcIllegal, "Apply receipt missing")
-                            })?,
-                            outcomes: outcomes.ok_or_else(|| {
-                                Error::new(Code::RpcIllegal, "Apply outcomes missing")
-                            })?,
-                        };
-                        self.enqueue(Input::ApplyResult { reply })
-                    }
-                    Purpose::Close => {
-                        self.finish_close();
-                        Ok(())
-                    }
-                },
-            }
-        } else {
-            if self.stopped() || self.stage == Stage::Idle {
-                return Ok(());
-            }
-            if from == self.id || !self.nodes.contains(&from) {
-                return self.warning(Error::new(
-                    Code::RpcIllegal,
-                    "cluster frame has invalid sender",
-                ));
-            }
-            if let Err(error) = wire::verify_frame(&frame) {
-                return self.warning(error.context(format!("cluster frame from {from}: ")));
-            }
-            if self.queue.len() < self.options.mailbox_capacity {
-                self.enqueue(Input::ClusterMessage { from, frame })?;
-            }
-            Ok(())
+                Purpose::Close => {
+                    self.finish_close();
+                    Ok(())
+                }
+            },
         }
     }
     fn input_reply(&mut self, from: &str, outputs: Vec<Bytes>) -> Result<()> {

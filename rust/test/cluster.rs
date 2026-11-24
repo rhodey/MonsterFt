@@ -27,7 +27,7 @@ use tokio::{
 const LOCAL_TIMEOUT: Duration = Duration::from_secs(10);
 const WAIT_TIMEOUT: Duration = Duration::from_secs(5);
 
-type Routes = Rc<RefCell<BTreeMap<String, mpsc::Sender<Received>>>>;
+type Routes = Rc<RefCell<BTreeMap<String, Gate>>>;
 struct Cluster {
     gates: Vec<Gate>,
     owners: Vec<JoinHandle<Result<()>>>,
@@ -64,10 +64,9 @@ impl Cluster {
                 receivers.insert(role.to_owned(), rx);
             }
             let network = routes.clone();
-            let from = id.clone();
             let remote: SendFrame = Box::new(move |to, frame| {
                 if let Some(tx) = network.borrow().get(to) {
-                    enqueue(tx, &from, frame)?;
+                    tx.on_receive(frame, None)?;
                 }
                 Ok(())
             });
@@ -115,11 +114,11 @@ impl Cluster {
             driver
                 .diagnostics()
                 .on_error(move |e| capture.borrow_mut().push(e.clone()));
-            routes.borrow_mut().insert(id.clone(), gate.receiver());
+            routes.borrow_mut().insert(id.clone(), gate.clone());
             for role in ProcRole::ALL {
-                let tx = gate.receiver();
+                let tx = gate.clone();
                 let from = role.as_str();
-                let send: SendFrame = Box::new(move |_, frame| enqueue(&tx, from, frame));
+                let send: SendFrame = Box::new(move |_, frame| tx.on_receive(frame, Some(from)));
                 let mut opts = Options {
                     local_timeout: LOCAL_TIMEOUT,
                     ..Default::default()
@@ -133,7 +132,7 @@ impl Cluster {
                     proc.run(receivers.remove(role.as_str()).unwrap()),
                 ));
             }
-            let tx = gate.receiver();
+            let tx = gate.clone();
             let inject = fault.clone();
             let send: SendFrame = Box::new(move |_, frame| {
                 if inject.get() == 1
@@ -145,7 +144,7 @@ impl Cluster {
                 {
                     return Ok(());
                 }
-                enqueue(&tx, "apply", frame)
+                tx.on_receive(frame, Some("apply"))
             });
             let callback = apply_async(
                 async |db: &Connection, command: Option<&[u8]>, _: &ApplyContext| {

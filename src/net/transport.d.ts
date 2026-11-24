@@ -4,13 +4,13 @@ import type { ErrorWithCode } from '../error.js'
 import type { EmitterEvents } from '../types.js'
 import type { FrameOptions } from './stream.js'
 
-export interface TransportEvents extends EmitterEvents {
-  message: [from: string, frame: Buffer]
+export interface TransportEvents<Message extends unknown[]> extends EmitterEvents {
+  message: Message
   warn: [error: ErrorWithCode]
   error: [error: ErrorWithCode]
 }
 
-export class Transport extends EventEmitter<TransportEvents> {
+export class Transport<Message extends unknown[] = [from: string, frame: Buffer]> extends EventEmitter<TransportEvents<Message>> {
   constructor(opts?: FrameOptions)
   readonly isOpen: boolean
   readonly isStopped: boolean

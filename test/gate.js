@@ -32,7 +32,7 @@ function harness(options = {}) {
   const errors = []
   const warnings = []
   let gate
-  const reply = (from, message) => gate.onReceive(from, wire.encodeFrame(message))
+  const reply = (from, message) => gate.onReceive(wire.encodeFrame(message), from)
   const complete = (from, input, outputs = []) => reply(from, {
     type: 'ack', cid: input.cid, tickCount: input.tickCount,
     outputs: from === 'procA' ? outputs : outputs.map((output) => contribution(from, output)),
@@ -119,8 +119,11 @@ test('Gate opens database owners one at a time before capture', async (t) => {
   })
   const opening = h.gate.open()
   await immediate()
+  const open = h.requests.find(({ to, message }) => to === 'procA' && message.type === 'open')
+  h.gate.onReceive(wire.encodeFrame({ type: 'ack', from: 'procA', cid: open.message.cid }))
+  await immediate()
   t.deepEqual(h.requests.filter((r) => r.message.type === 'open').map((r) => r.to), ['procA'],
-    'other owners wait while the first owner opens its file')
+    'a remote frame claiming procA cannot complete its pending local open')
   t.notOk(h.requests.some((r) => r.message.type === 'capture'), 'capture has not started')
   release()
   await opening
@@ -156,7 +159,7 @@ test('Gate sends each ordered operation directly in its type field', async (t) =
   try {
     await h.gate.open()
     t.deepEqual(await h.gate.append(Buffer.from('work')), [3n, 'work'])
-    h.gate.onReceive('b', remote)
+    h.gate.onReceive(remote)
     await delay(10)
     await h.gate.drainCmd()
     const inputs = h.requests.filter(({ to, message }) => to === 'procA' && isInputType(message.type))
@@ -368,7 +371,7 @@ test('Gate holds every output until all three complete in any arrival order', as
           return value
         })
         await immediate()
-        h.gate.onReceive('b', wire.encodeFrame({ to: 'a', message: { type: 'append' } }))
+        h.gate.onReceive(wire.encodeFrame({ to: 'a', message: { type: 'append' } }))
         for (let i = 0; i < order.length; i++) {
           if (delayed) { setImmediate(completions.get(order[i])) }
           else { completions.get(order[i])() }
@@ -455,7 +458,7 @@ test('Gate does not rehash output bytes damaged after agreement', async (t) => {
           outputs: to === 'procA' ? outputs : outputs.map((payload) => contribution(to, payload)),
         })
         if (to === 'procA') { aPayload = wire.decodeFrame(response).outputs[1] }
-        h.gate.onReceive(to, response)
+        h.gate.onReceive(response, to)
         return true
       },
     })
@@ -599,7 +602,7 @@ test('Gate Apply watchdog expires while a later input waits for a third Proc', a
     await h.gate.open()
     const pending = h.gate.append(Buffer.from('item')).catch((err) => err)
     await immediate()
-    h.gate.onReceive('b', wire.encodeFrame({ to: 'a', message: { type: 'append' } }))
+    h.gate.onReceive(wire.encodeFrame({ to: 'a', message: { type: 'append' } }))
     await immediate()
     t.ok(h.requests.some(({ to, message }) => to === 'procC' && message.type === 'cluster_message'),
       'a later input is waiting for its third completion')
@@ -643,7 +646,7 @@ test('Gate cancels Apply timeout when reply arrives before queued delivery', asy
     await h.gate.open()
     const pending = h.gate.append(Buffer.from('work'))
     await immediate()
-    h.gate.onReceive('b', wire.encodeFrame({ to: 'a', message: { type: 'append' } }))
+    h.gate.onReceive(wire.encodeFrame({ to: 'a', message: { type: 'append' } }))
     await immediate()
     replyApply()
     await delay(40)
@@ -693,7 +696,7 @@ test('Gate stop cancels local work without coordinating owner shutdown', async (
 test('Gate stop preserves an earlier fatal error', async (t) => {
   const h = harness()
   await h.gate.open()
-  h.gate.onReceive('procA', Buffer.alloc(17))
+  h.gate.onReceive(Buffer.alloc(17), 'procA')
   const failure = h.errors[0]
   h.gate.stop()
   h.gate.stop()
@@ -721,7 +724,7 @@ test('Gate rejects corrupt or malformed local replies and closes pending public 
     h.gate.on('fatal', () => { fatals++ })
     await h.gate.open()
     const pending = h.gate.append(Buffer.from('pending')).catch((err) => err)
-    h.gate.onReceive('procA', frame)
+    h.gate.onReceive(frame, 'procA')
     t.equal((await pending).code, code, `${label}: pending work rejects`)
     t.equal(h.errors[0].code, code)
     t.notOk(h.gate.isOpen, 'fatal failure stops Gate')
@@ -735,7 +738,28 @@ test('Gate rejects corrupt or malformed local replies and closes pending public 
   t.end()
 })
 
-test('Gate drops corrupt remote frames and invalid senders without cancelling pending commands', async (t) => {
+test('Gate treats an omitted, undefined, or null sender as remote', async (t) => {
+  const h = harness()
+  try {
+    await h.gate.open()
+    const frame = wire.encodeFrame({ to: 'a', message: { type: 'append', from: 'b' } })
+    h.gate.onReceive(frame, 'b')
+    await immediate()
+    t.deepEqual(h.warnings.map((err) => err.code), [Err.RPC_ILLEGAL])
+    t.notOk(h.requests.some(({ message }) => message.type === 'cluster_message'),
+      'an unknown local sender cannot queue a cluster message')
+    h.gate.onReceive(frame)
+    h.gate.onReceive(frame, undefined)
+    h.gate.onReceive(frame, null)
+    await immediate()
+    const delivered = h.requests.filter(({ message }) => message.type === 'cluster_message')
+    t.deepEqual(delivered.map(({ to }) => to), [...procs, ...procs, ...procs],
+      'all three calls deliver the frame to every Proc')
+  } finally { await h.gate.close() }
+  t.end()
+})
+
+test('Gate drops corrupt remote frames without cancelling pending commands', async (t) => {
   const completions = []
   const h = harness({
     local({ to, message, complete }) {
@@ -760,17 +784,10 @@ test('Gate drops corrupt remote frames and invalid senders without cancelling pe
     badPayload[badPayload.length - 1] ^= 1
     const frames = [badChecksum, badPayload, Buffer.alloc(0), Buffer.alloc(16), null]
     for (const [index, frame] of frames.entries()) {
-      h.gate.onReceive('b', frame)
+      h.gate.onReceive(frame)
       t.equal(h.warnings.length, index + 1, 'one warning per rejected frame')
       t.equal(h.warnings[index].code, Err.FRAME_CORRUPT)
-      t.match(h.warnings[index].message, /^cluster frame from b: frame (checksum differs|is incomplete)$/)
-    }
-    for (const from of ['unknown', h.gate.id]) {
-      const count = h.warnings.length
-      h.gate.onReceive(from, good)
-      t.equal(h.warnings.length, count + 1, `${from}: one warning for invalid sender`)
-      t.equal(h.warnings[count].code, Err.RPC_ILLEGAL)
-      t.equal(h.warnings[count].message, 'cluster frame has invalid sender')
+      t.match(h.warnings[index].message, /^cluster frame: frame (checksum differs|is incomplete)$/)
     }
     await immediate()
     t.deepEqual(h.errors, [], 'remote corruption emits no error')
@@ -782,7 +799,7 @@ test('Gate drops corrupt remote frames and invalid senders without cancelling pe
     t.deepEqual(await pending, [3n, 'pending'], 'healthy completion still resolves the command')
     await immediate()
     t.notOk(h.requests.some(({ message }) => message.type === 'cluster_message'), 'corrupt frames are never fanned out')
-    h.gate.onReceive('b', good)
+    h.gate.onReceive(good)
     await immediate()
     const delivered = h.requests.filter(({ message }) => message.type === 'cluster_message')
     t.equal(delivered.length, 3, 'a subsequent valid frame reaches all Procs')
@@ -802,7 +819,7 @@ test('remote checksum warning listeners may close Gate or fail fatally', async (
         if (action === 'throw') { throw failure }
         closing = h.gate.close()
       })
-      h.gate.onReceive('b', Buffer.alloc(17))
+      h.gate.onReceive(Buffer.alloc(17))
       t.equal(h.warnings.length, 1)
       t.notOk(h.gate.isOpen, `${action}: listener stops Gate`)
       t.equal(h.errors.length, action === 'throw' ? 1 : 0)
@@ -887,7 +904,7 @@ test('Gate close waits survive fatal stop until explicit cleanup', async (t) => 
   let resolved = 0
   const before = h.gate.awaitEvent('close').then(() => { resolved++ })
   const ordinary = h.gate.awaitEvent('cmd').catch((err) => err)
-  h.gate.onReceive('procA', Buffer.alloc(0))
+  h.gate.onReceive(Buffer.alloc(0), 'procA')
   const after = h.gate.awaitEvent('close').then(() => { resolved++ })
   await immediate()
   t.equal(resolved, 0, 'neither existing nor new close waits resolve on fatal stop')

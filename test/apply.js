@@ -43,7 +43,7 @@ function fixture(apply) {
   let tick = 0n
   const request = async (msg) => {
     msg = { cid: `request-${++cid}`, ...msg }
-    await component.onReceive('gate', encodeFrame(msg))
+    await component.onReceive(encodeFrame(msg), 'gate')
     return replies.find((reply) => reply.cid === msg.cid)
   }
   return {
@@ -660,7 +660,7 @@ test('Apply preserves the correct receipt on either side of COMMIT failure', asy
         f.base, () => { executions++ })
       reopened.on('error', (err) => errors.push(err))
       const receive = async (msg) => {
-        await reopened.onReceive('gate', encodeFrame(msg))
+        await reopened.onReceive(encodeFrame(msg), 'gate')
         return replies.find((reply) => reply.cid === msg.cid)
       }
       await receive({ type: 'hello', cid: 'h', seed })
@@ -702,7 +702,7 @@ test('Apply validates execution and frame checksums before invoking user code', 
       } else {
         const frame = encodeFrame({ type: 'execute', cid: 'corrupt' })
         frame[0] ^= 1
-        await f.component.onReceive('gate', frame)
+        await f.component.onReceive(frame, 'gate')
         t.equal(f.diagnostics.find(({ type }) => type === 'error').err.code, Err.FRAME_CORRUPT)
       }
       await f.component.close()

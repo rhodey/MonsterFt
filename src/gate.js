@@ -422,31 +422,34 @@ class Gate extends EventEmitter {
     })
   }
 
-  onReceive(from, frame) {
+  onReceive(frame, from = null) {
+    if (from !== null) { return this._receiveLocal(frame, from) }
+    if (this._stopped || (!this._opening && !this._open)) { return }
+    try {
+      wire.verifyFrame(frame)
+    } catch (err) {
+      this._emitSafe('warn', Err.wrapError(err, null, 'cluster frame: '))
+      return
+    }
+    this._enqueue({ type: 'cluster_message', frame })
+  }
+
+  _receiveLocal(frame, from) {
     if (this._stopped && this._requests.size === 0) { return }
     if (!this._opening && !this._open && !this._stopped) { return }
+    if (!COMPONENTS.includes(from)) {
+      this._emitSafe('warn', rpcIllegal('local reply has invalid sender'))
+      return
+    }
     try {
-      if (COMPONENTS.includes(from)) {
-        const message = wire.decodeFrame(frame)
-        utilm.validateAckErr(message)
-        const request = this._requests.get(`${from}:${message.cid}`)
-        if (!request) { return }
-        utilm.validateLocalAckErr(message, request.message, from)
-        if (request.message.type === 'hello' && message.type === 'ack') { this._helloDone.add(from) }
-        request.finish(message.type === 'err'
-          ? wire.errorFromWire(message.error ?? message) : null, message)
-      } else {
-        if (this._stopped) { return }
-        if (!this.nodes.includes(from) || from === this.id) {
-          this._emitSafe('warn', rpcIllegal('cluster frame has invalid sender'))
-          return
-        }
-        try { wire.verifyFrame(frame) } catch (err) {
-          this._emitSafe('warn', Err.wrapError(err, null, `cluster frame from ${from}: `))
-          return
-        }
-        this._enqueue({ type: 'cluster_message', from, frame })
-      }
+      const message = wire.decodeFrame(frame)
+      utilm.validateAckErr(message)
+      const request = this._requests.get(`${from}:${message.cid}`)
+      if (!request) { return }
+      utilm.validateLocalAckErr(message, request.message, from)
+      if (request.message.type === 'hello' && message.type === 'ack') { this._helloDone.add(from) }
+      request.finish(message.type === 'err'
+        ? wire.errorFromWire(message.error ?? message) : null, message)
     } catch (err) {
       this._fatal(err)
     }

@@ -16,12 +16,10 @@ class TcpCluster extends Transport {
     this.peers = Object.fromEntries(this.nodes.map((node) => {
       const peer = peers[node]
       if (!peer || typeof peer.host !== 'string' || peer.host.length === 0 ||
-          !Number.isSafeInteger(peer.basePort) || peer.basePort < 1 ||
-          peer.basePort > 65535 || this.nodes.some((sender, index) =>
-            sender !== node && peer.basePort + index > 65535)) {
+          !Number.isSafeInteger(peer.port) || peer.port < 1 || peer.port > 65535) {
         throw illegal(`TCP peer ${node} endpoint is illegal`)
       }
-      return [node, { host: peer.host, basePort: peer.basePort }]
+      return [node, { host: peer.host, port: peer.port }]
     }))
     this.bindHost = opts.bindHost ?? '0.0.0.0'
     this.reconnectDelay = opts.reconnectDelay ?? 250
@@ -31,11 +29,7 @@ class TcpCluster extends Transport {
         !Number.isSafeInteger(this.connectTimeout) || this.connectTimeout < 1) {
       throw illegal('TCP transport options are illegal')
     }
-    this._index = this.nodes.indexOf(id)
-    this._incoming = new Map()
     this._outgoing = new Map()
-    this._owners = new WeakMap()
-    this._warned = new WeakSet()
     this._attempts = new Map()
     this._pending = new Set()
     this._timers = new Map()
@@ -45,18 +39,13 @@ class TcpCluster extends Transport {
     for (const timer of this._timers.values()) { clearTimeout(timer) }
     this._timers.clear()
     for (const controller of this._attempts.values()) { controller.abort() }
-    this._incoming.clear()
     this._outgoing.clear()
   }
 
   async _settle() { await Promise.all(this._pending) }
 
   _connectionError(connection, error) {
-    const owner = this._owners.get(connection)
-    if (this._stopped || !owner || owner.connections.get(owner.peer) !== connection ||
-        this._warned.has(connection)) { return }
-    this._warned.add(connection)
-    this._emitSafe('warn', Err.wrapError(error, null, `TCP peer ${owner.peer} `))
+    this._emitSafe('warn', Err.wrapError(error, null, 'TCP incoming connection '))
   }
 
   send(to, frame) {
@@ -81,32 +70,23 @@ class TcpCluster extends Transport {
     }, this.reconnectDelay))
   }
 
-  _install(peer, connection, direction) {
+  _installOutgoing(peer, connection) {
     this._track(connection)
     if (this._stopped) { connection.destroy(); return }
-    const connections = direction === 'incoming' ? this._incoming : this._outgoing
-    const previous = connections.get(peer)
-    connections.set(peer, connection)
-    this._owners.set(connection, { peer, connections })
-    previous?.destroy()
-    connection.on('data', (frame) => {
-      if (this._stopped || connections.get(peer) !== connection) { return }
-      if (direction === 'incoming') {
-        this._emitSafe('message', peer, frame)
-      } else {
-        connection.destroy(new Err.ErrorWithCode(
-          `TCP peer ${peer} sent on an outgoing connection`, Err.FRAME_CORRUPT,
-        ))
-      }
+    this._outgoing.set(peer, connection)
+    connection.once('data', () => {
+      connection.destroy(new Err.ErrorWithCode(
+        `TCP peer ${peer} sent on an outgoing connection`, Err.FRAME_CORRUPT,
+      ))
     })
-    connection.on('error', (err) => this._connectionError(connection, err))
     connection.once('close', () => {
-      if (this._stopped || connections.get(peer) !== connection) { return }
-      connections.delete(peer)
-      if (!this._warned.has(connection)) {
-        this._emitSafe('warn', new Err.ErrorWithCode(`TCP peer ${peer} disconnected`, Err.SEND_ERROR))
-      }
-      if (direction === 'outgoing') { this._retry(peer) }
+      if (this._stopped) { return }
+      this._outgoing.delete(peer)
+      const error = connection.errored
+        ? Err.wrapError(connection.errored, null, `TCP peer ${peer} `)
+        : new Err.ErrorWithCode(`TCP peer ${peer} disconnected`, Err.SEND_ERROR)
+      this._emitSafe('warn', error)
+      this._retry(peer)
     })
   }
 
@@ -114,10 +94,9 @@ class TcpCluster extends Transport {
     if (this._stopped || this._attempts.has(peer) || this._outgoing.has(peer)) { return }
     const controller = new AbortController()
     this._attempts.set(peer, controller)
-    const endpoint = this.peers[peer]
-    const work = connectFrames({ host: endpoint.host, port: endpoint.basePort + this._index }, {
+    const work = connectFrames(this.peers[peer], {
       ...this._limits, connectTimeout: this.connectTimeout, signal: controller.signal,
-    }).then((connection) => this._install(peer, connection, 'outgoing'), (err) => {
+    }).then((connection) => this._installOutgoing(peer, connection), (err) => {
       if (!this._stopped) { this._emitSafe('warn', Err.wrapError(err, null, `TCP peer ${peer} `)) }
     }).finally(() => {
       this._attempts.delete(peer)
@@ -128,13 +107,16 @@ class TcpCluster extends Transport {
   }
 
   async _start() {
-    for (let index = 0; index < this.nodes.length; index++) {
-      if (index === this._index) { continue }
-      this._throwIfStopped()
-      const peer = this.nodes[index]
-      await this._listen({ host: this.bindHost, port: this.peers[this.id].basePort + index },
-        (connection) => this._install(peer, connection, 'incoming'))
-    }
+    await this._listen({ host: this.bindHost, port: this.peers[this.id].port }, (connection) => {
+      connection.on('data', (frame) => {
+        if (!this._stopped) { this._emitSafe('message', frame) }
+      })
+      connection.once('close', () => {
+        if (!this._stopped && !connection.errored) {
+          this._emitSafe('warn', new Err.ErrorWithCode('TCP incoming connection closed', Err.SEND_ERROR))
+        }
+      })
+    })
     this._throwIfStopped()
     for (const peer of this.nodes) {
       if (peer !== this.id) { this._connect(peer) }

@@ -67,7 +67,6 @@ pub enum Input {
     Start,
     Tick,
     ClusterMessage {
-        from: String,
         #[serde(deserialize_with = "crate::binary::bytes")]
         frame: Bytes,
     },

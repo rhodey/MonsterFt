@@ -188,7 +188,7 @@ class MonsterApply extends EventEmitter {
     return { receipt, outcomes: outcomesWire(outcomes) }
   }
 
-  async onReceive(from, buffer) {
+  async onReceive(frame, from) {
     if (from !== 'gate') {
       if (this._stopped) { return }
       this._emitSafe('warn', new Err.ErrorWithCode(
@@ -197,7 +197,7 @@ class MonsterApply extends EventEmitter {
       return
     }
     try {
-      let msg = decodeFrame(buffer)
+      let msg = decodeFrame(frame)
       if (msg?.to === 'apply') { msg = msg.message }
       if (msg?.type === 'close' && isCid(msg.cid)) {
         try {

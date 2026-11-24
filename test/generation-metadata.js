@@ -120,7 +120,7 @@ test('Apply rejects invalid hello seeds before creating a database', async (t) =
     try {
       const message = { type: 'hello', cid: 'hello' }
       if (value !== undefined) { message.seed = value }
-      await apply.onReceive('gate', encodeFrame(message))
+      await apply.onReceive(encodeFrame(message), 'gate')
       t.equal(errors[0]?.code, Err.RPC_ILLEGAL, 'invalid seed reports a local protocol error')
       t.equal(sends, 0, 'invalid hello is not acknowledged')
       t.deepEqual(fs.readdirSync(directory), [], 'invalid hello creates no database files')
