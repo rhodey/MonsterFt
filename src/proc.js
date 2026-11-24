@@ -160,7 +160,7 @@ class MonsterProc extends EventEmitter {
         case 'start': this.engine.start(); break
         case 'cluster_message':
           if (warning) { this.engine.warn(warning) }
-          else { this.engine.receive(message.from, clusterMessage) }
+          else { this.engine.receive(clusterMessage.from, clusterMessage) }
           break
         case 'append': this.engine.submit(message.clientId, message.items); break
         case 'drain': this.engine.drain(message.clientId); break
@@ -189,7 +189,7 @@ class MonsterProc extends EventEmitter {
     for (const { type, error } of localEvents) { this._emitSafe(type, error) }
   }
 
-  onReceive(from, frame) {
+  onReceive(frame, from) {
     if (from !== 'gate') {
       if (this._stopped) { return }
       this._emitSafe('warn', new Err.ErrorWithCode(

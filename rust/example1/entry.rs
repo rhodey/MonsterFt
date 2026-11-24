@@ -13,13 +13,10 @@ use monsterft::{
 use std::{cell::RefCell, collections::BTreeMap, path::PathBuf, rc::Rc, time::Duration};
 use tokio::{sync::mpsc, task::LocalSet};
 
-fn deliver(receiver: &mpsc::Sender<Received>, from: &str, frame: Bytes) -> Result<()> {
+fn deliver<T>(receiver: &mpsc::Sender<T>, message: T) -> Result<()> {
     // Delivery queues bytes; the receiving owner processes them later.
     receiver
-        .try_send(Received {
-            from: from.into(),
-            frame,
-        })
+        .try_send(message)
         .map_err(|error| Error::new(Code::SendError, error.to_string()))
 }
 
@@ -32,9 +29,7 @@ async fn run() -> Result<()> {
     let ids = vec!["1".to_string(), "2".to_string(), "3".to_string()];
 
     // All Gates share this in-process routing table on the main thread.
-    let network = Rc::new(RefCell::new(
-        BTreeMap::<String, mpsc::Sender<Received>>::new(),
-    ));
+    let network = Rc::new(RefCell::new(BTreeMap::<String, Gate>::new()));
 
     let mut gates = Vec::new();
     let mut threads = Vec::new();
@@ -57,11 +52,10 @@ async fn run() -> Result<()> {
 
         // Remote sends go to another Gate; local sends go to this node's owners.
         let routes = network.clone();
-        let from = id.clone();
 
         let send: SendFrame = Box::new(move |to, frame| {
             if let Some(receiver) = routes.borrow().get(to) {
-                deliver(receiver, &from, frame)?;
+                receiver.on_receive(frame, None)?;
             }
 
             Ok(())
@@ -72,7 +66,13 @@ async fn run() -> Result<()> {
                 .get(to)
                 .ok_or_else(|| Error::new(Code::SendError, "unknown local destination"))?;
 
-            deliver(receiver, "gate", frame)
+            deliver(
+                receiver,
+                Received {
+                    from: "gate".into(),
+                    frame,
+                },
+            )
         });
 
         let (gate, mut driver) =
@@ -83,7 +83,7 @@ async fn run() -> Result<()> {
             eprintln!("{name}/gate: {error}");
         });
 
-        network.borrow_mut().insert(id.clone(), gate.receiver());
+        network.borrow_mut().insert(id.clone(), gate.clone());
 
         // Each DB1 owner has its own thread and SQLite connection.
         for role in ProcRole::ALL {
@@ -99,8 +99,9 @@ async fn run() -> Result<()> {
                     .build()?;
 
                 runtime.block_on(async move {
-                    let local_send: SendFrame =
-                        Box::new(move |_, frame| deliver(&to_gate, role.as_str(), frame));
+                    let local_send: SendFrame = Box::new(move |_, frame| {
+                        deliver(&to_gate, (frame, Some(role.as_str().into())))
+                    });
 
                     let mut proc = Proc::new(
                         role,
@@ -131,7 +132,7 @@ async fn run() -> Result<()> {
 
             runtime.block_on(async move {
                 let local_send: SendFrame =
-                    Box::new(move |_, frame| deliver(&to_gate, "apply", frame));
+                    Box::new(move |_, frame| deliver(&to_gate, (frame, Some("apply".into()))));
 
                 let callback = apply_sync(|db, command, _| {
                     // Initialize the application table during database setup.

@@ -46,7 +46,7 @@ function fixture(opts={}) {
     base, procs, replies, events, paths: databasePaths(base),
     request(i, message) {
       message = { cid: `request-${++cid}`, ...message }
-      procs[i].onReceive('gate', wire.encodeFrame(message))
+      procs[i].onReceive(wire.encodeFrame(message), 'gate')
       return replies[i].find((reply) => reply.cid === message.cid)
     },
     startup(last = 'reconcile') {
@@ -176,7 +176,7 @@ test('Proc routes ordered work by type even when an extra kind disagrees', (t) =
     t.equal(f.input(0, 'start', { kind: 'tick' }).type, 'ack', 'type start completes startup')
     t.ok(proc.isOpen)
     t.equal(f.input(0, 'tick', { kind: 'start' }).type, 'ack', 'type tick does not restart Proc')
-    const reply = f.input(0, 'cluster_message', { kind: 'tick', from: 'b', frame: wire.encodeFrame({
+    const reply = f.input(0, 'cluster_message', { kind: 'tick', frame: wire.encodeFrame({
       to: 'a', message: { type: 'vote_request', from: 'b', term: 2n, termP: -1n, seqP: -1n },
     }) })
     t.equal(reply.type, 'ack', 'cluster message completes as ordered work')
@@ -266,7 +266,7 @@ test('Proc preserves the original fatal error and never retries failed cleanup',
       if (retryInListener) {
         proc.on('error', (err) => { if (err === failure) { proc.close() } })
       }
-      proc.onReceive('gate', Buffer.alloc(0))
+      proc.onReceive(Buffer.alloc(0), 'gate')
       t.equal(f.events[0][0].value.code, Err.FRAME_CORRUPT, 'the original failure is reported first')
       t.equal(f.events[0][1].value, failure, 'the cleanup failure is also reported')
       t.notOk(proc.isOpen, 'failed cleanup does not leave the Proc accepting work')
@@ -401,7 +401,7 @@ test('Proc treats CMD insert failures as fatal for local and forwarded commands'
     try {
       const proc = f.procs[0]
       const receive = (message) => f.input(0, 'cluster_message', {
-        from: 'b', frame: wire.encodeFrame({ to: 'a', message: { ...message, from: 'b' } }),
+        frame: wire.encodeFrame({ to: 'a', message: { ...message, from: 'b' } }),
       })
       f.input(0, 'start')
       f.input(0, 'tick', { timems: 10_000 })
@@ -440,7 +440,7 @@ test('Proc independently matches Apply replies to the original execution identit
     const f = fixture().startup()
     try {
       f.input(0, 'start')
-      const committed = f.input(0, 'cluster_message', { from: 'b', frame: wire.encodeFrame({
+      const committed = f.input(0, 'cluster_message', { frame: wire.encodeFrame({
         to: 'a', message: { type: 'append', from: 'b', cid: 'setup', term: 1n,
           termP: -1n, seqP: -1n, commitSeq: 0n,
           data: [{ term: 1n, entry: Buffer.alloc(0) }],
@@ -560,7 +560,7 @@ test('Proc independently verifies nested cluster frames before applying them', (
       data: [{ term: 9n, entry: Buffer.from('must not write') }],
     } })
     frame[0] ^= 1
-    const reply = f.input(0, 'cluster_message', { from: 'b', frame })
+    const reply = f.input(0, 'cluster_message', { frame })
     t.equal(reply, undefined, 'corrupt frame sends no fatal ERR reply')
     t.equal(f.events[0].find((event) => event.type === 'error').value.code, Err.FRAME_CORRUPT)
     t.equal(readDatabase(f.paths.procA, (db) => db.prepare('SELECT current_term FROM raft_election').get().current_term),
@@ -581,7 +581,7 @@ test('remote decode and envelope failures complete ordered inputs and still run 
     [wire.framePayload(malformedPayload, wire.checksum(malformedPayload)), Err.FRAME_CORRUPT],
     [wire.encodeFrame({ to: 'a' }), Err.RPC_ILLEGAL],
     [wire.encodeFrame({ ...envelope, to: 'wrong-node' }), Err.RPC_ILLEGAL],
-    [wire.encodeFrame({ ...envelope, message: { ...envelope.message, from: 'c' } }), Err.RPC_ILLEGAL],
+    [wire.encodeFrame({ ...envelope, message: { ...envelope.message, from: 'outside' } }), Err.RPC_ILLEGAL],
     [wire.encodeFrame({ ...envelope, message: { ...envelope.message, type: 1 } }), Err.RPC_ILLEGAL],
   ]
   for (const [frame, code] of cases) for (const electionDue of [false, true]) {
@@ -595,14 +595,14 @@ test('remote decode and envelope failures complete ordered inputs and still run 
           t.notOk(proc.db.isTransaction, 'warning runs after commit')
           t.equal(f.replies[i].at(-1).tickCount, 2n, 'warning follows input completion')
         })
-        const reply = f.input(i, 'cluster_message', { from: 'b', frame, timems })
+        const reply = f.input(i, 'cluster_message', { frame, timems })
         t.equal(reply.type, 'ack', 'discarding the RPC does not discard its Gate input')
         t.equal(reply.tickCount, 2n)
         t.equal(proc.executor.timems, timems)
         t.ok(proc.isOpen)
         t.deepEqual(f.events[i].map(({ type }) => type), ['warn'])
         t.equal(f.events[i][0].value.code, code)
-        t.match(f.events[i][0].value.message, /^cluster frame from b:/)
+        t.match(f.events[i][0].value.message, /^cluster frame:/)
         t.equal(proc.engine.state, electionDue ? 'candidate' : 'follower')
         t.equal(proc.db.prepare('SELECT current_term FROM raft_election').get().current_term,
           electionDue ? 1n : 0n, 'only a due timer changes durable election state')
@@ -620,7 +620,7 @@ test('remote decode and envelope failures complete ordered inputs and still run 
         seqP: -1n, termP: -1n, commitSeq: -1n,
       } })
       const continued = f.procs.map((proc, i) => {
-        const reply = f.input(i, 'cluster_message', { from: 'b', frame: heartbeat, timems })
+        const reply = f.input(i, 'cluster_message', { frame: heartbeat, timems })
         t.equal(reply.tickCount, 3n, 'the next valid remote input is accepted')
         t.equal(proc.engine.term, 2n)
         t.equal(proc.engine.leader, 'b')
@@ -643,7 +643,7 @@ test('remote decode and envelope warnings cannot hide generation failures', (t) 
       f.input(0, 'start')
       const proc = f.procs[0]
       proc.db.prepare('UPDATE monsterft_meta SET generation = ?').run(Buffer.alloc(16, 9))
-      t.equal(f.input(0, 'cluster_message', { from: 'b', frame }), undefined)
+      t.equal(f.input(0, 'cluster_message', { frame }), undefined)
       t.notOk(proc.isOpen)
       t.equal(proc._fatalError.code, Err.GENERATION_DIFF)
       t.notOk(f.events[0].some(({ type }) => type === 'warn'), 'the failed input publishes no warning')
@@ -670,13 +670,13 @@ test('Proc diagnostic listeners cannot hide later listeners or prevent teardown'
       proc.close()
     })
     const malformed = wire.framePayload(malformedPayload, wire.checksum(malformedPayload))
-    t.equal(f.input(0, 'cluster_message', { from: 'b', frame: malformed }).type, 'ack')
+    t.equal(f.input(0, 'cluster_message', { frame: malformed }).type, 'ack')
     t.equal(warned, 1, 'later warning listener still runs')
     t.equal(errored, 1, 'later error listener still runs')
     let received = false
     proc.engine.receive = () => { received = true }
     const frame = wire.encodeFrame({ to: 'a', message: { from: 'b', type: 'test' } })
-    t.equal(f.input(0, 'cluster_message', { from: 'b', frame }), undefined)
+    t.equal(f.input(0, 'cluster_message', { frame }), undefined)
     t.equal(errored, 1, 'subsequent input does not restart the failure path')
     t.notOk(received, 'subsequent protocol work is refused')
     t.deepEqual(f.events[0].map(({ type }) => type), ['warn', 'error', 'close'])

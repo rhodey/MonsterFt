@@ -4,7 +4,7 @@ import { Transport } from './transport.js'
 
 export interface TcpPeer {
   host: string
-  basePort: number
+  port: number
 }
 
 export interface TcpClusterOptions extends FrameOptions {
@@ -15,7 +15,7 @@ export interface TcpClusterOptions extends FrameOptions {
   connectTimeout?: number
 }
 
-export class TcpCluster extends Transport {
+export class TcpCluster extends Transport<[frame: Buffer]> {
   constructor(id: string, peers: Record<string, TcpPeer>, opts?: TcpClusterOptions)
   id: string
   nodes: string[]

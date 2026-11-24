@@ -48,6 +48,6 @@ component.on('error', (err) => {
   }
 })
 component.on('warn', diagnostics('warn'))
-connection.on('data', (frame) => component.onReceive('gate', frame))
+connection.on('data', (frame) => component.onReceive(frame, 'gate'))
 connection.on('error', () => process.exit(1))
 connection.on('close', () => process.exit(0))

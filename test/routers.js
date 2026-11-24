@@ -28,7 +28,7 @@ const watch = (router) => {
   const messages = []
   router.on('warn', (err) => warnings.push(err))
   router.on('error', (err) => errors.push(err))
-  router.on('message', (from, bytes) => messages.push({ from, bytes }))
+  router.on('message', (...args) => messages.push(args))
   return { warnings, errors, messages }
 }
 
@@ -41,27 +41,17 @@ async function listen(port = 0) {
   return server
 }
 
-async function freePorts(count = 12) {
-  // Reserve the entire derived range before releasing it for the routers.
-  for (;;) {
-    const servers = [await listen()]
-    const base = servers[0].address().port
-    try {
-      if (base + count > 65535) { continue }
-      for (let index = 1; index < count; index++) { servers.push(await listen(base + index)) }
-      return base
-    } catch (err) {
-      if (err.code !== 'EADDRINUSE') { throw err }
-    } finally { await Promise.all(servers.map(closeServer)) }
-  }
-}
-
-function members(base) {
-  return {
-    zulu: { host: '127.0.0.1', basePort: base + 8 },
-    alpha: { host: '127.0.0.1', basePort: base },
-    middle: { host: '127.0.0.1', basePort: base + 4 },
-  }
+async function freePeers(...names) {
+  const peers = {}
+  const servers = []
+  try {
+    for (const name of names) {
+      const server = await listen()
+      servers.push(server)
+      peers[name] = { host: '127.0.0.1', port: server.address().port }
+    }
+    return peers
+  } finally { await Promise.all(servers.map(closeServer)) }
 }
 
 async function rawConnect(port) {
@@ -71,18 +61,15 @@ async function rawConnect(port) {
   return socket
 }
 
-test('router constructors validate endpoints, derived ports, and limits', (t) => {
-  const peers = members(20_000)
+test('router constructors validate endpoints and limits', (t) => {
+  const peers = { alpha: { host: 'localhost', port: 1000 } }
   const illegal = (fn) => t.throws(fn, (err) => err.code === Err.ARGUMENT_ILLEGAL)
   illegal(() => new TcpCluster('missing', peers))
   illegal(() => new TcpCluster('alpha', []))
-  illegal(() => new TcpCluster('alpha', { alpha: { host: '', basePort: 1000 } }))
-  illegal(() => new TcpCluster('alpha', { alpha: { host: 'localhost', basePort: 0 } }))
-  illegal(() => new TcpCluster('alpha', { ...peers, zulu: { host: 'localhost', basePort: 65535 } }))
-  illegal(() => new TcpCluster('alpha', { ...peers, alpha: { host: 'localhost', basePort: 65534 } }))
-  t.doesNotThrow(() => new TcpCluster('alpha', {
-    ...peers, zulu: { host: 'localhost', basePort: 65534 },
-  }), 'an unused own-index port does not restrict the actual listening ports')
+  illegal(() => new TcpCluster('alpha', { alpha: { host: '', port: 1000 } }))
+  illegal(() => new TcpCluster('alpha', { alpha: { host: 'localhost', port: 0 } }))
+  illegal(() => new TcpCluster('alpha', { ...peers, zulu: { host: 'localhost', port: 65536 } }))
+  t.doesNotThrow(() => new TcpCluster('alpha', { ...peers, zulu: { host: 'localhost', port: 65535 } }))
   illegal(() => new TcpCluster('alpha', peers, { connectTimeout: 0 }))
   illegal(() => new TcpCluster('alpha', peers, { reconnectDelay: -1 }))
   illegal(() => new TcpCluster('alpha', peers, { maxFrameBytes: -1 }))
@@ -93,24 +80,20 @@ test('router constructors validate endpoints, derived ports, and limits', (t) =>
 })
 
 test('TcpCluster sorts membership and routes opaque frames through separate incoming and outgoing connections', async (t) => {
-  const peers = members(await freePorts())
+  const peers = await freePeers('zulu', 'alpha', 'middle')
   const routers = Object.keys(peers).map((id) => new TcpCluster(id, peers, {
     bindHost: '127.0.0.1', reconnectDelay: 10,
   }))
   const observed = routers.map(watch)
   try {
     await Promise.all(routers.map((router) => router.open()))
-    await until(() => routers.every((router) => router._incoming.size === 2 && router._outgoing.size === 2),
+    await until(() => routers.every((router) => router._sockets.size === 4 && router._outgoing.size === 2),
       'TCP connections in both directions')
     for (const router of routers) {
       t.deepEqual(router.nodes, ['alpha', 'middle', 'zulu'])
       const index = router.nodes.indexOf(router.id)
-      t.deepEqual([...router._servers].map((server) => server.address().port).sort((a, b) => a - b),
-        router.nodes.map((_, peer) => peers[router.id].basePort + peer)
-          .filter((port) => port !== peers[router.id].basePort + index),
-        `${router.id}: every other peer has its own listening port`)
-      t.notEqual(router._incoming.get(router.nodes[(index + 1) % 3]),
-        router._outgoing.get(router.nodes[(index + 1) % 3]), 'directions use distinct connections')
+      t.deepEqual([...router._servers].map(server => server.address().port), [peers[router.id].port],
+        `${router.id}: all peers share one listening port`)
       for (const other of routers.filter((other) => other !== router)) {
         t.equal(router.send(other.id, Buffer.from([0xc1, 0xff, index])), true)
         t.equal(router.send(other.id, Buffer.alloc(0)), true)
@@ -119,10 +102,12 @@ test('TcpCluster sorts membership and routes opaque frames through separate inco
     await until(() => observed.every(({ messages }) => messages.length === 4), 'messages from every peer')
     for (let index = 0; index < routers.length; index++) {
       const router = routers[index]
+      const messages = observed[index].messages
+      t.ok(messages.every(args => args.length === 1 && Buffer.isBuffer(args[0])), 'message carries a Buffer alone')
+      t.equal(messages.filter(([bytes]) => bytes.length === 0).length, 2)
       for (const from of router.nodes.filter((id) => id !== router.id)) {
-        t.deepEqual(observed[index].messages.filter((item) => item.from === from).map((item) => item.bytes),
-          [Buffer.from([0xc1, 0xff, router.nodes.indexOf(from)]), Buffer.alloc(0)],
-          'frames need not contain valid protocol or MessagePack data')
+        const payload = Buffer.from([0xc1, 0xff, router.nodes.indexOf(from)])
+        t.ok(messages.some(([bytes]) => bytes.equals(payload)), 'non-MessagePack frame is delivered unchanged')
       }
       t.deepEqual(observed[index].errors, [])
     }
@@ -130,10 +115,9 @@ test('TcpCluster sorts membership and routes opaque frames through separate inco
   t.end()
 })
 
-test('TcpCluster sends no greeting and replaces accepted connections without stale disconnects', async (t) => {
-  const base = await freePorts()
-  const peers = { a: { host: '127.0.0.1', basePort: base }, b: { host: '127.0.0.1', basePort: base + 4 } }
-  const server = await listen(peers.a.basePort + 1)
+test('TcpCluster sends no greeting and reads overlapping incoming connections independently', async (t) => {
+  const peers = await freePeers('a', 'b')
+  const server = await listen(peers.a.port)
   const connection = event(server, 'connection')
   const router = new TcpCluster('b', peers, { bindHost: '127.0.0.1' })
   const seen = watch(router)
@@ -145,7 +129,7 @@ test('TcpCluster sends no greeting and replaces accepted connections without sta
     outgoing.on('error', noop)
     const outgoingBytes = []
     outgoing.on('data', (data) => outgoingBytes.push(data))
-    const first = await rawConnect(peers.b.basePort)
+    const first = await rawConnect(peers.b.port)
     sockets.push(first)
     const bytes = []
     first.on('data', (data) => bytes.push(data))
@@ -158,20 +142,22 @@ test('TcpCluster sends no greeting and replaces accepted connections without sta
     t.deepEqual(Buffer.concat(outgoingBytes), frame(payload), 'wire starts directly with a length and payload')
     t.deepEqual(bytes, [], 'accepted connections never carry outgoing messages')
     const originalOutgoing = router._outgoing.get('a')
-    const firstClosed = event(first, 'close')
-    const second = await rawConnect(peers.b.basePort)
+    const second = await rawConnect(peers.b.port)
     sockets.push(second)
     second.resume()
-    await timeout(firstClosed)
-    second.write(frame(Buffer.from('replacement')))
-    await until(() => seen.messages.length === 1, 'replacement accepted socket')
-    t.deepEqual(seen.messages[0], { from: 'a', bytes: Buffer.from('replacement') },
-      'the listening port determines the peer id')
-    t.equal(router._outgoing.get('a'), originalOutgoing, 'replacing the incoming direction preserves the outgoing connection')
+    second.write(frame(Buffer.from('second')))
+    await until(() => seen.messages.length === 1, 'second incoming socket delivers a frame')
+    first.write(frame(Buffer.from('first')))
+    await until(() => seen.messages.length === 2, 'earlier incoming socket still delivers')
+    t.deepEqual(seen.messages, [[Buffer.from('second')], [Buffer.from('first')]])
+    t.deepEqual(seen.warnings, [], 'accepting another socket does not displace the first')
+    const closed = event(first, 'close')
+    first.destroy()
+    await timeout(closed)
     second.write(frame(Buffer.from('still connected')))
-    await until(() => seen.messages.length === 2, 'old close callback preserves its incoming replacement')
+    await until(() => seen.messages.length === 3, 'closing one incoming socket leaves the other usable')
+    t.equal(router._outgoing.get('a'), originalOutgoing, 'outbound is independent')
     t.equal(router.send('a', Buffer.from('still connected')), true)
-    t.deepEqual(seen.warnings, [], 'replacing an old socket is not a peer outage')
     t.deepEqual(seen.errors, [])
     t.ok(router.isOpen)
   } finally {
@@ -183,8 +169,7 @@ test('TcpCluster sends no greeting and replaces accepted connections without sta
 })
 
 test('TcpCluster opens independently, drops disconnected sends, and reconnects ordinary peer outages', async (t) => {
-  const base = await freePorts()
-  const peers = { a: { host: '127.0.0.1', basePort: base }, b: { host: '127.0.0.1', basePort: base + 4 } }
+  const peers = await freePeers('a', 'b')
   const a = new TcpCluster('a', peers, { bindHost: '127.0.0.1', reconnectDelay: 10 })
   const seen = watch(a)
   let b = null
@@ -200,14 +185,14 @@ test('TcpCluster opens independently, drops disconnected sends, and reconnects o
       b = new TcpCluster('b', peers, { bindHost: '127.0.0.1', reconnectDelay: 10 })
       const peer = watch(b)
       await b.open()
-      await until(() => [a, b].every((router) => router._incoming.size === 1 && router._outgoing.size === 1),
+      await until(() => [a, b].every((router) => router._sockets.size === 2 && router._outgoing.size === 1),
         'reconnected pair in both directions')
       a.send('b', Buffer.from(`attempt ${attempt}`))
       await until(() => peer.messages.length === 1, 'delivered after reconnect')
-      t.deepEqual(peer.messages, [{ from: 'a', bytes: Buffer.from(`attempt ${attempt}`) }],
+      t.deepEqual(peer.messages, [[Buffer.from(`attempt ${attempt}`)]],
         'disconnected frames are not replayed after connection returns')
       await b.close()
-      await until(() => a._incoming.size === 0 && a._outgoing.size === 0, 'both peer directions disconnected')
+      await until(() => a._sockets.size === 0 && a._outgoing.size === 0, 'both peer directions disconnected')
       t.ok(a.isOpen)
       t.equal(a.send('b', Buffer.from('also dropped')), false)
     }
@@ -218,8 +203,7 @@ test('TcpCluster opens independently, drops disconnected sends, and reconnects o
 })
 
 test('TcpCluster reconnects one outgoing direction while the other direction keeps receiving', async (t) => {
-  const base = await freePorts()
-  const peers = { a: { host: '127.0.0.1', basePort: base }, b: { host: '127.0.0.1', basePort: base + 4 } }
+  const peers = await freePeers('a', 'b')
   const routers = ['a', 'b'].map((id) => new TcpCluster(id, peers, {
     bindHost: '127.0.0.1', reconnectDelay: 100,
   }))
@@ -227,25 +211,23 @@ test('TcpCluster reconnects one outgoing direction while the other direction kee
   const [seenA, seenB] = routers.map(watch)
   try {
     await Promise.all(routers.map((router) => router.open()))
-    await until(() => routers.every((router) => router._incoming.size === 1 && router._outgoing.size === 1),
+    await until(() => routers.every((router) => router._sockets.size === 2 && router._outgoing.size === 1),
       'both directions connected')
-    const incomingA = a._incoming.get('b')
     const outgoingB = b._outgoing.get('a')
     const outgoingA = a._outgoing.get('b')
     outgoingA.destroy()
-    await until(() => !a._outgoing.has('b') && !b._incoming.has('a'), 'one disconnected direction')
+    await until(() => !a._outgoing.has('b') && b._sockets.size === 1, 'one disconnected direction')
     t.equal(a.send('b', Buffer.from('dropped')), false, 'only the disconnected direction drops sends')
-    t.equal(a._incoming.get('b'), incomingA, 'incoming connection remains installed')
-    t.equal(b._outgoing.get('a'), outgoingB, 'higher-index node keeps its own outgoing connection')
+    t.equal(b._outgoing.get('a'), outgoingB, 'the other node keeps its own outgoing connection')
     t.equal(b.send('a', Buffer.from('reverse still works')), true)
     await until(() => seenA.messages.length === 1, 'opposite direction still receives')
-    t.deepEqual(seenA.messages, [{ from: 'b', bytes: Buffer.from('reverse still works') }])
-    await until(() => a._outgoing.has('b') && b._incoming.has('a'), 'disconnected direction reconnected')
+    t.deepEqual(seenA.messages, [[Buffer.from('reverse still works')]])
+    await until(() => a._outgoing.has('b') && b._sockets.size === 2, 'disconnected direction reconnected')
     t.notEqual(a._outgoing.get('b'), outgoingA)
     t.equal(b._outgoing.get('a'), outgoingB, 'reconnect does not replace the independent reverse connection')
     t.equal(a.send('b', Buffer.from('after reconnect')), true)
     await until(() => seenB.messages.length === 1, 'new outgoing connection sends')
-    t.deepEqual(seenB.messages, [{ from: 'a', bytes: Buffer.from('after reconnect') }],
+    t.deepEqual(seenB.messages, [[Buffer.from('after reconnect')]],
       'messages dropped during the outage are not replayed')
     t.deepEqual(seenA.errors, [])
     t.deepEqual(seenB.errors, [])
@@ -254,9 +236,8 @@ test('TcpCluster reconnects one outgoing direction while the other direction kee
 })
 
 test('TcpCluster rejects incoming messages on outgoing connections and retries only that direction', async (t) => {
-  const base = await freePorts()
-  const peers = { a: { host: '127.0.0.1', basePort: base }, b: { host: '127.0.0.1', basePort: base + 4 } }
-  const server = await listen(peers.a.basePort + 1)
+  const peers = await freePeers('a', 'b')
+  const server = await listen(peers.a.port)
   const sockets = []
   server.on('connection', (socket) => { sockets.push(socket); socket.on('error', noop); socket.resume() })
   const router = new TcpCluster('b', peers, { bindHost: '127.0.0.1', reconnectDelay: 10 })
@@ -264,20 +245,17 @@ test('TcpCluster rejects incoming messages on outgoing connections and retries o
   let incoming
   try {
     await router.open()
-    await until(() => sockets.length === 1 && router._outgoing.has('a'), 'higher-index outgoing connection')
-    incoming = await rawConnect(peers.b.basePort)
+    await until(() => sockets.length === 1 && router._outgoing.has('a'), 'outgoing connection')
+    incoming = await rawConnect(peers.b.port)
     incoming.resume()
-    await until(() => router._incoming.has('a'), 'independent incoming connection')
-    const originalIncoming = router._incoming.get('a')
     const closed = event(sockets[0], 'close')
     sockets[0].write(frame(Buffer.from('wrong direction')))
     await timeout(closed)
     await until(() => seen.warnings.length === 1, 'unexpected direction warning')
     t.deepEqual(seen.messages, [], 'outgoing sockets never forward received protocol frames')
-    t.equal(router._incoming.get('a'), originalIncoming)
     incoming.write(frame(Buffer.from('right direction')))
     await until(() => seen.messages.length === 1, 'proper incoming connection remains usable')
-    t.deepEqual(seen.messages, [{ from: 'a', bytes: Buffer.from('right direction') }])
+    t.deepEqual(seen.messages, [[Buffer.from('right direction')]])
     await until(() => sockets.length === 2 && router._outgoing.has('a'), 'retry after wrong-direction message')
     t.ok(router.isOpen)
     t.deepEqual(seen.errors, [])
@@ -291,9 +269,8 @@ test('TcpCluster rejects incoming messages on outgoing connections and retries o
 })
 
 test('TcpCluster drops queue overflow and rejects bad framing without stopping its listener', async (t) => {
-  const base = await freePorts()
-  const peers = { a: { host: '127.0.0.1', basePort: base }, b: { host: '127.0.0.1', basePort: base + 4 } }
-  const server = await listen(peers.a.basePort + 1)
+  const peers = await freePeers('a', 'b')
+  const server = await listen(peers.a.port)
   const connection = event(server, 'connection')
   const router = new TcpCluster('b', peers, {
     bindHost: '127.0.0.1', maxFrameBytes: 8, maxQueuedBytes: 12,
@@ -306,9 +283,9 @@ test('TcpCluster drops queue overflow and rejects bad framing without stopping i
     outgoing = await timeout(connection)
     outgoing.on('error', noop)
     outgoing.resume()
-    socket = await rawConnect(peers.b.basePort)
+    socket = await rawConnect(peers.b.port)
     socket.resume()
-    await until(() => router._incoming.has('a') && router._outgoing.has('a'), 'both queue-test directions')
+    await until(() => router._sockets.size === 2 && router._outgoing.has('a'), 'both queue-test directions')
     const originalOutgoing = router._outgoing.get('a')
     t.equal(router.send('a', Buffer.alloc(8)), true)
     t.equal(router.send('a', Buffer.alloc(8)), false, 'pending bytes enforce the queue limit')
@@ -319,11 +296,11 @@ test('TcpCluster drops queue overflow and rejects bad framing without stopping i
     await until(() => seen.warnings.some((err) => err.code === Err.FRAME_CORRUPT), 'framing warning')
     t.ok(router.isOpen, 'malformed peer closes only its own connection')
     t.equal(router._outgoing.get('a'), originalOutgoing, 'malformed incoming data preserves the opposite direction')
-    socket = await rawConnect(peers.b.basePort)
+    socket = await rawConnect(peers.b.port)
     socket.resume()
     socket.write(frame(Buffer.from('good')))
     await until(() => seen.messages.length === 1, 'replacement after malformed frame')
-    t.deepEqual(seen.messages[0], { from: 'a', bytes: Buffer.from('good') })
+    t.deepEqual(seen.messages[0], [Buffer.from('good')])
     t.deepEqual(seen.errors, [])
   } finally {
     socket?.destroy()
@@ -334,9 +311,9 @@ test('TcpCluster drops queue overflow and rejects bad framing without stopping i
   t.end()
 })
 
-test('TcpCluster closes earlier listeners when a later derived port is unavailable', async (t) => {
-  const peers = members(await freePorts())
-  const occupied = await listen(peers.zulu.basePort + 1)
+test('TcpCluster rejects startup when its listening port is unavailable', async (t) => {
+  const peers = await freePeers('zulu', 'alpha', 'middle')
+  const occupied = await listen(peers.zulu.port)
   const router = new TcpCluster('zulu', peers, { bindHost: '127.0.0.1' })
   const seen = watch(router)
   try {
@@ -344,9 +321,7 @@ test('TcpCluster closes earlier listeners when a later derived port is unavailab
     t.match(failure.message, /EADDRINUSE/)
     t.ok(router.isStopped)
     await timeout(router.close())
-    const released = await listen(peers.zulu.basePort)
-    await closeServer(released)
-    t.pass('the earlier listener was released after partial startup')
+    t.equal(router._outgoing.size, 0, 'a failed bind starts no outgoing connections')
     t.deepEqual(seen.errors, [], 'open rejection owns startup failure reporting')
     t.equal((await router.open().catch((err) => err)).code, Err.NODE_NOT_OPEN)
   } finally { await closeServer(occupied); await router.close() }
@@ -354,9 +329,7 @@ test('TcpCluster closes earlier listeners when a later derived port is unavailab
 })
 
 test('TcpCluster connection deadlines retry once per peer and shutdown cancels pending dialing', async (t) => {
-  const base = await freePorts()
-  const peers = { a: { host: '127.0.0.1', basePort: base },
-    b: { host: '127.0.0.1', basePort: base + 4 } }
+  const peers = await freePeers('a', 'b')
   const router = new TcpCluster('a', peers, { connectTimeout: 10, reconnectDelay: 20 })
   const seen = watch(router)
   const sockets = []
@@ -412,7 +385,7 @@ test('UdxRouter manages private paths and waits for every named endpoint', async
     clients[0].write(Buffer.from([0xc1, 255]))
     router.send('user apply', Buffer.alloc(0))
     await until(() => seen.messages.length === 1 && received.length === 1, 'named UDX routing')
-    t.deepEqual(seen.messages, [{ from: 'owner/A', bytes: Buffer.from([0xc1, 255]) }])
+    t.deepEqual(seen.messages, [['owner/A', Buffer.from([0xc1, 255])]])
     t.deepEqual(received, [Buffer.alloc(0)])
     t.deepEqual(seen.errors, [])
     const closing = router.close()
@@ -474,7 +447,7 @@ test('UdxRouter rejects duplicate owners and makes established disconnect termin
     t.ok(router.isOpen, 'a duplicate cannot displace the accepted owner')
     first.write(Buffer.from('original'))
     await until(() => seen.messages.length === 1, 'original owner still routes')
-    t.equal(seen.messages[0].bytes.toString(), 'original')
+    t.deepEqual(seen.messages, [['worker', Buffer.from('original')]])
     first.destroy()
     const failure = await timeout(router.failed.catch((err) => err))
     t.equal(failure.code, Err.SEND_ERROR)
@@ -514,7 +487,7 @@ test('UdxRouter overload fails its attempt while invalid arguments remain caller
 
 for (const type of ['TCP', 'UDX']) {
   test(`${type} message listener failure stops before error and contains diagnostic listener throws`, async (t) => {
-    const peers = type === 'TCP' ? members(await freePorts()) : null
+    const peers = type === 'TCP' ? await freePeers('zulu', 'alpha', 'middle') : null
     const router = type === 'TCP'
       ? new TcpCluster('zulu', peers, { bindHost: '127.0.0.1' }) : new UdxRouter(['worker'])
     const original = new Error(`${type} receiver failed`)
@@ -528,7 +501,7 @@ for (const type of ['TCP', 'UDX']) {
     try {
       await router.open()
       if (type === 'TCP') {
-        socket = await rawConnect(peers.zulu.basePort)
+        socket = await rawConnect(peers.zulu.port)
         socket.write(frame(Buffer.from('trigger')))
       } else {
         socket = await udxClient(router.paths.worker)
@@ -547,7 +520,7 @@ for (const type of ['TCP', 'UDX']) {
 }
 
 test('TcpCluster warning listener failure stops retries and retains its original stack', async (t) => {
-  const peers = members(await freePorts())
+  const peers = await freePeers('zulu', 'alpha', 'middle')
   const router = new TcpCluster('alpha', peers, { reconnectDelay: 10 })
   const seen = watch(router)
   const original = new Error('warning handler failed')
@@ -568,7 +541,7 @@ test('TcpCluster warning listener failure stops retries and retains its original
 
 test('router close cancels startup and leaves normal failure promises unsettled', async (t) => {
   const parent = await mkdtemp('/tmp/mft-router-cancel-')
-  const peers = members(await freePorts())
+  const peers = await freePeers('zulu', 'alpha', 'middle')
   const routers = [new UdxRouter(['one', 'two'], { directory: parent }),
     new TcpCluster('alpha', peers, { reconnectDelay: 10 })]
   try {

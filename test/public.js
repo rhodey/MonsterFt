@@ -16,12 +16,12 @@ test('public components are explicitly wired and preserve command APIs', async (
   try {
     for (const id of ids) {
       const components = new Map()
-      const localSend = (from) => (to, frame) => components.get(to).onReceive(from, frame)
+      const localSend = (from) => (to, frame) => components.get(to).onReceive(frame, from)
       const base = path.join(directory, id)
       // Match the helper's budget for nine durable Procs sharing one event loop.
       const opts = { electionTimeout: 500, appendTimeout: 1_000, tickInterval: 10 }
       const gate = new api.Gate(id, ids,
-        (to, frame) => nodes.get(to)?.gate.onReceive(id, frame), localSend('gate'), () => opts)
+        (to, frame) => nodes.get(to)?.gate.onReceive(frame), localSend('gate'), () => opts)
       components.set('gate', gate)
       for (const role of ['procA', 'procB', 'procC']) {
         components.set(role, new api.MonsterProc(role, id, ids, localSend(role), base, opts))

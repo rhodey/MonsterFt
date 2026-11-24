@@ -41,7 +41,7 @@ impl Config {
         let config: Self =
             serde_json::from_slice(&std::fs::read(path)?).map_err(|e| error(e.to_string()))?;
         if !config.run_dir.is_absolute()
-            || config.base_port > 65513
+            || !(1..=65533).contains(&config.base_port)
             || config
                 .hosts
                 .as_ref()

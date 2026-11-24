@@ -58,7 +58,7 @@ const inputSchema = requestSchema.extend({
 })
 const inputSchemas = {
   start: inputSchema, tick: inputSchema,
-  cluster_message: inputSchema.extend({ from: schemas.cid }),
+  cluster_message: inputSchema.extend({ frame: schemas.buffer }),
   append: inputSchema.extend({
     clientId: schemas.cid, items: z.array(schemas.buffer).min(1),
   }),
@@ -340,19 +340,17 @@ function parseProcRequest(message, id, nodes) {
   }
   validate(inputSchemas[message.type], message, 'Proc input')
   if (message.type !== 'cluster_message') { return parsed }
-  if (!nodes.includes(message.from) || message.from === id) {
-    fail('Proc cluster sender is illegal')
-  }
   // Gate has checked this frame already; a later checksum failure is local.
   const payload = wire.verifyFrame(message.frame)
   try {
     const envelope = validate(envelopeSchema, wire.decodePayload(payload), 'Proc cluster envelope')
-    if (envelope.to !== id || envelope.message.from !== message.from) {
+    const from = envelope.message.from
+    if (envelope.to !== id || !nodes.includes(from) || from === id) {
       fail('Proc cluster envelope is illegal')
     }
     parsed.clusterMessage = envelope.message
   } catch (err) {
-    parsed.warning = Err.wrapError(err, null, `cluster frame from ${message.from}: `)
+    parsed.warning = Err.wrapError(err, null, 'cluster frame: ')
   }
   return parsed
 }

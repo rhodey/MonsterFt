@@ -21,7 +21,7 @@ function fixture(id = 'a', nodes = ['a', 'b', 'c']) {
   let cid = 0
   const request = (proc, message) => {
     message = { cid: `local-${++cid}`, ...message }
-    proc.onReceive('gate', wire.encodeFrame(message))
+    proc.onReceive(wire.encodeFrame(message), 'gate')
     const reply = replies.find((value) => value.cid === message.cid)
     if (reply?.type !== 'ack') { throw new Error(reply?.message ?? 'missing local reply') }
     return reply
@@ -39,7 +39,7 @@ function fixture(id = 'a', nodes = ['a', 'b', 'c']) {
     timems: proc.executor.timems, ...fields,
   })
   const rpc = (message, from = 'b', timems = proc.executor.timems) => input('cluster_message', {
-    from, timems, frame: wire.encodeFrame({ to: id, message: { from, ...message } }),
+    timems, frame: wire.encodeFrame({ to: id, message: { from, ...message } }),
   })
   const outputs = (reply) => (reply.outputs ?? []).map(wire.decodePayload)
   const page = (reply, to = 'b') => outputs(reply)

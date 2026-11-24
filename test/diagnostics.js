@@ -33,7 +33,6 @@ for (const localDelay of [0, 2]) {
       const gate = c.leader()
       target = gate.id
       const node = c.nodes.get(target)
-      const from = c.ids.find((id) => id !== target)
       const warnings = []
       for (const role of roles) {
         node[role].on('warn', (error) => {
@@ -43,7 +42,7 @@ for (const localDelay of [0, 2]) {
         })
       }
       const heartbeatStart = c.history.length
-      gate.onReceive(from, malformed)
+      gate.onReceive(malformed)
       await until(() => completed.length === 3 && warnings.length === 3, 'malformed input completion')
       t.deepEqual(received.map(({ to }) => to), roles, 'all three Procs receive the remote input')
       t.ok(received.every(({ message }) => message.frame.equals(malformed)),
@@ -53,8 +52,8 @@ for (const localDelay of [0, 2]) {
         received.find(({ to }) => to === from).message.tickCount), 'completion advances the ordered input')
       t.deepEqual(warnings.map(({ role, error }) => [role, error.code]),
         roles.map((role) => [role, Err.FRAME_CORRUPT]), 'each Proc warns once locally')
-      t.ok(warnings.every(({ error }) => error.message.startsWith(`cluster frame from ${from}: message decode `)),
-        'warnings identify the remote sender and decoding failure')
+      t.ok(warnings.every(({ error }) => error.message.startsWith('cluster frame: message decode ')),
+        'warnings identify the decoding failure')
       t.ok(warnings.every(({ transaction }) => !transaction), 'warnings follow committed input processing')
       t.notOk(c.warnings.some(({ role }) => role === 'gate'), 'Gate does not mirror Proc diagnostics')
       t.ok(gate.isOpen && roles.every((role) => node[role].isOpen), 'Gate and Procs remain open')
@@ -76,7 +75,7 @@ for (const role of ['gate', 'procA', 'apply']) {
       const node = c.nodes.get('a')
       await node.gate.open()
       const malformed = framePayload(malformedPayload, checksum(malformedPayload))
-      await node[role].onReceive(role === 'gate' ? 'procA' : 'gate', malformed)
+      await node[role].onReceive(malformed, role === 'gate' ? 'procA' : 'gate')
       const diagnostic = c.errors.find((item) => item.role === role)
       t.equal(diagnostic?.error.code, Err.FRAME_CORRUPT, 'receiver reports the local decoding failure')
       t.notOk(node[role].isOpen, 'receiver stops')
@@ -112,13 +111,12 @@ for (const localDelay of [0, 2]) {
       await c.settled()
       const gate = c.leader()
       const node = c.nodes.get(gate.id)
-      const from = c.ids.find((id) => id !== gate.id)
       const warnings = []
       gate.on('warn', (error) => warnings.push(error))
-      gate.onReceive(from, corrupt)
+      gate.onReceive(corrupt)
       t.equal(warnings.length, 1, 'Gate warns once immediately')
       t.equal(warnings[0].code, Err.FRAME_CORRUPT)
-      t.equal(warnings[0].message, `cluster frame from ${from}: frame checksum differs`)
+      t.equal(warnings[0].message, 'cluster frame: frame checksum differs')
       t.ok(gate.isOpen, 'the receiving Gate remains open')
       t.ok(roles.every((role) => node[role].isOpen), 'all local Procs remain open')
       t.equal((await gate.append(Buffer.from('after corrupt frame')))[1], 'after corrupt frame')

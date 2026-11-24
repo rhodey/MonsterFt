@@ -31,9 +31,9 @@ fn peers(config: &Config) -> Result<BTreeMap<String, TcpPeer>> {
         .iter()
         .enumerate()
         .map(|(index, id)| {
-            let base_port = config
+            let port = config
                 .base_port
-                .checked_add(index as u16 * 10)
+                .checked_add(index as u16)
                 .ok_or_else(|| error("TCP port overflow"))?;
             Ok((
                 (*id).to_owned(),
@@ -42,7 +42,7 @@ fn peers(config: &Config) -> Result<BTreeMap<String, TcpPeer>> {
                         .hosts
                         .as_ref()
                         .map_or_else(|| "127.0.0.1".into(), |hosts| hosts[index].clone()),
-                    base_port,
+                    port,
                 },
             ))
         })
@@ -281,7 +281,7 @@ pub async fn setup(
             let _ = ready.send(Ok(()));
             let result = async {
                 loop {
-                    gate.on_receive(role, endpoint.recv().await.map_err(io_error)?)?;
+                    gate.on_receive(endpoint.recv().await.map_err(io_error)?, Some(role))?;
                 }
                 #[allow(unreachable_code)]
                 Ok::<(), Error>(())
@@ -303,7 +303,7 @@ pub async fn setup(
     let network = tokio::task::spawn_local(async move {
         loop {
             match tcp.recv().await {
-                Ok(Some((from, frame))) => {
+                Ok(Some(frame)) => {
                     if incoming_statistics.measuring.get() {
                         incoming_statistics
                             .received_frames
@@ -312,7 +312,7 @@ pub async fn setup(
                             .received_bytes
                             .set(incoming_statistics.received_bytes.get() + frame.len() as u64);
                     }
-                    if let Err(error) = network_gate.on_receive(from, frame) {
+                    if let Err(error) = network_gate.on_receive(frame, None) {
                         if !network_stopping.get() {
                             eprintln!("{network_id}/tcp: {error}");
                             let _ = network_failed.send(error);

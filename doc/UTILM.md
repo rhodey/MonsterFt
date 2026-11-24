@@ -193,7 +193,9 @@ no findings
 
 ## `parseProcRequest`
 
-Validates a local Proc request and extracts any embedded cluster message.
+Validates a local Proc request. For a cluster message, verifies its frame,
+checks that it addresses this node and claims a remote member as sender, then
+passes the message to the engine.
 
 ### findings
 

@@ -58,7 +58,7 @@ function cluster(options = {}) {
     const localSend = (from) => (to, frame) => {
       if (stopped) { return }
       const receiver = members[to]
-      const deliver = () => receiver?.onReceive(from, frame)
+      const deliver = () => receiver?.onReceive(frame, from)
       if (options.local?.({ id, from, to, frame, deliver, members }) === false) { return }
       return schedule(deliver, options.localDelay ?? 0)
     }
@@ -67,7 +67,7 @@ function cluster(options = {}) {
       const decoded = decodeFrame(frame)
       history.push({ from: id, to, message: decoded.message, frame })
       const receiver = nodes.get(to)?.gate
-      const deliver = () => receiver?.onReceive(id, frame)
+      const deliver = () => receiver?.onReceive(frame)
       if (options.transport?.({ from: id, to, frame, message: decoded.message, deliver }) === false) { return }
       return schedule(deliver, options.delay ?? 0)
     }

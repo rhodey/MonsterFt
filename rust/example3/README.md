@@ -16,6 +16,6 @@ callback. `server.rs` and `facts.rs` implement the separate persistent fact serv
 HTTP crates are example/test dependencies, not library dependencies.
 
 Data persists under `example3/data/`. Override it with `MONSTERFT_DATA_DIR`;
-`MONSTERFT_BASE_PORT` changes the cluster ports (default 30500), and
+`MONSTERFT_BASE_PORT` sets the first of the three consecutive cluster ports (default 30500), and
 `MONSTERFT_HTTP_PORT` changes the HTTP port (default 43000). The launcher supplies
 `MONSTERFT_FACT_URL` to every node and Apply child.

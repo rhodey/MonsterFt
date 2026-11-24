@@ -5,7 +5,7 @@ Trivial getters and forwarding methods are omitted.
 
 ## `constructor`
 
-Configures TCP routing among cluster members.
+Configures a single listening port for each member using `{ host, port }`. Each node dials the other members independently.
 
 ### findings
 
@@ -21,7 +21,7 @@ no findings
 
 ## `_connectionError`
 
-Reports current peer connection errors as local warnings.
+Reports framing and socket errors on accepted connections as local warnings.
 
 ### findings
 
@@ -43,9 +43,9 @@ Schedules a peer reconnection attempt.
 
 no findings
 
-## `_install`
+## `_installOutgoing`
 
-Installs a peer's incoming or outgoing connection.
+Installs the connection for sends to a peer and schedules a new dial when it closes.
 
 ### findings
 
@@ -61,7 +61,7 @@ no findings
 
 ## `_start`
 
-Starts the cluster transport without waiting for remote peers.
+Binds one listener and starts dialing without waiting for the other nodes. Each accepted stream emits individual Buffer frames. Incoming connections can overlap during reconnect. The cluster protocol reads the sender ID from each frame.
 
 ### findings
 

@@ -52,7 +52,7 @@ function fixture(callback = null) {
         components, errors, replies, seed,
         async request(role, message) {
           message = { cid: `request-${++cid}`, ...message }
-          await components[role].onReceive('gate', encodeFrame(message))
+          await components[role].onReceive(encodeFrame(message), 'gate')
           return replies[role].find((reply) => reply.cid === message.cid)
         },
         async ack(role, message) {
@@ -94,7 +94,7 @@ function fixture(callback = null) {
         },
         rpcAll(message) {
           return this.inputAll('cluster_message', {
-            from: 'b', frame: encodeFrame({ to: 'a', message: { ...message, from: 'b' } }),
+            frame: encodeFrame({ to: 'a', message: { ...message, from: 'b' } }),
           })
         },
         async finish() {
@@ -163,7 +163,7 @@ test('new generation fences old voting, timer, command, and Apply execution path
     await next.open()
     t.deepEqual(f.snapshot(), before, 'claiming a generation does not alter protocol state digests')
     fenced(t, old, 'procA', await old.input('procA', 'cluster_message', {
-      from: 'b', frame: encodeFrame({ to: 'a', message: {
+      frame: encodeFrame({ to: 'a', message: {
         type: 'vote_request', from: 'b', term: 20n, termP: 1n, seqP: 0n,
       } }),
     }), 'higher-term vote')

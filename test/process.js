@@ -44,7 +44,7 @@ test('runs nine independent protocol processes against shared files with delayed
       const base = path.join(directory, id)
       const node = { base, children: new Map(), gate: null, apply: null }
       const localSend = (to, frame) => {
-        if (to === 'apply') { return node.apply.onReceive('gate', frame) }
+        if (to === 'apply') { return node.apply.onReceive(frame, 'gate') }
         const msg = decodeFrame(frame)
         if (msg.type === 'hello') {
           const key = `${id}/${to}`
@@ -53,9 +53,9 @@ test('runs nine independent protocol processes against shared files with delayed
         node.children.get(to).send({ type: 'frame', frame })
       }
       node.gate = new Gate(id, ids, (to, frame) => {
-        if (!stopped) { members.get(to).gate.onReceive(id, frame) }
+        if (!stopped) { members.get(to).gate.onReceive(frame) }
       }, localSend, opts)
-      node.apply = new MonsterApply(id, (to, frame) => node.gate.onReceive('apply', frame), base,
+      node.apply = new MonsterApply(id, (to, frame) => node.gate.onReceive(frame, 'apply'), base,
         async (db, data, term, seq) => {
           calls.push({ id, seq, data })
           if (seq === 0n) {
@@ -86,7 +86,7 @@ test('runs nine independent protocol processes against shared files with delayed
         child.on('message', (msg) => {
           if (msg.type === 'frame') {
             if (!Buffer.isBuffer(msg.frame)) { throw new Error('IPC did not preserve Buffer') }
-            node.gate.onReceive(role, msg.frame)
+            node.gate.onReceive(msg.frame, role)
           } else if (msg.type === 'error') {
             errors.push({ id, role, error: msg.error })
           }

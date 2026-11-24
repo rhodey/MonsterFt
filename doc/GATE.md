@@ -193,7 +193,18 @@ no findings
 
 ## `onReceive`
 
-Handles incoming local replies and cluster messages.
+Pass the local sender role as the second argument to dispatch a reply to
+`_receiveLocal`. Omitting the role or passing `undefined` or `null` routes a remote
+frame. Gate checks its checksum and passes the original bytes to the three
+Procs. Each Proc reads the sender and destination from the frame.
+
+### findings
+
+no findings
+
+## `_receiveLocal`
+
+Handles replies from the local Procs and Apply. The local transport supplies the role.
 
 ### findings
 

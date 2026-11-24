@@ -72,7 +72,8 @@ export class Gate<Result = unknown> extends EventEmitter<GateEvents> {
   close(): Promise<void>
   stop(): void
   drainCmd(): Promise<void>
-  onReceive(from: string, frame: Buffer): void
+  /** Supply the sending role for a local reply. Omit it or pass null for a remote frame. */
+  onReceive(frame: Buffer, from?: string | null): void
   /** Keep the command Buffer unchanged until the operation settles. */
   append(data: Buffer): Promise<[cmdSeq: bigint, value: Result]>
   /** Keep the array and its Buffers unchanged until the operation settles. */

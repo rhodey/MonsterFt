@@ -41,16 +41,16 @@ impl LocalProcs {
             )
             .unwrap();
             proc.on_receive(
-                "gate",
                 wire::encode_frame(&StartupRequest::Hello {
                     cid: "hello".into(),
                     seed: [1; 16],
                 })
                 .unwrap(),
+                "gate",
             );
             proc.on_receive(
-                "gate",
                 wire::encode_frame(&StartupRequest::Open { cid: "open".into() }).unwrap(),
+                "gate",
             );
             assert!(!proc.is_stopped());
             procs.push(proc);
@@ -69,7 +69,7 @@ impl LocalProcs {
             },
         ] {
             for proc in &mut procs {
-                proc.on_receive("gate", wire::encode_frame(&request).unwrap());
+                proc.on_receive(wire::encode_frame(&request).unwrap(), "gate");
                 assert!(!proc.is_stopped());
             }
         }
@@ -80,7 +80,7 @@ impl LocalProcs {
             input: Input::Start,
         };
         for proc in &mut procs {
-            proc.on_receive("gate", wire::encode_frame(&input).unwrap());
+            proc.on_receive(wire::encode_frame(&input).unwrap(), "gate");
             assert!(proc.is_open(), "{:?}", proc.fatal_error());
         }
         Self {
@@ -134,12 +134,9 @@ fn remote_bad_decode_warns_after_committed_completion() {
         cid: "bad_remote".into(),
         tick_count: 2,
         timems: 2,
-        input: Input::ClusterMessage {
-            from: "b".into(),
-            frame: corrupt,
-        },
+        input: Input::ClusterMessage { frame: corrupt },
     };
-    locals.procs[0].on_receive("gate", wire::encode_frame(&input).unwrap());
+    locals.procs[0].on_receive(wire::encode_frame(&input).unwrap(), "gate");
     assert!(locals.procs[0].is_open());
     assert_eq!(*seen.borrow(), vec![Some(Code::FrameCorrupt)]);
     assert_eq!(locals.procs[0].tick_count, 2);
@@ -161,7 +158,7 @@ fn local_checksum_failure_stops_before_error_then_close() {
     proc.diagnostics
         .on_close(move || closes.borrow_mut().push("close"));
     let before = locals.replies[0].borrow().len();
-    proc.on_receive("gate", Bytes::from_static(b"invalid"));
+    proc.on_receive(Bytes::from_static(b"invalid"), "gate");
     assert!(proc.is_stopped());
     assert_eq!(*events.borrow(), vec!["error", "close"]);
     assert_eq!(locals.replies[0].borrow().len(), before);
@@ -176,11 +173,10 @@ fn nested_checksum_failure_is_local_after_gates_acceptance() {
         tick_count: 2,
         timems: 2,
         input: Input::ClusterMessage {
-            from: "b".into(),
             frame: Bytes::from_static(b"bad nested frame"),
         },
     };
-    locals.procs[0].on_receive("gate", wire::encode_frame(&input).unwrap());
+    locals.procs[0].on_receive(wire::encode_frame(&input).unwrap(), "gate");
     assert_eq!(
         locals.procs[0].fatal_error().unwrap().code,
         Some(Code::FrameCorrupt)
@@ -210,12 +206,9 @@ fn stale_generation_overrides_pending_remote_warning() {
         cid: "stale".into(),
         tick_count: 2,
         timems: 2,
-        input: Input::ClusterMessage {
-            from: "b".into(),
-            frame: malformed,
-        },
+        input: Input::ClusterMessage { frame: malformed },
     };
-    locals.procs[0].on_receive("gate", wire::encode_frame(&input).unwrap());
+    locals.procs[0].on_receive(wire::encode_frame(&input).unwrap(), "gate");
     assert_eq!(
         locals.procs[0].fatal_error().unwrap().code,
         Some(Code::GenerationDiff)
@@ -232,18 +225,18 @@ fn duplicated_tick_and_late_hello_are_terminal_state_errors() {
         timems: 1,
         input: Input::Tick,
     };
-    locals.procs[0].on_receive("gate", wire::encode_frame(&tick).unwrap());
+    locals.procs[0].on_receive(wire::encode_frame(&tick).unwrap(), "gate");
     assert_eq!(
         locals.procs[0].fatal_error().unwrap().code,
         Some(Code::MonsterIllegal)
     );
     locals.procs[1].on_receive(
-        "gate",
         wire::encode_frame(&StartupRequest::Hello {
             cid: "late".into(),
             seed: [1; 16],
         })
         .unwrap(),
+        "gate",
     );
     assert_eq!(
         locals.procs[1].fatal_error().unwrap().code,
@@ -265,36 +258,45 @@ fn watchdog_is_native_and_runs_without_protocol_clock_advance() {
 }
 
 #[test]
-fn malformed_remote_envelope_is_discarded_without_an_output() {
+fn malformed_remote_addresses_warn_without_an_output() {
+    use monsterft::protocol::Envelope;
     let mut locals = LocalProcs::new();
-    let value = Value::Map(vec![
-        ("to".into(), "other".into()),
-        (
-            "message".into(),
-            Value::Map(vec![
+    let warnings = Rc::new(RefCell::new(Vec::new()));
+    let seen = warnings.clone();
+    locals.procs[0]
+        .diagnostics
+        .on_warn(move |error| seen.borrow_mut().push(error.code));
+    for (index, (to, from)) in [
+        ("wrong-node", "b"),
+        ("a", "a"),
+        ("a", "outside"),
+        ("a", "procA"),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let frame = wire::encode_frame(&Envelope {
+            to: to.to_owned(),
+            message: Value::Map(vec![
                 ("type".into(), "vote".into()),
-                ("from".into(), "b".into()),
+                ("from".into(), from.into()),
             ]),
-        ),
-    ]);
-    let input = OrderedInput {
-        cid: "bad_envelope".into(),
-        tick_count: 2,
-        timems: 2,
-        input: Input::ClusterMessage {
-            from: "b".into(),
-            frame: wire::encode_frame(&value).unwrap(),
-        },
-    };
-    locals.procs[0].on_receive("gate", wire::encode_frame(&input).unwrap());
-    assert!(locals.procs[0].is_open());
-    match locals.replies[0].borrow().last().unwrap() {
-        LocalReply::Ack {
-            outputs: Some(outputs),
-            tick_count: Some(2),
-            ..
-        } => assert!(outputs.is_empty()),
-        _ => panic!("missing completion"),
+        })
+        .unwrap();
+        let tick = index as i64 + 2;
+        let input = OrderedInput {
+            cid: format!("bad-address-{tick}"),
+            tick_count: tick,
+            timems: tick as u64,
+            input: Input::ClusterMessage { frame },
+        };
+        locals.procs[0].on_receive(wire::encode_frame(&input).unwrap(), "gate");
+        assert!(locals.procs[0].is_open());
+        assert!(matches!(locals.replies[0].borrow().last().unwrap(),
+            LocalReply::Ack { outputs: Some(outputs), tick_count: Some(count), .. }
+            if outputs.is_empty() && *count == tick));
+        assert_eq!(warnings.borrow().len(), index + 1);
+        assert_eq!(warnings.borrow()[index], Some(Code::RpcIllegal));
     }
 }
 
@@ -305,7 +307,7 @@ fn deliver(locals: &mut LocalProcs, tick: i64, input: Input) {
         timems: tick as u64,
         input,
     };
-    locals.procs[0].on_receive("gate", wire::encode_frame(&ordered).unwrap());
+    locals.procs[0].on_receive(wire::encode_frame(&ordered).unwrap(), "gate");
 }
 
 fn append_input(previous: i64, commit: i64, entries: Vec<monsterft::log::LogEntry>) -> Input {
@@ -314,7 +316,6 @@ fn append_input(previous: i64, commit: i64, entries: Vec<monsterft::log::LogEntr
         rpc::{Rpc, RpcEnvelope},
     };
     Input::ClusterMessage {
-        from: "b".into(),
         frame: wire::encode_frame(&Envelope {
             to: "a".into(),
             message: RpcEnvelope {
@@ -568,7 +569,7 @@ fn warning_listener_failure_stops_before_later_listeners() {
     locals.procs[0]
         .diagnostics
         .on_close(move || observed.borrow_mut().push("close"));
-    locals.procs[0].on_receive("not-gate", Bytes::new());
+    locals.procs[0].on_receive(Bytes::new(), "not-gate");
     assert!(locals.procs[0].is_stopped());
     assert_eq!(*events.borrow(), vec!["error", "close", "later warning"]);
 }

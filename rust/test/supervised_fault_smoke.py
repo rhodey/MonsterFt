@@ -30,7 +30,7 @@ def free_port_range():
         base = random.SystemRandom().randrange(20000, 55000)
         sockets = []
         try:
-            for offset in (0, 1, 2, 10, 11, 12, 20, 21, 22):
+            for offset in range(3):
                 sock = socket.socket()
                 sockets.append(sock)
                 sock.bind(("127.0.0.1", base + offset))

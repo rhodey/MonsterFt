@@ -29,7 +29,7 @@ function fixture() {
     base, procs, errors,
     request(index, message) {
       message = { cid: `request-${++cid}`, ...message }
-      procs[index].onReceive('gate', encodeFrame(message))
+      procs[index].onReceive(encodeFrame(message), 'gate')
       return replies[index].find((reply) => reply.cid === message.cid)
     },
     input(index, type) {

@@ -49,8 +49,8 @@ test('certify remains offline and rejects idle component connections', async (t)
     owner.on('error', (err) => errors.push(err))
     try {
       f.close()
-      await owner.onReceive('gate', encodeFrame({ type: 'hello', cid: 'hello', seed }))
-      await owner.onReceive('gate', encodeFrame({ type: 'open', cid: 'open' }))
+      await owner.onReceive(encodeFrame({ type: 'hello', cid: 'hello', seed }), 'gate')
+      await owner.onReceive(encodeFrame({ type: 'open', cid: 'open' }), 'gate')
       t.equal(replies.at(-1)?.cid, 'open', `${role} opened its database`)
       t.ok(owner.db?.isOpen && !owner.db.isTransaction,
         `${role} keeps an idle connection without an active transaction`)

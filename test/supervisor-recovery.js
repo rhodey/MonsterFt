@@ -57,7 +57,7 @@ async function processCluster(options = {}) {
       try {
         const receive = (role, frame) => {
           if (options.receive?.({ id, role, frame, run }) === false) { return }
-          gate.onReceive(role, frame)
+          gate.onReceive(frame, role)
         }
         if (local) {
           local.on('message', receive)
@@ -78,7 +78,7 @@ async function processCluster(options = {}) {
           servers.push(server)
         }
         gate = new Gate(id, ids, (to, frame) => {
-          if (!stopped) { supervisors.get(to)?.gate?.onReceive(id, frame) }
+          if (!stopped) { supervisors.get(to)?.gate?.onReceive(frame) }
         }, (to, frame) => local ? local.send(to, frame) : sockets.get(to).write(frame), {
           tickInterval: 5, localTimeout: 1_500, applyTimeout: 400,
         })

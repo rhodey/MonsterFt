@@ -13,7 +13,7 @@ for (const localDelay of [0, 2]) {
     const warningMessage = (role) => `${role === 'apply' ? 'Apply' : 'Proc'} sender a is illegal, expected gate`
     try {
       for (const role of owners) {
-        await node[role].onReceive('a', Buffer.alloc(0))
+        await node[role].onReceive(Buffer.alloc(0), 'a')
       }
       t.equal(sends, 0, 'wrong sender receives no reply before hello')
       t.equal(c.calls.length, 0, 'invalid local traffic invokes no apply callback')
@@ -27,7 +27,7 @@ for (const localDelay of [0, 2]) {
       const before = c.warnings.length
       const wrongClose = encodeFrame({ type: 'close', cid: 'wrong-sender-close' })
       for (const role of owners) {
-        await node[role].onReceive('a', wrongClose)
+        await node[role].onReceive(wrongClose, 'a')
         t.ok(node[role].isOpen, `${role} does not process the wrong sender's close request`)
       }
       t.deepEqual(c.warnings.slice(before).map(({ role, error }) => [role, error.code, error.message]),
@@ -42,7 +42,7 @@ for (const localDelay of [0, 2]) {
       await c.close()
       const warnings = c.warnings.length
       const sent = sends
-      for (const role of owners) { await node[role].onReceive('a', Buffer.alloc(0)) }
+      for (const role of owners) { await node[role].onReceive(Buffer.alloc(0), 'a') }
       t.equal(c.warnings.length, warnings, 'stopped owners ignore wrong senders quietly')
       t.equal(sends, sent, 'stopped owners send no reply')
     } finally { await c.close() }
@@ -74,7 +74,7 @@ for (const role of owners) {
         })
         owner.on('close', () => { events.push('close') })
         const before = ownerSends
-        await owner.onReceive('a', encodeFrame({ type: 'close', cid: 'misrouted' }))
+        await owner.onReceive(encodeFrame({ type: 'close', cid: 'misrouted' }), 'a')
         await owner.close()
         t.equal(ownerSends, before, 'warning handling sends no reply')
         t.notOk(owner.isOpen, 'listener stops the owner')
@@ -82,7 +82,7 @@ for (const role of owners) {
         t.deepEqual(events, throws ? ['error', 'close'] : ['close'], 'diagnostic and cleanup ordering remains intact')
         t.equal(c.calls.length, 0, 'no apply callback runs')
         const warnings = c.warnings.length
-        await owner.onReceive('a', Buffer.alloc(0))
+        await owner.onReceive(Buffer.alloc(0), 'a')
         t.equal(c.warnings.length, warnings, 'later wrong-sender traffic is quiet')
       } finally { await c.close() }
       t.end()
@@ -96,7 +96,7 @@ test('invalid local frames from Gate remain fatal for every owner', async (t) =>
     const node = c.nodes.get('a')
     for (const role of owners) {
       const owner = node[role]
-      await owner.onReceive('gate', Buffer.alloc(0))
+      await owner.onReceive(Buffer.alloc(0), 'gate')
       await owner.close()
       const errors = c.errors.filter((item) => item.role === role)
       t.equal(errors.length, 1, `${role} reports one fatal failure`)

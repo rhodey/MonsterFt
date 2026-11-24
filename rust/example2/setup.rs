@@ -32,20 +32,20 @@ fn peers(default_port: u16) -> Result<BTreeMap<String, TcpPeer>> {
         .parse()
         .map_err(|_| error("MONSTERFT_BASE_PORT must be a TCP port"))?;
 
-    // Reserve a separate port range for each local cluster node.
+    // Each local cluster node listens on one port.
     common::NODES
         .iter()
         .enumerate()
         .map(|(index, id)| {
-            let base_port = base
-                .checked_add(index as u16 * 10)
+            let port = base
+                .checked_add(index as u16)
                 .ok_or_else(|| error("TCP port overflow"))?;
 
             Ok((
                 (*id).to_owned(),
                 TcpPeer {
                     host: "127.0.0.1".into(),
-                    base_port,
+                    port,
                 },
             ))
         })
@@ -228,7 +228,7 @@ pub async fn setup(
             let result = async {
                 loop {
                     let frame = endpoint.recv().await.map_err(common::send_error)?;
-                    gate.on_receive(role, frame)?;
+                    gate.on_receive(frame, Some(role))?;
                 }
 
                 #[allow(unreachable_code)]
@@ -253,8 +253,8 @@ pub async fn setup(
     let network = tokio::task::spawn_local(async move {
         loop {
             match tcp.recv().await {
-                Ok(Some((from, frame))) => {
-                    if let Err(error) = network_gate.on_receive(from, frame) {
+                Ok(Some(frame)) => {
+                    if let Err(error) = network_gate.on_receive(frame, None) {
                         if !network_stopping.get() {
                             eprintln!("{network_id}/tcp: {error}");
                             let _ = network_failed.send(error);

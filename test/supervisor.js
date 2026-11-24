@@ -38,7 +38,7 @@ function harness(options = {}) {
       cleaned: 0, stopped: 0, gateClosed: 0, transportFailed: deferred(),
     }
     let gate
-    const reply = (from, message) => gate.onReceive(from, wire.encodeFrame(message))
+    const reply = (from, message) => gate.onReceive(wire.encodeFrame(message), from)
     const localSend = (to, frame) => {
       const decoded = wire.decodeFrame(frame)
       const message = decoded.to === 'apply' ? decoded.message : decoded
@@ -395,13 +395,13 @@ test('Supervisor graceful close releases real SQLite owners and reopens retained
         local.on('error', (error) => errors.push(error))
         await local.open()
         const gate = new Gate(id, ids,
-          (to, frame) => current.get(to)?.gate?.onReceive(id, frame),
+          (to, frame) => current.get(to)?.gate?.onReceive(frame),
           (to, frame) => local.send(to, frame), {
             tickInterval: 5, localTimeout: 3_000, applyTimeout: 3_000,
           })
         gate.on('error', (error) => errors.push(error))
         gate.on('close', () => { run.closed = true })
-        local.on('message', (role, frame) => gate.onReceive(role, frame))
+        local.on('message', (role, frame) => gate.onReceive(frame, role))
         run.gate = gate
         runs.push(run)
         return {
@@ -505,7 +505,7 @@ test('Supervisor restarts a fatal Gate without mirroring its diagnostic', async 
   try {
     await h.supervisor.open()
     const run = h.runs[0]
-    run.gate.onReceive('procA', Buffer.alloc(17))
+    run.gate.onReceive(Buffer.alloc(17), 'procA')
     await until(() => h.opens.length === 2, 'replacement after Gate fatal')
     t.equal(run.diagnostics.at(-1).code, Err.FRAME_CORRUPT)
     t.ok([...run.children.values()].every(exited))
@@ -522,10 +522,10 @@ test('a corrupt remote frame does not restart Supervisor or reap healthy owners'
     const run = h.runs[0]
     const warnings = []
     run.gate.on('warn', (error) => warnings.push(error))
-    run.gate.onReceive('b', Buffer.alloc(17))
+    run.gate.onReceive(Buffer.alloc(17))
     t.equal(warnings.length, 1)
     t.equal(warnings[0].code, Err.FRAME_CORRUPT)
-    t.equal(warnings[0].message, 'cluster frame from b: frame checksum differs')
+    t.equal(warnings[0].message, 'cluster frame: frame checksum differs')
     t.deepEqual(await run.gate.append(Buffer.from('continued')), [1n, 'continued'])
     await pause(20)
     t.equal(h.supervisor.gate, run.gate, 'the same Gate continues serving commands')

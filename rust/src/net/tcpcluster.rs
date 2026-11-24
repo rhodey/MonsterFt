@@ -1,4 +1,4 @@
-//! Fixed-membership TCP routing: one incoming and outgoing connection per peer.
+//! Fixed-membership TCP routing with one listener per node and one outgoing stream per peer.
 use super::tcp::{self, FrameOptions, FrameReader};
 use bytes::Bytes;
 use futures_util::FutureExt;
@@ -15,13 +15,13 @@ use std::{
 use tokio::{
     net::{TcpListener, TcpStream},
     sync::{Notify, mpsc, watch},
-    task::{AbortHandle, JoinHandle},
+    task::JoinHandle,
 };
 
 #[derive(Clone, Debug)]
 pub struct TcpPeer {
     pub host: String,
-    pub base_port: u16,
+    pub port: u16,
 }
 #[derive(Clone, Debug)]
 pub struct TcpOptions {
@@ -95,35 +95,22 @@ struct QueuedFrame {
     _charge: Charge,
 }
 struct Outgoing {
-    epoch: u64,
     sender: mpsc::Sender<QueuedFrame>,
     budget: Rc<Budget>,
 }
-struct Incoming {
-    epoch: u64,
-    abort: Option<AbortHandle>,
-}
-struct Received {
-    peer: String,
-    epoch: u64,
-    frame: QueuedFrame,
-}
-
 struct Shared {
     id: String,
     peers: BTreeMap<String, TcpPeer>,
     options: TcpOptions,
     open: Cell<bool>,
     stopped: Cell<bool>,
-    epoch: Cell<u64>,
     failure: watch::Sender<Option<Failure>>,
     stopped_signal: watch::Sender<bool>,
     outgoing: RefCell<BTreeMap<String, Outgoing>>,
-    incoming: RefCell<BTreeMap<String, Incoming>>,
     tasks: RefCell<Vec<JoinHandle<()>>>,
     warnings: RefCell<Vec<Listener>>,
     errors: RefCell<Vec<Listener>>,
-    mailbox: mpsc::Sender<Received>,
+    mailbox: mpsc::Sender<QueuedFrame>,
     inbound: Rc<Budget>,
 }
 impl Shared {
@@ -143,7 +130,6 @@ impl Shared {
         self.open.set(false);
         self.stopped_signal.send_replace(true);
         self.outgoing.borrow_mut().clear();
-        self.incoming.borrow_mut().clear();
         for task in self.tasks.borrow().iter() {
             task.abort();
         }
@@ -182,27 +168,16 @@ impl Shared {
             }
         }
     }
-    fn next_epoch(&self) -> io::Result<u64> {
-        let next = self
-            .epoch
-            .get()
-            .checked_add(1)
-            .ok_or_else(|| io::Error::other("TCP connection identity exhausted"))?;
-        self.epoch.set(next);
-        Ok(next)
-    }
-    fn spawn(self: &Rc<Self>, future: impl Future<Output = ()> + 'static) -> AbortHandle {
+    fn spawn(self: &Rc<Self>, future: impl Future<Output = ()> + 'static) {
         let state = self.clone();
         let task = tokio::task::spawn_local(async move {
             if AssertUnwindSafe(future).catch_unwind().await.is_err() {
                 state.fatal(io::Error::other("TCP transport task panicked"));
             }
         });
-        let abort = task.abort_handle();
         let mut tasks = self.tasks.borrow_mut();
         tasks.retain(|task| !task.is_finished());
         tasks.push(task);
-        abort
     }
 }
 
@@ -308,12 +283,12 @@ impl TcpSender {
 
 pub struct TcpCluster {
     sender: TcpSender,
-    receiver: mpsc::Receiver<Received>,
+    receiver: mpsc::Receiver<QueuedFrame>,
     close_result: Option<Option<Failure>>,
     close_task: Option<JoinHandle<Option<Failure>>>,
 }
 impl TcpCluster {
-    /// Requires a current-thread runtime with LocalSet. Only local listeners block open.
+    /// Requires a current-thread runtime with LocalSet. Open waits only for the local listener to bind.
     pub async fn open(
         id: impl Into<String>,
         peers: BTreeMap<String, TcpPeer>,
@@ -322,15 +297,7 @@ impl TcpCluster {
         let id = id.into();
         validate(&id, &peers, &options)?;
         let ids: Vec<_> = peers.keys().cloned().collect();
-        let own_index = ids.iter().position(|peer| peer == &id).unwrap();
-        let mut listeners = Vec::new();
-        for (index, peer) in ids.iter().enumerate() {
-            if peer != &id {
-                let port = port(peers[&id].base_port, index)?;
-                let listener = TcpListener::bind((options.bind_host, port)).await?;
-                listeners.push((peer.clone(), listener));
-            }
-        }
+        let listener = TcpListener::bind((options.bind_host, peers[&id].port)).await?;
         let (mailbox, receiver) = mpsc::channel(options.inbound_messages);
         let (failure, _) = watch::channel(None);
         let (stopped_signal, _) = watch::channel(false);
@@ -345,27 +312,20 @@ impl TcpCluster {
             options,
             open: Cell::new(true),
             stopped: Cell::new(false),
-            epoch: Cell::new(0),
             failure,
             stopped_signal,
             outgoing: RefCell::new(BTreeMap::new()),
-            incoming: RefCell::new(BTreeMap::new()),
             tasks: RefCell::new(Vec::new()),
             warnings: RefCell::new(Vec::new()),
             errors: RefCell::new(Vec::new()),
             mailbox,
         });
-        for (peer, listener) in listeners {
-            let own = state.clone();
-            state.spawn(async move {
-                accept_loop(own, peer, listener).await;
-            });
-        }
+        state.spawn(accept_loop(state.clone(), listener));
         for peer in ids {
             if peer != state.id {
                 let own = state.clone();
                 state.spawn(async move {
-                    connect_loop(own, peer, own_index).await;
+                    connect_loop(own, peer).await;
                 });
             }
         }
@@ -400,7 +360,7 @@ impl TcpCluster {
     pub fn failure(&self) -> impl Future<Output = io::Error> + 'static {
         self.sender.failure()
     }
-    pub async fn recv(&mut self) -> io::Result<Option<(String, Bytes)>> {
+    pub async fn recv(&mut self) -> io::Result<Option<Bytes>> {
         let state = &self.sender.0;
         let mut stopped = state.stopped_signal.subscribe();
         loop {
@@ -411,23 +371,13 @@ impl TcpCluster {
                 };
             }
             let message = tokio::select! {message=self.receiver.recv()=>message,_=stopped.changed()=>continue};
-            let Some(message) = message else {
-                return Ok(None);
-            };
-            if state
-                .incoming
-                .borrow()
-                .get(&message.peer)
-                .is_some_and(|current| current.epoch == message.epoch)
-            {
-                return Ok(Some((message.peer, message.frame.frame)));
-            }
+            return Ok(message.map(|value| value.frame));
         }
     }
     /// Optional callback driver. A listener panic terminates the transport.
-    pub async fn run(&mut self, mut listener: impl FnMut(String, Bytes)) -> io::Result<()> {
-        while let Some((peer, frame)) = self.recv().await? {
-            if catch_unwind(AssertUnwindSafe(|| listener(peer, frame))).is_err() {
+    pub async fn run(&mut self, mut listener: impl FnMut(Bytes)) -> io::Result<()> {
+        while let Some(frame) = self.recv().await? {
+            if catch_unwind(AssertUnwindSafe(|| listener(frame))).is_err() {
                 self.sender
                     .0
                     .fatal(io::Error::other("TCP message listener panicked"));
@@ -488,14 +438,6 @@ impl Drop for TcpCluster {
     }
 }
 
-/// The sender's position in sorted membership determines the destination port.
-pub fn port(base_port: u16, sender_index: usize) -> io::Result<u16> {
-    u16::try_from(sender_index)
-        .ok()
-        .and_then(|index| base_port.checked_add(index))
-        .filter(|port| *port != 0)
-        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "TCP derived port is illegal"))
-}
 fn validate(id: &str, peers: &BTreeMap<String, TcpPeer>, options: &TcpOptions) -> io::Result<()> {
     options.frames.validate()?;
     if id.is_empty() || !peers.contains_key(id) || peers.keys().any(String::is_empty) {
@@ -514,27 +456,19 @@ fn validate(id: &str, peers: &BTreeMap<String, TcpPeer>, options: &TcpOptions) -
         ));
     }
     for (node, peer) in peers {
-        if peer.host.is_empty() || peer.base_port == 0 {
+        if peer.host.is_empty() || peer.port == 0 {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
                 format!("TCP peer {node} endpoint is illegal"),
             ));
         }
-        for (index, sender) in peers.keys().enumerate() {
-            if sender != node {
-                port(peer.base_port, index)?;
-            }
-        }
     }
     Ok(())
 }
 
-async fn connect_loop(state: Rc<Shared>, peer: String, index: usize) {
+async fn connect_loop(state: Rc<Shared>, peer: String) {
     let endpoint = &state.peers[&peer];
-    let address = (
-        endpoint.host.clone(),
-        port(endpoint.base_port, index).unwrap(),
-    );
+    let address = (endpoint.host.clone(), endpoint.port);
     loop {
         if state.stopped.get() {
             return;
@@ -546,13 +480,6 @@ async fn connect_loop(state: Rc<Shared>, peer: String, index: usize) {
         .await;
         match result {
             Ok(stream) => {
-                let epoch = match state.next_epoch() {
-                    Ok(value) => value,
-                    Err(error) => {
-                        state.fatal(error);
-                        return;
-                    }
-                };
                 let (tx, mut rx) =
                     mpsc::channel::<QueuedFrame>(state.options.frames.max_queued_messages);
                 let budget = Rc::new(Budget {
@@ -560,14 +487,10 @@ async fn connect_loop(state: Rc<Shared>, peer: String, index: usize) {
                     limit: state.options.frames.max_queued_bytes,
                     available: Notify::new(),
                 });
-                state.outgoing.borrow_mut().insert(
-                    peer.clone(),
-                    Outgoing {
-                        epoch,
-                        sender: tx,
-                        budget,
-                    },
-                );
+                state
+                    .outgoing
+                    .borrow_mut()
+                    .insert(peer.clone(), Outgoing { sender: tx, budget });
                 let (reader, mut writer) = stream.into_split();
                 let mut reader =
                     FrameReader::new(reader, state.options.frames.max_frame_bytes).unwrap();
@@ -592,19 +515,12 @@ async fn connect_loop(state: Rc<Shared>, peer: String, index: usize) {
                     }
                 };
                 let result = tokio::select! {result=writing=>result,result=unexpected=>result};
-                let current = state
-                    .outgoing
-                    .borrow()
-                    .get(&peer)
-                    .is_some_and(|current| current.epoch == epoch);
-                if current {
-                    state.outgoing.borrow_mut().remove(&peer);
-                    if let Err(error) = result {
-                        state.warn(io::Error::new(
-                            error.kind(),
-                            format!("TCP peer {peer} {error}"),
-                        ));
-                    }
+                state.outgoing.borrow_mut().remove(&peer);
+                if let Err(error) = result {
+                    state.warn(io::Error::new(
+                        error.kind(),
+                        format!("TCP peer {peer} {error}"),
+                    ));
                 }
             }
             Err(error) => state.warn(io::Error::new(
@@ -619,7 +535,7 @@ async fn connect_loop(state: Rc<Shared>, peer: String, index: usize) {
     }
 }
 
-async fn accept_loop(state: Rc<Shared>, peer: String, listener: TcpListener) {
+async fn accept_loop(state: Rc<Shared>, listener: TcpListener) {
     loop {
         match listener.accept().await {
             Err(error) => {
@@ -634,36 +550,13 @@ async fn accept_loop(state: Rc<Shared>, peer: String, listener: TcpListener) {
                     state.warn(error);
                     continue;
                 }
-                let epoch = match state.next_epoch() {
-                    Ok(value) => value,
-                    Err(error) => {
-                        state.fatal(error);
-                        return;
-                    }
-                };
-                if let Some(old) = state.incoming.borrow_mut().remove(&peer)
-                    && let Some(abort) = old.abort
-                {
-                    abort.abort();
-                }
-                let own = state.clone();
-                let name = peer.clone();
-                let abort = state.spawn(async move {
-                    receive_loop(own, name, epoch, stream).await;
-                });
-                state.incoming.borrow_mut().insert(
-                    peer.clone(),
-                    Incoming {
-                        epoch,
-                        abort: Some(abort),
-                    },
-                );
+                state.spawn(receive_loop(state.clone(), stream));
             }
         }
     }
 }
 
-async fn receive_loop(state: Rc<Shared>, peer: String, epoch: u64, stream: TcpStream) {
+async fn receive_loop(state: Rc<Shared>, stream: TcpStream) {
     let mut reader = FrameReader::new(stream, state.options.frames.max_frame_bytes).unwrap();
     let result: io::Result<()> = async {
         loop {
@@ -680,33 +573,19 @@ async fn receive_loop(state: Rc<Shared>, peer: String, epoch: u64, stream: TcpSt
             };
             state
                 .mailbox
-                .send(Received {
-                    peer: peer.clone(),
-                    epoch,
-                    frame: QueuedFrame {
-                        frame,
-                        _charge: charge,
-                    },
+                .send(QueuedFrame {
+                    frame,
+                    _charge: charge,
                 })
                 .await
                 .map_err(|_| io::Error::new(io::ErrorKind::BrokenPipe, "TCP receiver is closed"))?;
         }
     }
     .await;
-    let current = state
-        .incoming
-        .borrow()
-        .get(&peer)
-        .is_some_and(|current| current.epoch == epoch);
-    if current {
-        if let Some(current) = state.incoming.borrow_mut().get_mut(&peer) {
-            current.abort = None;
-        }
-        if let Err(error) = result {
-            state.warn(io::Error::new(
-                error.kind(),
-                format!("TCP peer {peer} {error}"),
-            ));
-        }
+    if let Err(error) = result {
+        state.warn(io::Error::new(
+            error.kind(),
+            format!("TCP incoming connection {error}"),
+        ));
     }
 }

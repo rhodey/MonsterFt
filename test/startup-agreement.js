@@ -27,7 +27,7 @@ function localNode(base, options = {}) {
   }
   const localSend = (from) => (to, frame) => {
     const message = wire.decodeFrame(frame)
-    const deliver = () => local[to].onReceive(from, frame)
+    const deliver = () => local[to].onReceive(frame, from)
     if (options.local?.({ from, to, message, deliver }) === false) { return }
     if (options.delayed) { setImmediate(deliver) }
     else { deliver() }
@@ -184,7 +184,7 @@ for (const delayed of [false, true]) {
           .every((role) => node[role].isOpen), 'two Procs started')
         // Model loss of the single-copy dispatch barrier at a real phase boundary.
         node.gate._current = null
-        node.gate.onReceive('b', wire.encodeFrame({ to: 'a', message: {
+        node.gate.onReceive(wire.encodeFrame({ to: 'a', message: {
           type: 'vote_request', from: 'b', term: 1n, termP: -1n, seqP: -1n,
         } }))
         await until(() => roles.filter((role) => role !== missing)
@@ -221,7 +221,7 @@ test('healthy third Proc blocks a damaged donor command before Apply or an ACK i
     t.deepEqual(roles.map((role) => wire.decodePayload(
       node[role].log.iter(1n).next().value.entry).items[0].toString()),
     ['amount=0', 'amount=1', 'amount=0'], 'the deferred donor-copy issue is deliberately still present')
-    node.gate.onReceive('b', wire.encodeFrame({ to: 'a', message: {
+    node.gate.onReceive(wire.encodeFrame({ to: 'a', message: {
       from: 'b', type: 'append', cid: 'commit-existing-log', term: 2n,
       seqP: 2n, termP: 2n, commitSeq: 2n,
     } }))
@@ -261,12 +261,12 @@ test('healthy third Proc blocks replication of a damaged donor command', async (
     },
     send({ to, message, gate }) {
       if (to === 'b' && message.type === 'vote_request') {
-        gate.onReceive('b', wire.encodeFrame({ to: 'a', message: {
+        gate.onReceive(wire.encodeFrame({ to: 'a', message: {
           type: 'vote', from: 'b', term: message.term, voteGranted: true,
         } }))
       }
       if (to === 'b' && message.type === 'append' && message.data && message.seqP > 0n) {
-        gate.onReceive('b', wire.encodeFrame({ to: 'a', message: {
+        gate.onReceive(wire.encodeFrame({ to: 'a', message: {
           type: 'err', from: 'b', cid: message.cid, term: message.term,
           code: Err.REPL_BACKTRACK, message: 'predecessor mismatch', logSeq: 0n,
         } }))

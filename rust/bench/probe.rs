@@ -17,14 +17,14 @@ fn peers(base: u16) -> BTreeMap<String, TcpPeer> {
             "a".into(),
             TcpPeer {
                 host: "127.0.0.1".into(),
-                base_port: base,
+                port: base,
             },
         ),
         (
             "b".into(),
             TcpPeer {
                 host: "127.0.0.1".into(),
-                base_port: base + 10,
+                port: base + 1,
             },
         ),
     ]
@@ -54,8 +54,8 @@ async fn echo(
             tokio::select! {
                 result = &mut task => return Err(io::Error::other(format!("echo delay stopped: {result:?}"))),
                 message = tcp.recv() => {
-                    let (from, frame) = message?.ok_or_else(||io::Error::other("echo TCP stopped"))?;
-                    sender.send(&from, frame)?;
+                    let frame = message?.ok_or_else(||io::Error::other("echo TCP stopped"))?;
+                    sender.send("a", frame)?;
                 },
                 _ = &mut stop => return Ok(()),
             }
@@ -117,7 +117,7 @@ async fn run(base: u16, delay: Duration, samples: usize) -> io::Result<Report> {
                 message = tcp.recv() => message?.ok_or_else(||io::Error::other("probe TCP stopped"))?,
             };
             let elapsed = began.elapsed().as_secs_f64() * 1e6;
-            if returned.0 != "b" || returned.1 != frame { return Err(io::Error::other("probe returned different bytes")); }
+            if returned != frame { return Err(io::Error::other("probe returned different bytes")); }
             if Instant::now() >= warm_until { times.push(elapsed); }
             sequence += 1;
         }
@@ -160,7 +160,7 @@ async fn main() -> io::Result<()> {
     let base: u16 = args[0].parse().map_err(io::Error::other)?;
     let micros: f64 = args[1].parse().map_err(io::Error::other)?;
     let samples: usize = args[2].parse().map_err(io::Error::other)?;
-    if base > 65_523
+    if !(1..u16::MAX).contains(&base)
         || !micros.is_finite()
         || !(0.0..=1e6).contains(&micros)
         || samples == 0

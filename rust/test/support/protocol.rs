@@ -131,7 +131,7 @@ impl Protocol {
                 },
                 StartupRequest::Open { cid: "open".into() },
             ] {
-                proc.on_receive("gate", wire::encode_frame(&request).unwrap());
+                proc.on_receive(wire::encode_frame(&request).unwrap(), "gate");
                 assert!(!proc.is_stopped(), "{:?}", proc.fatal_error());
             }
             self.procs.push(proc);
@@ -149,7 +149,7 @@ impl Protocol {
             },
         ] {
             for proc in &mut self.procs {
-                proc.on_receive("gate", wire::encode_frame(&request).unwrap());
+                proc.on_receive(wire::encode_frame(&request).unwrap(), "gate");
                 assert!(!proc.is_stopped(), "{:?}", proc.fatal_error());
             }
         }
@@ -186,7 +186,7 @@ impl Protocol {
         })
         .unwrap();
         for proc in &mut self.procs {
-            proc.on_receive("gate", frame.clone());
+            proc.on_receive(frame.clone(), "gate");
         }
         let replies = self.replies.borrow();
         if replies.is_empty() {
@@ -240,7 +240,6 @@ impl Protocol {
     }
     pub fn rpc_input(&self, from: &str, rpc: Rpc) -> Input {
         Input::ClusterMessage {
-            from: from.into(),
             frame: wire::encode_frame(&Envelope {
                 to: self.id.clone(),
                 message: RpcEnvelope {

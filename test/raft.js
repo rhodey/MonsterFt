@@ -21,7 +21,7 @@ function fixture() {
   let cid = 0
   const request = (proc, message) => {
     message = { cid: `local-${++cid}`, ...message }
-    proc.onReceive('gate', wire.encodeFrame(message))
+    proc.onReceive(wire.encodeFrame(message), 'gate')
     const reply = replies.find((value) => value.cid === message.cid)
     return reply
   }
@@ -41,7 +41,7 @@ function fixture() {
     timems: proc.executor.timems, ...fields,
   })
   const rpc = (message, from = 'b', timems = proc.executor.timems) => input('cluster_message', {
-    from, timems, frame: wire.encodeFrame({ to: 'a', message: { from, ...message } }),
+    timems, frame: wire.encodeFrame({ to: 'a', message: { from, ...message } }),
   })
   const outputs = (reply) => (reply.outputs ?? []).map(wire.decodePayload)
   input('start')
