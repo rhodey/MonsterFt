@@ -271,8 +271,7 @@ configured number of application commands or Raft sequences. The cadence and
 the number of pages sampled are separate settings from repair group size `X`.
 Define whether a command means a CMD batch or an individual item, and whether
 scrubs themselves count toward the interval. Avoid self-triggering scrub loops.
-A standalone scrub CMD batch is the preferred initial shape, subject to the
-sampling tests below.
+A standalone, read-only scrub CMD batch is the preferred initial shape.
 
 Every member computes a hash over the same subset of DB2 pages using the same
 canonicalization and returns it as the scrub command's result. Normal command
@@ -291,15 +290,28 @@ image, including growth, truncation, and the canonical ownership page. Preserve
 progress across restarts and leadership changes so sampling does not repeatedly
 restart at the first range.
 
-Specify the sampling point precisely. A promising point is the start of scrub
-execution, before writing its own receipt, so all nodes hash the same preceding
-state. A scrub must not hash an unfinished receipt containing its own result
-digest. Determine whether the scan uses the executing connection or a separately
-pinned reader and verify that it observes exactly the intended checkpoint.
+Receipt timing is already established by [Apply's execution flow](src/apply.js):
 
-Scrubs use their current command checkpoint. They must not accidentally use an
-older reader still pinned for another node's repair. Preserve transport and
-local Proc agreement for scrub outcomes and repair-trigger notifications.
+1. Begin the DB2 write transaction, check generation, and read the previous receipt.
+2. Await every application callback in the batch.
+3. Extract the patchset and close the session.
+4. Compute the command digest from the patchset and completed outcomes.
+5. Write the new receipt, commit, and then acknowledge completion.
+
+The receipt object allocated before the callbacks is only a JavaScript object;
+it has not been written to DB2. A standalone read-only scrub uses the `db` and
+transaction supplied to its execution, so it reads the previous completed
+receipt and database state before its own receipt is written. There is no
+unfinished stored receipt or circular result dependency to resolve, and this
+ordering does not require a separate reader. The existing session-order test in
+[test/apply.js](test/apply.js) also checks that receipt writing follows patchset
+extraction and session closure.
+
+Keep the initial scrub batch standalone: if it followed application writes in
+the same batch, its reads would also see those uncommitted changes while the
+receipt still described the previous batch. Scrubs must not use an older reader
+still pinned for another node's repair. Preserve transport and local Proc
+agreement for scrub outcomes and repair-trigger notifications.
 
 ## Quorum-impossible outcomes
 
