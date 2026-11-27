@@ -4,6 +4,14 @@ Working draft, 2026-11-27. This records the preferred direction and the remainin
 questions; it is not a completed protocol specification. Experiments come before
 we rely on the proposed DB2 page-equality rules.
 
+The first preservation experiments are now recorded in
+[doc/DB2-PAGE-EQUALITY.md](doc/DB2-PAGE-EQUALITY.md). They support ownership-page
+isolation but disprove the sufficiency of owner/page-1 normalization alone:
+unequal restarts can expose different unused freelist-leaf bytes. Additional
+free-leaf canonicalization is now the agreed direction, conditional on reliable
+snapshot-specific classification. Its corruption handling and the agreed
+application rules still need implementation and validation.
+
 ## Scope and decisions
 
 - Keep MonsterFt on `node:sqlite`. Build Node and its SQLite dependency with Nix,
@@ -18,18 +26,34 @@ we rely on the proposed DB2 page-equality rules.
   patchsets. Repair transfers SQLite pages read through `sqlite_dbpage`.
   Nothing in this plan introduces patchset/changeset application.
 - The **leader is always the repair donor**. DB1 donation is verified by the
-  leader's three local Procs. DB2 replacement groups require agreement from
-  distinct cluster members.
+  leader's three local Procs. DB2 replacement groups require agreement between
+  the leader and **one eligible healthy follower, regardless of cluster size**.
+  This is two-member corroboration, not a majority requirement in larger
+  clusters. Ordinary Raft and command-outcome quorum rules are unchanged.
 - Final repair acceptance does **not** require a quorum-endorsed complete DB2
   manifest. Keep groups whose hashes match the leader and obtain fresh follower
   agreement only for replacement groups.
+- Compute **one hash over multiple pages per group**. Each page contributes its
+  page number, normalization type, and canonical bytes to that group hash.
+  Transfer normalization types with replacement pages and write every page in
+  each accepted replacement group. Do not add per-page no-op/write-skipping
+  optimization at the target.
 - Replace logical local DB1 adoption with transactional `sqlite_dbpage`
   reconciliation. Require matching canonical local page views so the copies
   can produce matching page-transfer RPCs.
 - Canonicalize the two SQLite page-1 counters in both DB1 and DB2 for hashing
   and RPC payloads. Raw equality of those counters is not required.
+- Canonicalize DB2 freelist leaf pages to full zero pages for hashing and RPCs,
+  provided their classification comes from validated snapshot allocation
+  metadata. Preserve all allocation metadata; corruption handling remains to
+  be implemented and tested.
 - Move DB2's local generation into a dedicated singleton ownership table/page.
   Keep the token local and preserve the existing transaction-scoped fence.
+- Application mutations must be deterministic within each command. Dependence
+  on connection state inherited from earlier commands is unsupported.
+- Coordinate explicit `ANALYZE` through normal Monster/Raft commands; document
+  its use instead of `PRAGMA optimize`. `VACUUM` support is deferred beyond the
+  initial work and is not a near-term requirement.
 - Add periodic committed scrub commands that compare subsets of DB2 pages
   through ordinary command-result agreement.
 - A repair target closes normal operation and restarts in a repair-only mode,
@@ -95,10 +119,11 @@ including visible WAL content. Do not compare only the main database file while
 ignoring its WAL.
 
 For local DB1 agreement and cross-member DB2 agreement, require matching page
-size, page count, and canonicalized bytes at corresponding page numbers in the
-agreed snapshot. It is equality through the `sqlite_dbpage` read interface, not
-byte identity of the main database file, WAL, shared-memory file, or filesystem
-layout. Different checkpoint placement and WAL bookkeeping are permitted.
+size, page count, normalization types, and canonicalized bytes at corresponding
+page numbers in the agreed snapshot. It is equality through the `sqlite_dbpage`
+read interface, not byte identity of the main database file, WAL, shared-memory
+file, or filesystem layout. Different checkpoint placement and WAL bookkeeping
+are permitted.
 
 `sqlite_dbpage` still returns SQLite page bytes, including B-tree layout and free
 space. It does not turn equal SQL rows into a canonical serialization. The
@@ -109,8 +134,53 @@ applied to that page view before comparison.
 Use one versioned canonicalization rule per database for comparisons, group
 hashes, scrub results, and repair RPC payloads. Raw outgoing payload differences
 would still fail Gate verification even if a separate comparison hash ignored
-them. Both databases normalize page-1 counters; only DB2 substitutes its local
-ownership page. DB1 does not need cross-member page equality.
+them. Both databases normalize page-1 counters; DB2 also substitutes its local
+ownership page and its validated freelist leaves as described below.
+DB1 does not need cross-member page equality.
+
+Each participant independently determines how to normalize its own snapshot
+pages. Include that normalization type in the hash input, alongside the page
+number and canonical bytes. The four types are:
+
+| Type | Canonical bytes |
+| --- | --- |
+| Ordinary | Original page bytes |
+| Page 1 | Original bytes with the two agreed counters normalized |
+| Ownership | Valid deterministic ownership-page template |
+| Free leaf | A full page of zeros |
+
+DB1 uses only the applicable types; ownership and free-leaf substitution are DB2
+rules. These types describe normalization, not every SQLite B-tree/page role.
+Use a fixed, unambiguous encoding under the normalization version.
+
+For a group starting at page `s` and containing `m` pages, compute one digest:
+
+```text
+groupHash = H(groupContext,
+              (s,       type[s],       canonicalBytes[s]),
+              (s + 1,   type[s + 1],   canonicalBytes[s + 1]),
+              ...,
+              (s + m-1, type[s + m-1], canonicalBytes[s + m-1]))
+```
+
+`groupContext` binds the format/normalization version, database and agreed
+checkpoint context, page size, group start, and actual group length. Bind the
+session and database page counts in the comparison protocol as well. Page tuples
+are ordered by page number. For example, `X = 64` means one digest covers all
+64 pages' tuples, except for a shorter final group; it does not mean 64 separate
+page digests are sent.
+
+The target's initial RPC sends group hashes and size/context information; types
+are already included in those hashes and need no separate initial type list.
+The leader and healthy follower derive their types independently. In particular,
+the follower must not use leader-supplied classifications when computing hashes.
+
+Replacement groups carry page numbers, normalization types, and canonical bytes.
+Four types can use a packed two-bit code per page; settle the exact wire encoding
+with the versioned format. The target verifies those received tuples directly
+against the agreed group hash, without renormalizing them using damaged local
+metadata. No preliminary allocation-map exchange is needed. Schema and allocation
+metadata still travel as ordinary database pages when they need replacement.
 
 ### Page 1 in DB1 and DB2
 
@@ -161,8 +231,20 @@ that could make an old owner's checks valid again. A separate shared epoch is
 not required to solve this problem; existing checkpoint identifiers may already
 provide the shared identity needed by repair.
 
-Locate the ownership page through a validated schema/root mapping. Validate the
-singleton, token, and expected one-page structure before treating it specially.
+Locate the ownership page through the schema in the same pinned snapshot:
+
+```sql
+SELECT rootpage FROM main.sqlite_schema
+WHERE type = 'table' AND name = 'monsterft_local_owner';
+```
+
+SQLite records the table's B-tree root page here. Under the dedicated table's
+one-row/one-page invariant, that root is the page containing generation. Do not
+hardcode its page number or search page bytes for the token. Validate the schema,
+singleton, token, and expected leaf/root structure before treating it specially.
+This lookup applies to the proposed separate ownership table; the production
+schema still stores generation with the shared receipt.
+
 For hashing and RPCs, substitute a deterministic valid template page containing
 a placeholder token. Generating that template through the pinned SQLite build
 is preferable to implementing a general SQLite record decoder.
@@ -173,11 +255,117 @@ token, leave a placeholder usable, or blindly preserve an old page at that page
 number. A corrupted local ownership page must be repairable, not hidden by
 canonicalization. An all-zero page is not a valid table-page template.
 
-Root relocation, schema-cache handling during raw page installation, and the
-one-page invariant need experiments. Every shared receipt and application page
-remains fully compared. DB1 can retain its existing local generation: DB1 does
-not require cross-member byte equality, and the three Procs on one node share
-the local startup token.
+Experiments support the one-page invariant through unequal restart/claim counts,
+receipt-width changes, and root relocation. Resolve the root from each pinned
+snapshot; reserve the owner table against application indexes, triggers, or
+schema changes. Production schema-cache handling and full startup/installation
+integration still need testing. Every shared receipt and active application
+page remains fully compared. DB1 can retain its existing local generation: DB1
+does not require cross-member byte equality, and the three Procs on one node
+share the local startup token.
+
+### DB2 freelist leaf pages
+
+Identical SQL and identical settings, starting from matching canonical views,
+can diverge after different restart counts. The production Apply reproduction
+first differs at command 135, with restarts 0/19/12: one byte on freelist leaf
+page 66 differs, while receipts/outcomes match and integrity checks pass. Even
+writer and fresh-reader DBPAGE views of the same committed database can differ
+on these unused leaves. This affects scrub as well as repair readers.
+
+Agreed direction: substitute page-sized zeros for **whole freelist leaf pages**
+in hashes and RPC payloads, subject to reliable classification. The supported
+format has no extension-reserved bytes (page-1 byte 20 is zero). Identify leaves
+from explicit allocation metadata: page 1 names the first trunk and total free
+page count; each trunk names its next trunk and lists leaf page numbers. Read
+the graph through DBPAGE in the same pinned transaction as the pages being
+hashed. No byte-pattern inference or decoding of application columns is needed.
+Preserve page-1 freelist head/count and all trunk pages.
+
+Four 320-command scenarios passed with this extra rule, including later
+reuse of differing pages. Do not broaden the mask to active-page slack or
+trunk bytes on this evidence. Assess the same issue for local DB1 page
+comparison separately; these preservation experiments focused on DB2.
+
+Classification must come from validated allocation metadata in the same pinned
+snapshot. Bounds/cycle/count checks alone are not proof that a damaged freelist
+has not misclassified an active page. A damaged target map can mask the wrong
+page and make a hash over canonical bytes alone misleading. Including the
+normalization type in each page's contribution prevents that ambiguity: an
+ordinary zero-filled page and a free leaf normalized to zeros have different
+hash inputs. Every disagreement about normalization therefore causes its group
+to disagree, subject to the hash's collision properties.
+
+Matching groups establish agreement on types and canonical bytes. Replace every
+page of each differing group, including the schema/allocation pages that differ.
+This removes the need for metadata-dependency tracking and additional comparison
+rounds after metadata repair. Installation validation remains required. Preserve
+owner-page validation before substitution and the full-copy fallback for unusable
+classification metadata. Do not infer that typed hashing detects damage inside
+fields intentionally excluded by the agreed normalization rules.
+
+The typed group format and this corruption-handling argument are agreed design
+decisions that still need implementation and targeted tests; the existing
+preservation experiments did not test this repair protocol. No final
+quorum-endorsed complete manifest is introduced.
+
+The format defines the locations precisely for a valid database; the experimental
+parser is not yet a proven corruption boundary. Full SQLite integrity checking
+includes freelist consistency and multiply-used/missing regions, and can support
+local validation. Such checks do not prove that structurally valid application
+values are correct. Donor trust comes from the agreed local DB1 and two-member
+DB2 fault model. If the target
+cannot expose usable pages or classification metadata, use full-copy recovery
+rather than requiring differential repair to handle every damaged structure.
+Define an efficient validation/repair path before treating this rule as
+production-ready.
+
+Alternatives tested: zeroing free leaves before COMMIT preserved the original
+canonical equality but added 6,295 page writes across three replicas in the
+320-command workload. Disabling cache spilling or using FULL auto-vacuum passed
+shorter stress tests, with memory/write-layout tradeoffs still to measure.
+secure_delete ON alone did not solve the free-leaf failure. Keep WAL/FULL.
+
+### Agreed application and maintenance rules
+
+Equal final rows, patchsets, and outcomes do not establish matching physical
+mutation history. Require mutation values and ordering, including intermediate
+writes later overwritten, to derive from replicated inputs/state. Connection
+state inherited from earlier commands, local generation, local clocks, or local
+randomness must not determine those writes. In particular, depending on a
+previous command's `last_insert_rowid()` or cumulative `total_changes()` is
+outside the supported deterministic callback contract. The counterexamples are
+evidence for that boundary, not behavior the library must make work.
+
+An insert followed by `last_insert_rowid()` within the same command is compatible
+with this rule when that insert deterministically establishes the value being
+used. Explicit ordered scans are needed when their iteration drives mutations.
+Document these rules; no connection-state emulation or reset mechanism is
+planned to support cross-command dependencies. Any additional enforcement
+remains an implementation choice.
+
+Pin relevant SQLite settings on every open. Coordinate mutating maintenance at
+agreed boundaries through Monster/Raft commands so members execute the same
+operation at the same logical sequence. Do not run it independently on node
+open/close. Explicit ANALYZE and REINDEX can use the ordinary Apply transaction;
+pin their targets, settings, and any custom functions/collations. Coordinated
+maintenance matched the tested controls, while one-sided maintenance differed.
+
+**VACUUM support is deferred, including for the near term.** SQLite forbids it
+inside an existing transaction, so it cannot be a direct call in today's ordinary
+Apply callback. A future implementation would need a Raft-ordered,
+library-managed out-of-transaction maintenance step, with ordering,
+crash/retry/receipt semantics, snapshot coordination, and page-equality validation
+defined. Retain this as a future TODO; do not add it to the initial repair work.
+
+Identical sequence and SQL do not make bare PRAGMA optimize deterministic: it
+can choose different work based on the connection's query history after a
+restart. User documentation should direct applications to explicit coordinated
+`ANALYZE` instead of `PRAGMA optimize`, including avoiding automatic optimize
+calls on connection open/close. Appending a maintenance statement alone does not
+establish its determinism. Keep these restrictions distinct from ordinary
+checkpoint timing, which passed the tested controls. See the experiment report
+for scope and counterexamples; these results are not a general determinism proof.
 
 ## Physical local DB1 reconciliation and donation
 
@@ -254,38 +442,57 @@ database page, with a possibly shorter final group.
 
 The initial flow is:
 
-1. The repair target hashes its DB2 in groups of `X` canonical pages and sends
-   the group hashes and size information to the leader.
-2. The leader computes corresponding hashes from its pinned DB2 snapshot.
-3. For disagreement groups, the leader asks one or more eligible healthy
-   followers for hashes from the same agreed checkpoint.
-4. Collect enough matching votes from distinct cluster members to satisfy the
-   configured quorum. The leader contributes one vote; `Z` followers means as
-   many additional agreeing members as needed, not a hardcoded single follower.
-5. Send only the disagreement groups whose hashes agree with the leader and
-   have quorum support. The target verifies received canonical bytes against
-   the agreed hashes before installation.
+1. The repair target computes one hash for each group of `X` pages using the
+   ordered page-number/type/canonical-byte tuples above. It sends all group
+   hashes and size/context information to the leader in one RPC.
+2. The leader independently computes corresponding hashes from its pinned DB2
+   snapshot and identifies the disagreement groups.
+3. For those groups, the leader sends one RPC to one eligible healthy follower,
+   containing the group identities and leader's expected hashes. The request
+   binds the agreed checkpoint, normalization format, and donor image size.
+4. The follower independently derives normalization types and computes group
+   hashes from its own pinned snapshot. It returns the list of disagreements;
+   an empty list explicitly acknowledges successful checking of the entire
+   identified request, including image size. Read/classification failures or
+   incomplete work are errors, never silently omitted disagreements. This uses
+   exactly one other member regardless of cluster size; it does not use the
+   configured Raft/application quorum size.
+5. Once the follower agrees, the leader sends the replacement groups with their
+   page numbers, normalization types, and canonical bytes. The target verifies
+   the received tuples directly against the agreed group hashes and writes
+   **every page in every accepted replacement group**. No per-page no-op check
+   or write-skipping optimization is planned. Retain the valid-header and fresh
+   local ownership installation rules.
 6. Validate installation and the DB1/DB2 checkpoint relationship before
    proceeding toward rejoining. Do not add a final quorum vote on a complete
    image manifest.
 
-ProcA/B/C do not count as three independent cluster votes for DB2: they share
-one local DB2 file. Do not count the repair target's potentially damaged image
-as an authoritative healthy vote.
+ProcA/B/C do not count as separate DB2 corroborators: they share one local DB2
+file. The required follower is another healthy member, not the repair target.
+This policy assumes independent damage is unlikely to produce the same wrong
+pages on two members that consider themselves healthy. It does not establish
+correctness against identical damage or a shared software bug on both copies.
+Requiring a larger quorum may be a later option; it is not the initial policy.
+DB1 donation and ordinary Raft, SYNC, and scrub outcome agreement retain their
+separate local/cluster agreement rules.
 
 **Final acceptance does not require a quorum-endorsed complete manifest.**
 Unchanged groups are accepted on target/leader hash agreement at the selected
-snapshot; replacement groups require the quorum agreement above. Leader
+snapshot; matching hashes cover normalization types as well as canonical bytes.
+Replacement groups require leader-plus-one-follower agreement. Leader
 coordination, ProcA/B/C output agreement, RPC checksums, and received-group hash
 verification protect the transfer. This deliberately does not obtain fresh
-follower votes for unchanged groups. That is the accepted scope of quorum
+follower checks for unchanged groups. That is the accepted scope of donation
 verification, not an unresolved requirement for another full-image vote.
 
-**If the leader disagrees with a quorum of healthy followers, abort repair and
-mark the leader suspect.** The initial design does not let the leader relay a
-follower's alternative image while remaining the donor. Define how suspicion
+**If the selected follower disagrees with the leader, abort repair and mark the
+leader suspect as a donor.** With two differing copies, this does not establish
+which member is damaged. Do not relay the follower's alternative bytes or try
+additional followers merely to find a matching answer. Define how suspicion
 causes fencing/leadership change and how the target rediscovers the next donor.
-If no group value has quorum support, do not choose arbitrary bytes.
+If no eligible follower is available, wait/retry within the session timeout;
+do not send uncorroborated replacement groups. Follower selection and handling
+of unavailability before comparison remain implementation details.
 
 Important details to resolve:
 
@@ -295,13 +502,17 @@ Important details to resolve:
 - Bind each hash to the database/snapshot identity, normalization version,
   page size, group start, and actual page count. Reject reordered, truncated,
   duplicated-as-votes, or stale responses.
-- Minimum transferred groups at granularity `X` is not necessarily minimum
-  individual page writes. Evaluate comparing pages within received groups so
-  unchanged pages need not be rewritten. Group size and any finer subdivision
-  are tuning/design choices.
-- Prefer minimal writes while preserving crash safety. Decide between a
-  transactional in-place install, staged images, and fallback replacement when
-  the target cannot expose a usable page view.
+- Settle the normalization-type codes and unambiguous group encoding. Include
+  types in the hash input and with replacement pages; no preliminary type/map
+  exchange or metadata-dependent rehash protocol is needed.
+- Minimize transfers by selecting only disagreement groups at granularity `X`.
+  Every page of a selected group is written, even if some pages already match.
+  Tune group size without introducing per-page write skipping or finer repair
+  subdivision.
+- Choose a crash-safe installation mechanism: a transactional in-place install
+  or staged images for differential repair.
+  Full-copy replacement is the fallback when the target cannot expose a usable
+  page view, as described below.
 - DB1 and DB2 do not share one atomic WAL commit. A durable repair-in-progress
   state must prevent activation after partial installation or a crash; copying
   donor metadata must not accidentally clear that protection.
@@ -317,6 +528,26 @@ It sends direct discovery RPCs to every cluster member asking who they believe
 the leader is, then requests repair from the leader. Discovery needs term-aware
 handling of stale/conflicting answers and bounded retries. A stale leader claim
 does not authorize a snapshot merely because one member reports it.
+
+Use differential repair when the target can expose a usable canonical page view.
+Opening successfully does not guarantee subsequent page reads, schema lookup,
+or freelist traversal will succeed. If a DB1 copy or DB2 cannot open, or cannot
+provide that usable view, fall back to full-copy recovery of the affected image.
+The target need not produce hashes for an unreadable image. Readable corruption
+normally produces disagreement groups. Normalization types in the hash input
+also expose mismatched classifications whose canonical bytes happen to match.
+
+For full-copy recovery, close all affected connections and discard/replace the
+unusable database files, handling their old WAL/SHM files as part of the same
+recovery. Obtain complete images from the leader's pinned checkpoint: DB1 uses
+the leader's local A/B/C agreement, and every supplied DB2 group requires the
+leader plus one healthy follower. Preserve the durable repair-only marker and
+required local identity/term/vote protections outside anything being replaced;
+an interrupted rebuild must never restart as a fresh participating member.
+Restore a consistent DB1/DB2 checkpoint pair and claim fresh local ownership
+before activation. The exact staging/install mechanism remains to be specified.
+This fallback does not change the normal transactional DBPAGE method for local
+DB1 reconciliation.
 
 The repair session coordinates the pinned healthy snapshots, local DB1 donation,
 DB2 group verification, transfer, installation, and validation. Completion or
@@ -341,7 +572,8 @@ scrubs themselves count toward the interval. Avoid self-triggering scrub loops.
 A standalone, read-only scrub CMD batch is the preferred initial shape.
 
 Every member computes a hash over the same subset of DB2 pages using the same
-canonicalization and returns it as the scrub command's result. Normal command
+ordered page-number/normalization-type/canonical-byte encoding as repair, and
+returns it as the scrub command's result. Normal command
 agreement then detects disagreement and drives the existing SYNC/repair-state
 path: a dissenting minority becomes repair candidates, while lack of any outcome
 quorum follows the no-quorum path below. An empty data patchset does not make a
@@ -431,7 +663,7 @@ Their shutdown policy remains to be specified if those configurations are in
 scope. Behavior when the original SYNC cannot commit remains a failure/timeout
 question. No separate shutdown-consensus protocol is introduced.
 
-Normal automatic quorum-backed repair of this state is mostly out of scope.
+Automatic repair of this state is mostly out of scope.
 Keep it distinct from ordinary minority repair, where healthy members agree on
 an authoritative image.
 
@@ -442,6 +674,21 @@ chosen image was established by the ordinary quorum protocol. Selection and
 cluster-reset semantics are not decided in this draft.
 
 ## Evidence and experiments still required
+
+The new [DB2 preservation report](doc/DB2-PAGE-EQUALITY.md) and
+[reproducible scripts/results](experiments/db2-page-equality/README.md) include:
+
+- Ownership isolation through 256 checkpoints with restart counts 0/37/5.
+- Actual Apply execution with 0/48/4 restarts, plus the separate restart-only
+  freelist counterexample reproduced on Node SQLite 3.54.0 and SQLite 3.54.1.
+- SIGKILL before commit and after commit/before simulated ACK, preserving
+  canonical equality through recovery/replay or receipt-based duplicate skip.
+- Free-leaf canonicalization and physical-zeroing alternatives, plus failing
+  intermediate-write and local-maintenance cases and their controls.
+
+All page comparisons use DBPAGE read transactions, with WAL/FULL. These are
+prototype/schema and Apply-path experiments, not a complete Raft repair test.
+The future Nix Node runtime and production ownership integration remain untested.
 
 Prior exploratory tests provide useful evidence, not a general page-equality
 proof:
@@ -457,19 +704,16 @@ proof:
   table/index bytes. Different insertion/deletion histories also changed page
   allocation. `secure_delete` and `VACUUM` were not general solutions.
 
-Those probes used the current Node runtime plus a separate custom-SQLite reader,
+The probes use the current Node runtime plus a separate custom-SQLite reader,
 or custom SQLite directly. Repeat the relevant tests using the chosen Nix-built
-Node. The dedicated ownership-table design has not yet been experimentally
-validated. Preserve the existing experiment agenda without introducing
+Node. Preserve the remaining experiment agenda without introducing
 patchset/changeset application.
 
-### First: ownership-page isolation
+### Ownership-page isolation and integration
 
-- Create the new schema on multiple members with different local tokens; show
-  exactly which raw bytes differ and that canonical hashes/RPCs match.
-- Rotate tokens repeatedly, reopen connections, and update shared receipts
-  across SQLite integer-encoding size boundaries. Verify that local bytes stay
-  isolated and the ownership table remains one page.
+- Retain the passing ownership/schema probes and integrate the new table into
+  production startup/Apply, then repeat unequal restart/claim counts and receipt
+  integer-width boundaries on the pinned runtime. Verify actual RPC encoding.
 - Verify stale owners cannot execute after takeover, including an active Apply
   transaction racing replacement.
 - Test canonical-template installation, a damaged ownership page, changed root
@@ -482,15 +726,21 @@ patchset/changeset application.
   the pinned runtime and settings. Compare at agreed receipt checkpoints.
 - Vary restarts, checkpoint timing, batching, savepoint failures, large BLOBs,
   page splits, deletes, freelist reuse, hidden rowids, and application indexes.
-- Test maintenance operations such as VACUUM, REINDEX, and ANALYZE to determine
-  which must be coordinated, restricted, or treated as requiring a new baseline.
+- Validate coordinated ANALYZE and REINDEX under the pinned settings and document
+  the supported command contract. Preserve the existing VACUUM experiment results
+  for future work; VACUUM implementation/testing is not a near-term requirement.
 - Decide explicit page-size, auto-vacuum, secure-delete, and other relevant
   settings; do not assume Nix's defaults equal the current Node defaults.
 - Evaluate the tentative rule that members must have matching canonical DB2
   pages at boot or enter repair. Such a comparison needs a common checkpoint;
   ordinary lag and differing physical history must be handled deliberately.
-- Determine whether generation and page-1 normalization are sufficient under
-  the resulting rules. Until demonstrated, keep this an open question.
+- Generation and page-1 normalization alone are disproven for the tested
+  rollback workload. Validate the agreed additional free-leaf rule against
+  corrupted classification metadata, leaf-to-trunk reuse, metadata-changing
+  repairs, and further deterministic workloads before settling the format.
+- Document the agreed application mutation/maintenance contract and determine
+  which restrictions need enforcement rather than documentation alone. Keep
+  cross-command connection-state dependencies explicitly unsupported.
 
 ### Then: reconciliation, repair, scrub, and lifecycle
 
@@ -501,11 +751,28 @@ patchset/changeset application.
   reconciliation, and continued ordered inputs, plus matching Gate RPCs despite
   differing raw page-1 counters.
 - Test group comparisons with missing/extra pages, partial groups, independently
-  differing corruption patterns, unavailable voters, and a suspect leader.
-  Verify unchanged groups require no fresh follower vote and final acceptance
-  adds no quorum-endorsed complete manifest.
-- Verify only accepted disagreement groups are transferred and measure actual
-  writes, not only transferred bytes.
+  differing corruption patterns, an unavailable follower, and leader/follower
+  disagreement. Verify one-follower corroboration in both three- and five-member
+  clusters, abort on disagreement without seeking a matching third member,
+  and retain ordinary Raft/scrub quorum rules. Verify unchanged groups require
+  no fresh follower check and final acceptance adds no quorum-endorsed complete
+  manifest.
+- Verify one digest covers all ordered page tuples in each multi-page group,
+  all target group hashes fit the single submission flow, and the follower
+  checks the requested groups in one request. An empty disagreement list must
+  acknowledge complete successful checking; omitted/error groups must not pass.
+- Test unopenable images and failures during page reads, schema lookup, or
+  freelist traversal. Verify full-copy fallback, stale WAL/SHM handling, persistent
+  repair fencing across replacement/crash, and corroboration of every full-copy
+  DB2 group. Corrupt otherwise parseable allocation/owner mappings and verify
+  differing normalization types cause immediate group disagreement even when
+  canonical bytes match. Include an ordinary zero-filled donor page misclassified
+  as a free leaf on the target, with garbage hidden by target normalization.
+  Verify replacement resolves the corruption without metadata-dependent rehash
+  rounds and received typed bytes are hashed without target-side renormalization.
+- Verify only accepted disagreement groups are transferred and every page in
+  each such group is installed, including pages that already match. Measure
+  actual writes as well as transferred bytes; do not add no-op write skipping.
 - Keep healthy writers running while repair readers are pinned; test WAL growth,
   timeouts, term changes, same-term donor step-down, interrupted transfers, and
   cleanup. Verify late old-session RPCs are rejected and cancellation preserves
@@ -526,8 +793,10 @@ patchset/changeset application.
 
 1. Add the pinned Nix runtime and startup/CI capability probes for DBPAGE and
    session capture, retaining WAL/FULL.
-2. Prototype the DB2 ownership page and canonicalization. Establish the tests
-   and required page-view equality rules before treating page hashes as authority.
+2. Extend the DB2 ownership prototype with the agreed free-page rule, typed
+   multi-page group hashes, and application/maintenance constraints. Test the
+   corruption cases and establish the required page-view equality rules before
+   treating page hashes as authority.
 3. Implement transactional local DB1 page reconciliation and complete-image
    verification.
 4. Define shared checkpoint capture, snapshot lifetime, and repair-only startup.
