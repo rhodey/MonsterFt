@@ -20,6 +20,9 @@ we rely on the proposed DB2 page-equality rules.
 - The **leader is always the repair donor**. DB1 donation is verified by the
   leader's three local Procs. DB2 replacement groups require agreement from
   distinct cluster members.
+- Final repair acceptance does **not** require a quorum-endorsed complete DB2
+  manifest. Keep groups whose hashes match the leader and obtain fresh follower
+  agreement only for replacement groups.
 - Replace logical local DB1 adoption with transactional `sqlite_dbpage`
   reconciliation. Require matching canonical local page views so the copies
   can produce matching page-transfer RPCs.
@@ -32,8 +35,10 @@ we rely on the proposed DB2 page-equality rules.
 - A repair target closes normal operation and restarts in a repair-only mode,
   outside Raft, before discovering the leader and requesting repair.
 - After its no-quorum SYNC is committed and durably applied, a node in
-  `REPAIR_NO_QUORUM` should go offline. Automatic recovery from that state is
-  mostly outside the initial scope.
+  `REPAIR_NO_QUORUM` should go offline without waiting for final outbound RPCs.
+  With ordinary 2-of-3 or 3-of-5 quorums, successor elections can carry the
+  shutdown through a majority. Automatic recovery from that state is mostly
+  outside the initial scope.
 
 ## Snapshot identity and lifetime
 
@@ -60,10 +65,22 @@ They keep the snapshots until the leader declares repair complete or the repair
 times out. Page hashes and transferred bytes must come from those same pinned
 snapshots, even if the member has since executed more commands.
 
-Implement bounded snapshot lifetimes and cleanup for timeout, cancellation,
-leader loss, and disconnected participants. Long readers retain WAL history, so
-WAL growth and the repair timeout are part of the design. A failed leader must
-not leave remote readers pinned indefinitely.
+Bind queued and active repair sessions to the donor leader, term, and session
+identity. On an observed term change, cancel old sessions, discard their queued
+work, and release their read transactions/snapshots. Also cancel on known donor
+leadership loss/change, including a local step-down without a term increment.
+Reject late RPCs from cancelled sessions. Integrate this cleanup with the
+existing Raft/Monster leadership-change hooks.
+
+Retain bounded local snapshot lifetimes for completion, cancellation, timeout,
+and disconnected participants: a participant may never observe the new term.
+Long readers retain WAL history, so WAL growth and the repair timeout remain
+part of the design. A failed leader must not leave remote readers pinned
+indefinitely.
+
+Cancellation clears transient repair-session state, not the durable
+repair-required state or partial-install protection. A cancelled target remains
+outside Raft and rediscovers the leader before starting a fresh repair session.
 
 How the target advances from the pinned checkpoint to safe rejoining remains an
 open protocol step. Healthy writes continue during copying, so installation of
@@ -248,12 +265,21 @@ The initial flow is:
 5. Send only the disagreement groups whose hashes agree with the leader and
    have quorum support. The target verifies received canonical bytes against
    the agreed hashes before installation.
-6. Validate the completed target image and its DB1/DB2 checkpoint relationship
-   before proceeding toward rejoining.
+6. Validate installation and the DB1/DB2 checkpoint relationship before
+   proceeding toward rejoining. Do not add a final quorum vote on a complete
+   image manifest.
 
 ProcA/B/C do not count as three independent cluster votes for DB2: they share
 one local DB2 file. Do not count the repair target's potentially damaged image
 as an authoritative healthy vote.
+
+**Final acceptance does not require a quorum-endorsed complete manifest.**
+Unchanged groups are accepted on target/leader hash agreement at the selected
+snapshot; replacement groups require the quorum agreement above. Leader
+coordination, ProcA/B/C output agreement, RPC checksums, and received-group hash
+verification protect the transfer. This deliberately does not obtain fresh
+follower votes for unchanged groups. That is the accepted scope of quorum
+verification, not an unresolved requirement for another full-image vote.
 
 **If the leader disagrees with a quorum of healthy followers, abort repair and
 mark the leader suspect.** The initial design does not let the leader relay a
@@ -269,10 +295,6 @@ Important details to resolve:
 - Bind each hash to the database/snapshot identity, normalization version,
   page size, group start, and actual page count. Reject reordered, truncated,
   duplicated-as-votes, or stale responses.
-- The proposed optimization asks followers only about groups where target and
-  leader disagree. Fresh quorum evidence therefore covers transferred groups;
-  it does not automatically certify every unchanged group. Specify what known
-  baseline or additional validation supports final whole-image acceptance.
 - Minimum transferred groups at granularity `X` is not necessarily minimum
   individual page writes. Evaluate comparing pages within received groups so
   unchanged pages need not be rewritten. Group size and any finer subdivision
@@ -298,8 +320,10 @@ does not authorize a snapshot merely because one member reports it.
 
 The repair session coordinates the pinned healthy snapshots, local DB1 donation,
 DB2 group verification, transfer, installation, and validation. Completion or
-timeout releases all participant snapshots. Leader change, cancellation, or
-interrupted transfer must have explicit cleanup/retry behavior.
+timeout releases all participant snapshots. Apply the term/leadership-change
+cancellation rules above to queued and active sessions. Cancellation or an
+aborted transfer releases local resources and keeps the target fenced while it
+rediscovers the donor and retries; late replies cannot reactivate an old session.
 
 Successful copying is followed by the still-to-be-specified advancement/rejoin
 step. Reset the leader's per-target replication state as needed; existing docs
@@ -364,10 +388,48 @@ quorum.
 
 Preferred new behavior: stop admitting application work, let the corresponding
 no-quorum SYNC commit, durably apply that decision, then go offline instead of
-remaining online indefinitely. Define shutdown/commit-notification ordering,
-especially for the leader, so it does not disappear before peers can learn the
-required commitment. Behavior when the SYNC cannot commit remains an explicit
-failure/timeout question.
+remaining online indefinitely. No final outbound RPC, output drain, or
+commit-notification acknowledgement is required before shutdown.
+
+Reuse the existing protocol: `MonsterEngine.decide()` constructs and appends
+the SYNC; `RaftEngine.checkCommit()` establishes commitment from quorum
+replication in the current term. `applySync()` writes the `REPAIR_NO_QUORUM`
+repair state and the applied checkpoint; the enclosing Proc DB1 transaction
+must commit before shutdown. The early client no-quorum error precedes the SYNC
+append and is not a shutdown trigger. Preserve the durable fence across restart.
+The existing terminal-input behavior, which commits before suppressing outputs,
+is compatible with this rule; do not require those final outputs to be released.
+
+The intended outcome is that a majority durably applies the fence, not that
+every member learns the final commit position. For an odd-sized cluster with
+the ordinary majority quorum, successor elections provide this progression:
+
+- With three nodes A/B/C, A can commit the SYNC on A+B, apply it, and stop without
+  informing B of commitment. B can win the next election with C. Its normal
+  current-term election no-op, replicated to B+C, establishes commitment of the
+  inherited prefix. B then applies the SYNC and stops. A+B are fenced; C may
+  remain unaware of commitment and is unable to form a quorum alone.
+- With five nodes, after the first shutdown four remain, and after the second
+  shutdown three remain. Each surviving set can still elect a leader and commit
+  its election no-op with a quorum of three. After the third node applies the
+  SYNC and stops, a majority is fenced; the remaining two cannot form a quorum.
+
+[Raft's leader-completeness rule](https://raft.github.io/raft.pdf) preserves the
+committed SYNC in successor leaders. MonsterFt already appends the election
+no-op and waits for its commitment/application before admitting new leader
+command work. A successor
+must establish commitment normally; merely finding a SYNC in its log is not
+permission to apply it. Commit notifications that do arrive can hasten shutdown,
+but the progression does not depend on notifications from a departing leader.
+
+This progression assumes the remaining nodes can communicate, finish pending
+application work, and make normal Raft progress. It covers ordinary 2-of-3 and
+3-of-5 quorums (generally `N = 2f + 1`, quorum `f + 1`). Do not claim the same
+majority-fencing guarantee for even-sized membership or a larger configured
+quorum: for example, with 3-of-3, the first shutdown prevents another election.
+Their shutdown policy remains to be specified if those configurations are in
+scope. Behavior when the original SYNC cannot commit remains a failure/timeout
+question. No separate shutdown-consensus protocol is introduced.
 
 Normal automatic quorum-backed repair of this state is mostly out of scope.
 Keep it distinct from ordinary minority repair, where healthy members agree on
@@ -440,16 +502,25 @@ patchset/changeset application.
   differing raw page-1 counters.
 - Test group comparisons with missing/extra pages, partial groups, independently
   differing corruption patterns, unavailable voters, and a suspect leader.
+  Verify unchanged groups require no fresh follower vote and final acceptance
+  adds no quorum-endorsed complete manifest.
 - Verify only accepted disagreement groups are transferred and measure actual
   writes, not only transferred bytes.
 - Keep healthy writers running while repair readers are pinned; test WAL growth,
-  timeouts, leader loss, interrupted transfers, and cleanup.
+  timeouts, term changes, same-term donor step-down, interrupted transfers, and
+  cleanup. Verify late old-session RPCs are rejected and cancellation preserves
+  the target's durable repair/install protection.
 - Interrupt installation between DB1/DB2 steps and verify restart stays in
   repair mode until a consistent image is established.
 - Verify scrub selection/coverage, deterministic sampling before receipt update,
   detection of latent page corruption, and concurrent scrub/repair snapshots.
-- Verify minority repair, no-quorum SYNC shutdown/dissemination, and eventual
-  rejoin without the existing cancelled-replication failure.
+- Verify minority repair and eventual rejoin without the existing
+  cancelled-replication failure.
+- Test no-quorum SYNC shutdown after durable application with all final outgoing
+  messages suppressed. In 2-of-3 and 3-of-5 clusters, verify successor elections
+  and election no-op commitment fence a majority even when remaining followers
+  initially do not know the SYNC committed. Test fence persistence across restart;
+  do not shut down on the early client error or an uncommitted SYNC.
 
 ## Suggested implementation order
 
@@ -463,8 +534,8 @@ patchset/changeset application.
 5. Implement grouped DB2 verification and leader-only transfer, then crash-safe
    installation and the explicit completion/rejoin path.
 6. Add periodic scrub commands and integrate their outcomes with repair.
-7. Change no-quorum shutdown behavior with commitment/dissemination tests. Keep
-   explicit choose-one-member recovery as separate future work.
+7. Change no-quorum shutdown behavior with durable-fence and successor-election
+   tests. Keep explicit choose-one-member recovery as separate future work.
 
 These stages are a working order, not permission to skip unresolved invariants.
 As APIs change, update adjacent TypeScript declarations and consumer tests per
