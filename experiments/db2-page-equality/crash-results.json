@@ -1,0 +1,234 @@
+{
+  "metadata": {
+    "sqlite": "3.54.1",
+    "sourceId": "2026-10-16 14:45:20 555e07ef33f69a0957d24d8e555b702464a131d6f1607f4c3c1e4551e8e6ca76",
+    "library": "/private/tmp/monsterft-page-identity/libsqlite3.dylib",
+    "compileOptions": [
+      "ATOMIC_INTRINSICS=1",
+      "COMPILER=clang-21.0.0",
+      "DEFAULT_AUTOVACUUM",
+      "DEFAULT_CACHE_SIZE=-2000",
+      "DEFAULT_FILE_FORMAT=4",
+      "DEFAULT_JOURNAL_SIZE_LIMIT=-1",
+      "DEFAULT_MMAP_SIZE=0",
+      "DEFAULT_PAGE_SIZE=4096",
+      "DEFAULT_PCACHE_INITSZ=20",
+      "DEFAULT_RECURSIVE_TRIGGERS",
+      "DEFAULT_SECTOR_SIZE=4096",
+      "DEFAULT_SYNCHRONOUS=2",
+      "DEFAULT_WAL_AUTOCHECKPOINT=1000",
+      "DEFAULT_WAL_SYNCHRONOUS=2",
+      "DEFAULT_WORKER_THREADS=0",
+      "DIRECT_OVERFLOW_READ",
+      "ENABLE_DBPAGE_VTAB",
+      "ENABLE_PREUPDATE_HOOK",
+      "ENABLE_SESSION",
+      "MALLOC_SOFT_LIMIT=1024",
+      "MAX_ATTACHED=10",
+      "MAX_COLUMN=2000",
+      "MAX_COMPOUND_SELECT=500",
+      "MAX_DEFAULT_PAGE_SIZE=8192",
+      "MAX_EXPR_DEPTH=1000",
+      "MAX_FUNCTION_ARG=1000",
+      "MAX_LENGTH=1000000000",
+      "MAX_LIKE_PATTERN_LENGTH=50000",
+      "MAX_MMAP_SIZE=0x7fff0000",
+      "MAX_PAGE_COUNT=0xfffffffe",
+      "MAX_PAGE_SIZE=65536",
+      "MAX_SCHEMA=10000000",
+      "MAX_SQL_LENGTH=1000000000",
+      "MAX_TRIGGER_DEPTH=1000",
+      "MAX_VARIABLE_NUMBER=32766",
+      "MAX_VDBE_OP=250000000",
+      "MAX_WORKER_THREADS=8",
+      "MUTEX_PTHREADS",
+      "SYSTEM_MALLOC",
+      "TEMP_STORE=1",
+      "THREADSAFE=2"
+    ],
+    "settings": {
+      "journal_mode": "wal",
+      "synchronous": 2,
+      "page_size": 4096,
+      "auto_vacuum": 0,
+      "secure_delete": 0,
+      "cache_size": 8,
+      "cache_spill": 8,
+      "wal_autocheckpoint": 0
+    }
+  },
+  "workDirectory": "/private/tmp/monsterft-db2-crash-fct7fwl7",
+  "cycles": 3,
+  "scope": "SQLite C session API model of Apply; captures/hashes patchsets only",
+  "allPassed": true,
+  "results": [
+    {
+      "seq": 1,
+      "pass": true,
+      "pageCount": 519,
+      "uncommittedCrash": {
+        "seq": 1,
+        "patchsetBytes": 962128,
+        "patchsetSha256": "629e7dfe08daefc5ab4f584bd77f19dde1772753c2606974a233f45a95c426ad",
+        "committed": false,
+        "phase": "uncommitted",
+        "pid": 86021,
+        "wal": {
+          "exists": true,
+          "bytes": 2121832,
+          "pageSize": 4096,
+          "frames": 515,
+          "commitFrames": 0,
+          "lastFrameDatabaseSize": 0
+        },
+        "exitSignal": "SIGKILL"
+      },
+      "committedCrash": {
+        "seq": 1,
+        "patchsetBytes": 962128,
+        "patchsetSha256": "629e7dfe08daefc5ab4f584bd77f19dde1772753c2606974a233f45a95c426ad",
+        "committed": true,
+        "phase": "after-commit",
+        "pid": 86022,
+        "wal": {
+          "exists": true,
+          "bytes": 2138312,
+          "pageSize": 4096,
+          "frames": 519,
+          "commitFrames": 1,
+          "lastFrameDatabaseSize": 519
+        },
+        "exitSignal": "SIGKILL"
+      },
+      "bRecoveredReceiptBeforeReplay": 0,
+      "bRecoveredPageDifferencesBeforeReplay": [],
+      "cRecoveredReceiptBeforeDuplicate": 1,
+      "cDuplicate": {
+        "duplicateSkipped": true,
+        "seq": 1,
+        "receiptDigest": "629e7dfe08daefc5ab4f584bd77f19dd"
+      },
+      "canonicalDifferentPagesAB": [],
+      "canonicalDifferentPagesAC": [],
+      "patchsetsAllEqual": true,
+      "patchsetSha256": "629e7dfe08daefc5ab4f584bd77f19dde1772753c2606974a233f45a95c426ad",
+      "integrityCheck": [
+        "ok",
+        "ok",
+        "ok"
+      ]
+    },
+    {
+      "seq": 2,
+      "pass": true,
+      "pageCount": 973,
+      "uncommittedCrash": {
+        "seq": 2,
+        "patchsetBytes": 961740,
+        "patchsetSha256": "5204cc240ff4c84d5f8b25007eda9f360c069b1d91614f9938ab05e6cb0e5f82",
+        "committed": false,
+        "phase": "uncommitted",
+        "pid": 86023,
+        "wal": {
+          "exists": true,
+          "bytes": 2134192,
+          "pageSize": 4096,
+          "frames": 518,
+          "commitFrames": 0,
+          "lastFrameDatabaseSize": 0
+        },
+        "exitSignal": "SIGKILL"
+      },
+      "committedCrash": {
+        "seq": 2,
+        "patchsetBytes": 961740,
+        "patchsetSha256": "5204cc240ff4c84d5f8b25007eda9f360c069b1d91614f9938ab05e6cb0e5f82",
+        "committed": true,
+        "phase": "after-commit",
+        "pid": 86024,
+        "wal": {
+          "exists": true,
+          "bytes": 2150672,
+          "pageSize": 4096,
+          "frames": 522,
+          "commitFrames": 1,
+          "lastFrameDatabaseSize": 973
+        },
+        "exitSignal": "SIGKILL"
+      },
+      "bRecoveredReceiptBeforeReplay": 1,
+      "bRecoveredPageDifferencesBeforeReplay": [],
+      "cRecoveredReceiptBeforeDuplicate": 2,
+      "cDuplicate": {
+        "duplicateSkipped": true,
+        "seq": 2,
+        "receiptDigest": "5204cc240ff4c84d5f8b25007eda9f36"
+      },
+      "canonicalDifferentPagesAB": [],
+      "canonicalDifferentPagesAC": [],
+      "patchsetsAllEqual": true,
+      "patchsetSha256": "5204cc240ff4c84d5f8b25007eda9f360c069b1d91614f9938ab05e6cb0e5f82",
+      "integrityCheck": [
+        "ok",
+        "ok",
+        "ok"
+      ]
+    },
+    {
+      "seq": 3,
+      "pass": true,
+      "pageCount": 1427,
+      "uncommittedCrash": {
+        "seq": 3,
+        "patchsetBytes": 964587,
+        "patchsetSha256": "fcd2a9e2864cafc962ff764fb0843c8a113bb0755c79069f6cfe36882a9ce202",
+        "committed": false,
+        "phase": "uncommitted",
+        "pid": 86025,
+        "wal": {
+          "exists": true,
+          "bytes": 2138312,
+          "pageSize": 4096,
+          "frames": 519,
+          "commitFrames": 0,
+          "lastFrameDatabaseSize": 0
+        },
+        "exitSignal": "SIGKILL"
+      },
+      "committedCrash": {
+        "seq": 3,
+        "patchsetBytes": 964587,
+        "patchsetSha256": "fcd2a9e2864cafc962ff764fb0843c8a113bb0755c79069f6cfe36882a9ce202",
+        "committed": true,
+        "phase": "after-commit",
+        "pid": 86026,
+        "wal": {
+          "exists": true,
+          "bytes": 2158912,
+          "pageSize": 4096,
+          "frames": 524,
+          "commitFrames": 1,
+          "lastFrameDatabaseSize": 1427
+        },
+        "exitSignal": "SIGKILL"
+      },
+      "bRecoveredReceiptBeforeReplay": 2,
+      "bRecoveredPageDifferencesBeforeReplay": [],
+      "cRecoveredReceiptBeforeDuplicate": 3,
+      "cDuplicate": {
+        "duplicateSkipped": true,
+        "seq": 3,
+        "receiptDigest": "fcd2a9e2864cafc962ff764fb0843c8a"
+      },
+      "canonicalDifferentPagesAB": [],
+      "canonicalDifferentPagesAC": [],
+      "patchsetsAllEqual": true,
+      "patchsetSha256": "fcd2a9e2864cafc962ff764fb0843c8a113bb0755c79069f6cfe36882a9ce202",
+      "integrityCheck": [
+        "ok",
+        "ok",
+        "ok"
+      ]
+    }
+  ]
+}

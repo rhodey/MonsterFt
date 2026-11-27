@@ -12,6 +12,12 @@ free-leaf canonicalization is now the agreed direction, conditional on reliable
 snapshot-specific classification. Its corruption handling and the agreed
 application rules still need implementation and validation.
 
+Immediate work is disposable `sqlite_dbpage` write/repair experiments, including
+page-write ordering, growth/truncation, and reopening repaired images. The exact
+repair start/progress/completion/rejoin flow and interruption/recovery protocol
+remain important open work, deliberately deferred briefly while these storage
+experiments establish the installation behavior.
+
 ## Scope and decisions
 
 - Keep MonsterFt on `node:sqlite`. Build Node and its SQLite dependency with Nix,
@@ -58,6 +64,9 @@ application rules still need implementation and validation.
   through ordinary command-result agreement.
 - A repair target closes normal operation and restarts in a repair-only mode,
   outside Raft, before discovering the leader and requesting repair.
+- Followers monitor leader heartbeats for loss of the retained history needed
+  to catch up. Once catch-up through retained Raft history is impossible, install
+  a durable repair-required fence and enter the repair path.
 - After its no-quorum SYNC is committed and durably applied, a node in
   `REPAIR_NO_QUORUM` should go offline without waiting for final outbound RPCs.
   With ordinary 2-of-3 or 3-of-5 quorums, successor elections can carry the
@@ -304,10 +313,11 @@ owner-page validation before substitution and the full-copy fallback for unusabl
 classification metadata. Do not infer that typed hashing detects damage inside
 fields intentionally excluded by the agreed normalization rules.
 
-The typed group format and this corruption-handling argument are agreed design
-decisions that still need implementation and targeted tests; the existing
-preservation experiments did not test this repair protocol. No final
-quorum-endorsed complete manifest is introduced.
+The typed group format is now exercised by the disposable storage-repair
+experiments, including the misclassified-zero-page case. Real page installation,
+reopening, and continued SQL pass the attached-target controls described below.
+Production implementation, Nix Node integration, and the full repair protocol
+still need validation. No final quorum-endorsed complete manifest is introduced.
 
 The format defines the locations precisely for a valid database; the experimental
 parser is not yet a proven corruption boundary. Full SQLite integrity checking
@@ -366,6 +376,37 @@ calls on connection open/close. Appending a maintenance statement alone does not
 establish its determinism. Keep these restrictions distinct from ordinary
 checkpoint timing, which passed the tested controls. See the experiment report
 for scope and counterexamples; these results are not a general determinism proof.
+
+## Page installation: experimental findings and candidate
+
+The [storage experiments](doc/DB2-PAGE-EQUALITY.md#page-writes-and-grouped-repair)
+now exercise actual page replacement, growth/truncation, schema changes, and
+reopening. They do not establish a universal ascending-page requirement. Direct
+replacement of the connection's main database can trigger schema reprepare
+against an image being changed; moving page 1 last did not solve all cases.
+
+Preferred candidate for integration: open a dedicated connection with an
+in-memory main database, ATTACH the on-disk recipient, and write through
+`main.sqlite_dbpage` with its hidden `schema` column selecting that recipient.
+Keep the recipient in WAL/FULL. This arrangement passed all 64 full-image
+controls across four write orders, cold/warm schema, and both statement APIs.
+The typed-group harness also passes its 13 scenarios in each of two attached
+write orders, including expected follower-error aborts. See the report for scope.
+
+Within a single-file installation transaction, write every page in every
+accepted replacement group. Set exact size with `INSERT(N+1,NULL)` targeting
+that database as the **last write before COMMIT**; subsequent writes can cancel
+the pending truncation. Close the installation connection and reopen the
+recipient before ordinary SQL, discarding stale schema/page interpretation.
+Fresh ownership and valid-header rules still apply. Capability probes on the
+Nix runtime must exercise disposable DBPAGE writes/rollback, not just reads or
+compile options; SQLite's defensive mode can disable DBPAGE writes.
+
+These are storage-level findings and a candidate recipe, not the final lifecycle
+or cross-file interruption design. The grouped experiment models messages in
+process and continues direct deterministic SQL with unequal restart counts;
+local DB1 A/B/C reconciliation and production startup/Apply integration remain
+untested. Keep those tests and the deferred lifecycle questions below.
 
 ## Physical local DB1 reconciliation and donation
 
@@ -516,6 +557,25 @@ Important details to resolve:
 - DB1 and DB2 do not share one atomic WAL commit. A durable repair-in-progress
   state must prevent activation after partial installation or a crash; copying
   donor metadata must not accidentally clear that protection.
+
+## Heartbeat detection of retention gaps
+
+Followers must learn from accepted current-leader heartbeats when the leader's
+retained history no longer supports their catch-up, then durably install a
+repair-required fence. Use the leader's actual retained-log boundary or
+equivalent explicit catch-up information; a large sequence gap or calculation
+from `keepTarget`/`keepTrigger` alone does not establish which entries remain.
+The comparison must account for the follower's recoverable log/checkpoint and
+the predecessor needed to resume replication. Stale or rejected-leader
+heartbeats must not cause this transition.
+
+Current heartbeats advertise the leader's head sequence/term and commit sequence,
+but not its retained-log boundary. Extend that information when implementing
+this rule. Keep a real loss of required history distinct from the already
+documented lost-ACK/cancelled-replication case: a follower that already has the
+needed history must not require a database repair merely because the leader's
+replication cursor is stale. Exact message fields, boundary comparisons, and the
+fence transition belong to the upcoming lifecycle work.
 
 ## Repair-only startup and completion
 
@@ -685,9 +745,13 @@ The new [DB2 preservation report](doc/DB2-PAGE-EQUALITY.md) and
   canonical equality through recovery/replay or receipt-based duplicate skip.
 - Free-leaf canonicalization and physical-zeroing alternatives, plus failing
   intermediate-write and local-maintenance cases and their controls.
+- Actual DBPAGE installation/order tests and typed grouped repair: the attached
+  controller passes schema changes, growth/shrinkage, corrupt-target fallback,
+  reopening, and continued deterministic SQL with unequal restart counts.
 
 All page comparisons use DBPAGE read transactions, with WAL/FULL. These are
-prototype/schema and Apply-path experiments, not a complete Raft repair test.
+prototype/schema, Apply-path, and storage-repair experiments, not a complete
+Raft repair test. Modeled message batches are not a transport test.
 The future Nix Node runtime and production ownership integration remain untested.
 
 Prior exploratory tests provide useful evidence, not a general page-equality
@@ -783,6 +847,10 @@ patchset/changeset application.
   detection of latent page corruption, and concurrent scrub/repair snapshots.
 - Verify minority repair and eventual rejoin without the existing
   cancelled-replication failure.
+- Test heartbeat-driven retention-gap detection and durable fencing, including
+  the exact retained-boundary/predecessor cases, stale heartbeats, and a follower
+  whose data is current despite a lost ACK. Do not mistake the latter for a
+  genuine need to replace its databases.
 - Test no-quorum SYNC shutdown after durable application with all final outgoing
   messages suppressed. In 2-of-3 and 3-of-5 clusters, verify successor elections
   and election no-op commitment fence a majority even when remaining followers
@@ -790,6 +858,10 @@ patchset/changeset application.
   do not shut down on the early client error or an uncommitted SYNC.
 
 ## Suggested implementation order
+
+The current next step is the storage experiment pass described above; settling
+the full repair lifecycle and interruption protocol follows that pass. The list
+below remains the broader implementation direction.
 
 1. Add the pinned Nix runtime and startup/CI capability probes for DBPAGE and
    session capture, retaining WAL/FULL.

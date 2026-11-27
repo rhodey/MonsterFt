@@ -1,0 +1,97 @@
+{
+  "node": "v26.13.0",
+  "sqlite": "3.54.0",
+  "workDirectory": "/var/folders/y9/8f6p1d1n41g9gx0jfkbl4wp00000gn/T/monsterft-apply-freelist-XTpIHZ",
+  "method": "Production MonsterApply._execute with proposed schema; same cache/SQLite configuration; only unequal restart counts; external DBPAGE snapshots.",
+  "results": [
+    {
+      "restarting": false,
+      "checkpoints": 160,
+      "firstDifference": null,
+      "restarts": [
+        0,
+        0,
+        0
+      ],
+      "integrity": [
+        [
+          {
+            "integrity_check": "ok"
+          }
+        ],
+        [
+          {
+            "integrity_check": "ok"
+          }
+        ],
+        [
+          {
+            "integrity_check": "ok"
+          }
+        ]
+      ],
+      "paths": [
+        "/var/folders/y9/8f6p1d1n41g9gx0jfkbl4wp00000gn/T/monsterft-apply-freelist-XTpIHZ/false-0.db",
+        "/var/folders/y9/8f6p1d1n41g9gx0jfkbl4wp00000gn/T/monsterft-apply-freelist-XTpIHZ/false-1.db",
+        "/var/folders/y9/8f6p1d1n41g9gx0jfkbl4wp00000gn/T/monsterft-apply-freelist-XTpIHZ/false-2.db"
+      ]
+    },
+    {
+      "restarting": true,
+      "checkpoints": 135,
+      "firstDifference": {
+        "seq": 135,
+        "pages": [
+          159,
+          159,
+          159
+        ],
+        "differentPages": [
+          "66"
+        ],
+        "restarts": [
+          0,
+          19,
+          12
+        ],
+        "allDifferencesFreeLeaves": true,
+        "bytes": [
+          {
+            "page": "66",
+            "offsets": [
+              3
+            ]
+          }
+        ],
+        "digestsMatched": true
+      },
+      "restarts": [
+        0,
+        19,
+        12
+      ],
+      "integrity": [
+        [
+          {
+            "integrity_check": "ok"
+          }
+        ],
+        [
+          {
+            "integrity_check": "ok"
+          }
+        ],
+        [
+          {
+            "integrity_check": "ok"
+          }
+        ]
+      ],
+      "paths": [
+        "/var/folders/y9/8f6p1d1n41g9gx0jfkbl4wp00000gn/T/monsterft-apply-freelist-XTpIHZ/true-0.db",
+        "/var/folders/y9/8f6p1d1n41g9gx0jfkbl4wp00000gn/T/monsterft-apply-freelist-XTpIHZ/true-1.db",
+        "/var/folders/y9/8f6p1d1n41g9gx0jfkbl4wp00000gn/T/monsterft-apply-freelist-XTpIHZ/true-2.db"
+      ]
+    }
+  ]
+}

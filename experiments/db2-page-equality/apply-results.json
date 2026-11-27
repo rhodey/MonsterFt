@@ -1,0 +1,1566 @@
+{
+  "workDirectory": "/var/folders/y9/8f6p1d1n41g9gx0jfkbl4wp00000gn/T/monsterft-db2-apply-VLAoea",
+  "runtime": {
+    "node": "v26.13.0",
+    "sqlite": "3.54.0",
+    "v8": "14.6.202.34-node.40",
+    "compileOptions": [
+      "ATOMIC_INTRINSICS=1",
+      "COMPILER=clang-17.0.0",
+      "DEFAULT_AUTOVACUUM",
+      "DEFAULT_CACHE_SIZE=-2000",
+      "DEFAULT_FILE_FORMAT=4",
+      "DEFAULT_JOURNAL_SIZE_LIMIT=-1",
+      "DEFAULT_MEMSTATUS=0",
+      "DEFAULT_MMAP_SIZE=0",
+      "DEFAULT_PAGE_SIZE=4096",
+      "DEFAULT_PCACHE_INITSZ=20",
+      "DEFAULT_RECURSIVE_TRIGGERS",
+      "DEFAULT_SECTOR_SIZE=4096",
+      "DEFAULT_SYNCHRONOUS=2",
+      "DEFAULT_WAL_AUTOCHECKPOINT=1000",
+      "DEFAULT_WAL_SYNCHRONOUS=2",
+      "DEFAULT_WORKER_THREADS=0",
+      "DIRECT_OVERFLOW_READ",
+      "ENABLE_COLUMN_METADATA",
+      "ENABLE_DBSTAT_VTAB",
+      "ENABLE_FTS3",
+      "ENABLE_FTS3_PARENTHESIS",
+      "ENABLE_FTS5",
+      "ENABLE_GEOPOLY",
+      "ENABLE_MATH_FUNCTIONS",
+      "ENABLE_PERCENTILE",
+      "ENABLE_PREUPDATE_HOOK",
+      "ENABLE_RBU",
+      "ENABLE_RTREE",
+      "ENABLE_SESSION",
+      "MALLOC_SOFT_LIMIT=1024",
+      "MAX_ATTACHED=10",
+      "MAX_COLUMN=2000",
+      "MAX_COMPOUND_SELECT=500",
+      "MAX_DEFAULT_PAGE_SIZE=8192",
+      "MAX_EXPR_DEPTH=1000",
+      "MAX_FUNCTION_ARG=1000",
+      "MAX_LENGTH=1000000000",
+      "MAX_LIKE_PATTERN_LENGTH=50000",
+      "MAX_MMAP_SIZE=0x7fff0000",
+      "MAX_PAGE_COUNT=0xfffffffe",
+      "MAX_PAGE_SIZE=65536",
+      "MAX_SCHEMA=10000000",
+      "MAX_SQL_LENGTH=1000000000",
+      "MAX_TRIGGER_DEPTH=1000",
+      "MAX_VARIABLE_NUMBER=32766",
+      "MAX_VDBE_OP=250000000",
+      "MAX_WORKER_THREADS=8",
+      "MUTEX_PTHREADS",
+      "SYSTEM_MALLOC",
+      "TEMP_STORE=1",
+      "THREADSAFE=1"
+    ]
+  },
+  "method": "Production MonsterApply._execute; experimental owner schema/startup guard; external sqlite_dbpage read transactions; no patchset application.",
+  "checkpoints": [
+    {
+      "label": "initial matching baseline",
+      "seq": "0",
+      "pages": [
+        11,
+        11,
+        11
+      ],
+      "opens": [
+        1,
+        1,
+        1
+      ],
+      "ownerPages": [
+        3,
+        3,
+        3
+      ],
+      "rawDifferentPages": [
+        "3"
+      ],
+      "canonicalDifferentPages": [],
+      "headerCounters": [
+        [
+          2,
+          2
+        ],
+        [
+          2,
+          2
+        ],
+        [
+          2,
+          2
+        ]
+      ],
+      "readerSQLite": "3.54.1",
+      "writerSQLiteNumber": 3054000
+    },
+    {
+      "label": "round 1",
+      "seq": "1",
+      "pages": [
+        18,
+        18,
+        18
+      ],
+      "opens": [
+        1,
+        1,
+        1
+      ],
+      "ownerPages": [
+        3,
+        3,
+        3
+      ],
+      "rawDifferentPages": [
+        "3"
+      ],
+      "canonicalDifferentPages": [],
+      "headerCounters": [
+        [
+          2,
+          2
+        ],
+        [
+          2,
+          2
+        ],
+        [
+          2,
+          2
+        ]
+      ],
+      "readerSQLite": "3.54.1",
+      "writerSQLiteNumber": 3054000
+    },
+    {
+      "label": "round 14",
+      "seq": "27",
+      "pages": [
+        68,
+        68,
+        68
+      ],
+      "opens": [
+        1,
+        3,
+        2
+      ],
+      "ownerPages": [
+        3,
+        3,
+        3
+      ],
+      "rawDifferentPages": [
+        "1",
+        "3"
+      ],
+      "canonicalDifferentPages": [],
+      "headerCounters": [
+        [
+          4,
+          4
+        ],
+        [
+          6,
+          6
+        ],
+        [
+          5,
+          5
+        ]
+      ],
+      "readerSQLite": "3.54.1",
+      "writerSQLiteNumber": 3054000
+    },
+    {
+      "label": "round 28",
+      "seq": "55",
+      "pages": [
+        125,
+        125,
+        125
+      ],
+      "opens": [
+        1,
+        5,
+        2
+      ],
+      "ownerPages": [
+        3,
+        3,
+        3
+      ],
+      "rawDifferentPages": [
+        "1",
+        "3"
+      ],
+      "canonicalDifferentPages": [],
+      "headerCounters": [
+        [
+          6,
+          6
+        ],
+        [
+          10,
+          10
+        ],
+        [
+          7,
+          7
+        ]
+      ],
+      "readerSQLite": "3.54.1",
+      "writerSQLiteNumber": 3054000
+    },
+    {
+      "label": "round 42",
+      "seq": "83",
+      "pages": [
+        161,
+        161,
+        161
+      ],
+      "opens": [
+        1,
+        7,
+        2
+      ],
+      "ownerPages": [
+        3,
+        3,
+        3
+      ],
+      "rawDifferentPages": [
+        "1",
+        "3"
+      ],
+      "canonicalDifferentPages": [],
+      "headerCounters": [
+        [
+          8,
+          8
+        ],
+        [
+          14,
+          14
+        ],
+        [
+          9,
+          9
+        ]
+      ],
+      "readerSQLite": "3.54.1",
+      "writerSQLiteNumber": 3054000
+    },
+    {
+      "label": "round 56",
+      "seq": "111",
+      "pages": [
+        217,
+        217,
+        217
+      ],
+      "opens": [
+        1,
+        9,
+        3
+      ],
+      "ownerPages": [
+        3,
+        3,
+        3
+      ],
+      "rawDifferentPages": [
+        "1",
+        "3"
+      ],
+      "canonicalDifferentPages": [],
+      "headerCounters": [
+        [
+          10,
+          10
+        ],
+        [
+          18,
+          18
+        ],
+        [
+          12,
+          12
+        ]
+      ],
+      "readerSQLite": "3.54.1",
+      "writerSQLiteNumber": 3054000
+    },
+    {
+      "label": "round 63",
+      "seq": "125",
+      "pages": [
+        221,
+        221,
+        221
+      ],
+      "opens": [
+        1,
+        10,
+        3
+      ],
+      "ownerPages": [
+        3,
+        3,
+        3
+      ],
+      "rawDifferentPages": [
+        "1",
+        "3"
+      ],
+      "canonicalDifferentPages": [],
+      "headerCounters": [
+        [
+          11,
+          11
+        ],
+        [
+          20,
+          20
+        ],
+        [
+          13,
+          13
+        ]
+      ],
+      "readerSQLite": "3.54.1",
+      "writerSQLiteNumber": 3054000
+    },
+    {
+      "label": "round 64",
+      "seq": "127",
+      "pages": [
+        221,
+        221,
+        221
+      ],
+      "opens": [
+        1,
+        10,
+        3
+      ],
+      "ownerPages": [
+        3,
+        3,
+        3
+      ],
+      "rawDifferentPages": [
+        "1",
+        "3"
+      ],
+      "canonicalDifferentPages": [],
+      "headerCounters": [
+        [
+          11,
+          11
+        ],
+        [
+          20,
+          20
+        ],
+        [
+          13,
+          13
+        ]
+      ],
+      "readerSQLite": "3.54.1",
+      "writerSQLiteNumber": 3054000
+    },
+    {
+      "label": "round 65",
+      "seq": "129",
+      "pages": [
+        221,
+        221,
+        221
+      ],
+      "opens": [
+        1,
+        10,
+        3
+      ],
+      "ownerPages": [
+        3,
+        3,
+        3
+      ],
+      "rawDifferentPages": [
+        "1",
+        "3"
+      ],
+      "canonicalDifferentPages": [],
+      "headerCounters": [
+        [
+          11,
+          11
+        ],
+        [
+          20,
+          20
+        ],
+        [
+          13,
+          13
+        ]
+      ],
+      "readerSQLite": "3.54.1",
+      "writerSQLiteNumber": 3054000
+    },
+    {
+      "label": "round 70",
+      "seq": "139",
+      "pages": [
+        221,
+        221,
+        221
+      ],
+      "opens": [
+        1,
+        11,
+        3
+      ],
+      "ownerPages": [
+        3,
+        3,
+        3
+      ],
+      "rawDifferentPages": [
+        "1",
+        "3"
+      ],
+      "canonicalDifferentPages": [],
+      "headerCounters": [
+        [
+          12,
+          12
+        ],
+        [
+          22,
+          22
+        ],
+        [
+          14,
+          14
+        ]
+      ],
+      "readerSQLite": "3.54.1",
+      "writerSQLiteNumber": 3054000
+    },
+    {
+      "label": "round 84",
+      "seq": "167",
+      "pages": [
+        246,
+        246,
+        246
+      ],
+      "opens": [
+        1,
+        13,
+        3
+      ],
+      "ownerPages": [
+        3,
+        3,
+        3
+      ],
+      "rawDifferentPages": [
+        "1",
+        "3"
+      ],
+      "canonicalDifferentPages": [],
+      "headerCounters": [
+        [
+          14,
+          14
+        ],
+        [
+          26,
+          26
+        ],
+        [
+          16,
+          16
+        ]
+      ],
+      "readerSQLite": "3.54.1",
+      "writerSQLiteNumber": 3054000
+    },
+    {
+      "label": "round 98",
+      "seq": "195",
+      "pages": [
+        249,
+        249,
+        249
+      ],
+      "opens": [
+        1,
+        15,
+        3
+      ],
+      "ownerPages": [
+        3,
+        3,
+        3
+      ],
+      "rawDifferentPages": [
+        "1",
+        "3"
+      ],
+      "canonicalDifferentPages": [],
+      "headerCounters": [
+        [
+          16,
+          16
+        ],
+        [
+          29,
+          29
+        ],
+        [
+          18,
+          18
+        ]
+      ],
+      "readerSQLite": "3.54.1",
+      "writerSQLiteNumber": 3054000
+    },
+    {
+      "label": "round 112",
+      "seq": "223",
+      "pages": [
+        249,
+        249,
+        249
+      ],
+      "opens": [
+        1,
+        17,
+        4
+      ],
+      "ownerPages": [
+        3,
+        3,
+        3
+      ],
+      "rawDifferentPages": [
+        "1",
+        "3"
+      ],
+      "canonicalDifferentPages": [],
+      "headerCounters": [
+        [
+          18,
+          18
+        ],
+        [
+          34,
+          34
+        ],
+        [
+          20,
+          20
+        ]
+      ],
+      "readerSQLite": "3.54.1",
+      "writerSQLiteNumber": 3054000
+    },
+    {
+      "label": "round 126",
+      "seq": "251",
+      "pages": [
+        269,
+        269,
+        269
+      ],
+      "opens": [
+        1,
+        19,
+        4
+      ],
+      "ownerPages": [
+        3,
+        3,
+        3
+      ],
+      "rawDifferentPages": [
+        "1",
+        "3"
+      ],
+      "canonicalDifferentPages": [],
+      "headerCounters": [
+        [
+          20,
+          20
+        ],
+        [
+          37,
+          37
+        ],
+        [
+          22,
+          22
+        ]
+      ],
+      "readerSQLite": "3.54.1",
+      "writerSQLiteNumber": 3054000
+    },
+    {
+      "label": "round 127",
+      "seq": "253",
+      "pages": [
+        269,
+        269,
+        269
+      ],
+      "opens": [
+        1,
+        19,
+        4
+      ],
+      "ownerPages": [
+        3,
+        3,
+        3
+      ],
+      "rawDifferentPages": [
+        "1",
+        "3"
+      ],
+      "canonicalDifferentPages": [],
+      "headerCounters": [
+        [
+          20,
+          20
+        ],
+        [
+          37,
+          37
+        ],
+        [
+          22,
+          22
+        ]
+      ],
+      "readerSQLite": "3.54.1",
+      "writerSQLiteNumber": 3054000
+    },
+    {
+      "label": "round 128",
+      "seq": "255",
+      "pages": [
+        269,
+        269,
+        269
+      ],
+      "opens": [
+        1,
+        19,
+        4
+      ],
+      "ownerPages": [
+        3,
+        3,
+        3
+      ],
+      "rawDifferentPages": [
+        "1",
+        "3"
+      ],
+      "canonicalDifferentPages": [],
+      "headerCounters": [
+        [
+          20,
+          20
+        ],
+        [
+          38,
+          38
+        ],
+        [
+          22,
+          22
+        ]
+      ],
+      "readerSQLite": "3.54.1",
+      "writerSQLiteNumber": 3054000
+    },
+    {
+      "label": "round 129",
+      "seq": "257",
+      "pages": [
+        269,
+        269,
+        269
+      ],
+      "opens": [
+        1,
+        19,
+        4
+      ],
+      "ownerPages": [
+        3,
+        3,
+        3
+      ],
+      "rawDifferentPages": [
+        "1",
+        "3"
+      ],
+      "canonicalDifferentPages": [],
+      "headerCounters": [
+        [
+          20,
+          20
+        ],
+        [
+          38,
+          38
+        ],
+        [
+          22,
+          22
+        ]
+      ],
+      "readerSQLite": "3.54.1",
+      "writerSQLiteNumber": 3054000
+    },
+    {
+      "label": "round 140",
+      "seq": "279",
+      "pages": [
+        279,
+        279,
+        279
+      ],
+      "opens": [
+        1,
+        21,
+        4
+      ],
+      "ownerPages": [
+        3,
+        3,
+        3
+      ],
+      "rawDifferentPages": [
+        "1",
+        "3"
+      ],
+      "canonicalDifferentPages": [],
+      "headerCounters": [
+        [
+          22,
+          22
+        ],
+        [
+          42,
+          42
+        ],
+        [
+          24,
+          24
+        ]
+      ],
+      "readerSQLite": "3.54.1",
+      "writerSQLiteNumber": 3054000
+    },
+    {
+      "label": "round 154",
+      "seq": "307",
+      "pages": [
+        279,
+        279,
+        279
+      ],
+      "opens": [
+        1,
+        23,
+        4
+      ],
+      "ownerPages": [
+        3,
+        3,
+        3
+      ],
+      "rawDifferentPages": [
+        "1",
+        "3"
+      ],
+      "canonicalDifferentPages": [],
+      "headerCounters": [
+        [
+          24,
+          24
+        ],
+        [
+          45,
+          45
+        ],
+        [
+          26,
+          26
+        ]
+      ],
+      "readerSQLite": "3.54.1",
+      "writerSQLiteNumber": 3054000
+    },
+    {
+      "label": "round 168",
+      "seq": "335",
+      "pages": [
+        279,
+        279,
+        279
+      ],
+      "opens": [
+        1,
+        25,
+        4
+      ],
+      "ownerPages": [
+        3,
+        3,
+        3
+      ],
+      "rawDifferentPages": [
+        "1",
+        "3"
+      ],
+      "canonicalDifferentPages": [],
+      "headerCounters": [
+        [
+          26,
+          26
+        ],
+        [
+          48,
+          48
+        ],
+        [
+          28,
+          28
+        ]
+      ],
+      "readerSQLite": "3.54.1",
+      "writerSQLiteNumber": 3054000
+    },
+    {
+      "label": "round 182",
+      "seq": "363",
+      "pages": [
+        291,
+        291,
+        291
+      ],
+      "opens": [
+        1,
+        27,
+        4
+      ],
+      "ownerPages": [
+        3,
+        3,
+        3
+      ],
+      "rawDifferentPages": [
+        "1",
+        "3"
+      ],
+      "canonicalDifferentPages": [],
+      "headerCounters": [
+        [
+          28,
+          28
+        ],
+        [
+          52,
+          52
+        ],
+        [
+          30,
+          30
+        ]
+      ],
+      "readerSQLite": "3.54.1",
+      "writerSQLiteNumber": 3054000
+    },
+    {
+      "label": "round 196",
+      "seq": "391",
+      "pages": [
+        291,
+        291,
+        291
+      ],
+      "opens": [
+        1,
+        29,
+        4
+      ],
+      "ownerPages": [
+        3,
+        3,
+        3
+      ],
+      "rawDifferentPages": [
+        "1",
+        "3"
+      ],
+      "canonicalDifferentPages": [],
+      "headerCounters": [
+        [
+          30,
+          30
+        ],
+        [
+          56,
+          56
+        ],
+        [
+          32,
+          32
+        ]
+      ],
+      "readerSQLite": "3.54.1",
+      "writerSQLiteNumber": 3054000
+    },
+    {
+      "label": "round 210",
+      "seq": "419",
+      "pages": [
+        291,
+        291,
+        291
+      ],
+      "opens": [
+        1,
+        31,
+        5
+      ],
+      "ownerPages": [
+        3,
+        3,
+        3
+      ],
+      "rawDifferentPages": [
+        "1",
+        "3"
+      ],
+      "canonicalDifferentPages": [],
+      "headerCounters": [
+        [
+          32,
+          32
+        ],
+        [
+          59,
+          59
+        ],
+        [
+          34,
+          34
+        ]
+      ],
+      "readerSQLite": "3.54.1",
+      "writerSQLiteNumber": 3054000
+    },
+    {
+      "label": "round 224",
+      "seq": "447",
+      "pages": [
+        291,
+        291,
+        291
+      ],
+      "opens": [
+        1,
+        33,
+        5
+      ],
+      "ownerPages": [
+        3,
+        3,
+        3
+      ],
+      "rawDifferentPages": [
+        "1",
+        "3"
+      ],
+      "canonicalDifferentPages": [],
+      "headerCounters": [
+        [
+          34,
+          34
+        ],
+        [
+          63,
+          63
+        ],
+        [
+          36,
+          36
+        ]
+      ],
+      "readerSQLite": "3.54.1",
+      "writerSQLiteNumber": 3054000
+    },
+    {
+      "label": "round 238",
+      "seq": "475",
+      "pages": [
+        291,
+        291,
+        291
+      ],
+      "opens": [
+        1,
+        35,
+        5
+      ],
+      "ownerPages": [
+        3,
+        3,
+        3
+      ],
+      "rawDifferentPages": [
+        "1",
+        "3"
+      ],
+      "canonicalDifferentPages": [],
+      "headerCounters": [
+        [
+          36,
+          36
+        ],
+        [
+          66,
+          66
+        ],
+        [
+          38,
+          38
+        ]
+      ],
+      "readerSQLite": "3.54.1",
+      "writerSQLiteNumber": 3054000
+    },
+    {
+      "label": "round 252",
+      "seq": "503",
+      "pages": [
+        291,
+        291,
+        291
+      ],
+      "opens": [
+        1,
+        37,
+        5
+      ],
+      "ownerPages": [
+        3,
+        3,
+        3
+      ],
+      "rawDifferentPages": [
+        "1",
+        "3"
+      ],
+      "canonicalDifferentPages": [],
+      "headerCounters": [
+        [
+          38,
+          38
+        ],
+        [
+          71,
+          71
+        ],
+        [
+          40,
+          40
+        ]
+      ],
+      "readerSQLite": "3.54.1",
+      "writerSQLiteNumber": 3054000
+    },
+    {
+      "label": "round 266",
+      "seq": "531",
+      "pages": [
+        291,
+        291,
+        291
+      ],
+      "opens": [
+        1,
+        39,
+        5
+      ],
+      "ownerPages": [
+        3,
+        3,
+        3
+      ],
+      "rawDifferentPages": [
+        "1",
+        "3"
+      ],
+      "canonicalDifferentPages": [],
+      "headerCounters": [
+        [
+          40,
+          40
+        ],
+        [
+          75,
+          75
+        ],
+        [
+          42,
+          42
+        ]
+      ],
+      "readerSQLite": "3.54.1",
+      "writerSQLiteNumber": 3054000
+    },
+    {
+      "label": "round 280",
+      "seq": "559",
+      "pages": [
+        291,
+        291,
+        291
+      ],
+      "opens": [
+        1,
+        41,
+        5
+      ],
+      "ownerPages": [
+        3,
+        3,
+        3
+      ],
+      "rawDifferentPages": [
+        "1",
+        "3"
+      ],
+      "canonicalDifferentPages": [],
+      "headerCounters": [
+        [
+          42,
+          42
+        ],
+        [
+          78,
+          78
+        ],
+        [
+          44,
+          44
+        ]
+      ],
+      "readerSQLite": "3.54.1",
+      "writerSQLiteNumber": 3054000
+    },
+    {
+      "label": "receipt integer-width boundary",
+      "seq": "32767",
+      "pages": [
+        291,
+        291,
+        291
+      ],
+      "opens": [
+        1,
+        42,
+        5
+      ],
+      "ownerPages": [
+        3,
+        3,
+        3
+      ],
+      "rawDifferentPages": [
+        "1",
+        "3"
+      ],
+      "canonicalDifferentPages": [],
+      "headerCounters": [
+        [
+          42,
+          42
+        ],
+        [
+          78,
+          78
+        ],
+        [
+          44,
+          44
+        ]
+      ],
+      "readerSQLite": "3.54.1",
+      "writerSQLiteNumber": 3054000
+    },
+    {
+      "label": "receipt integer-width boundary",
+      "seq": "32768",
+      "pages": [
+        291,
+        291,
+        291
+      ],
+      "opens": [
+        1,
+        43,
+        5
+      ],
+      "ownerPages": [
+        3,
+        3,
+        3
+      ],
+      "rawDifferentPages": [
+        "1",
+        "3"
+      ],
+      "canonicalDifferentPages": [],
+      "headerCounters": [
+        [
+          42,
+          42
+        ],
+        [
+          78,
+          78
+        ],
+        [
+          44,
+          44
+        ]
+      ],
+      "readerSQLite": "3.54.1",
+      "writerSQLiteNumber": 3054000
+    },
+    {
+      "label": "receipt integer-width boundary",
+      "seq": "8388607",
+      "pages": [
+        291,
+        291,
+        291
+      ],
+      "opens": [
+        1,
+        44,
+        5
+      ],
+      "ownerPages": [
+        3,
+        3,
+        3
+      ],
+      "rawDifferentPages": [
+        "1",
+        "3"
+      ],
+      "canonicalDifferentPages": [],
+      "headerCounters": [
+        [
+          42,
+          42
+        ],
+        [
+          78,
+          78
+        ],
+        [
+          44,
+          44
+        ]
+      ],
+      "readerSQLite": "3.54.1",
+      "writerSQLiteNumber": 3054000
+    },
+    {
+      "label": "receipt integer-width boundary",
+      "seq": "8388608",
+      "pages": [
+        291,
+        291,
+        291
+      ],
+      "opens": [
+        1,
+        45,
+        5
+      ],
+      "ownerPages": [
+        3,
+        3,
+        3
+      ],
+      "rawDifferentPages": [
+        "1",
+        "3"
+      ],
+      "canonicalDifferentPages": [],
+      "headerCounters": [
+        [
+          42,
+          42
+        ],
+        [
+          78,
+          78
+        ],
+        [
+          44,
+          44
+        ]
+      ],
+      "readerSQLite": "3.54.1",
+      "writerSQLiteNumber": 3054000
+    },
+    {
+      "label": "receipt integer-width boundary",
+      "seq": "2147483647",
+      "pages": [
+        291,
+        291,
+        291
+      ],
+      "opens": [
+        1,
+        46,
+        5
+      ],
+      "ownerPages": [
+        3,
+        3,
+        3
+      ],
+      "rawDifferentPages": [
+        "1",
+        "3"
+      ],
+      "canonicalDifferentPages": [],
+      "headerCounters": [
+        [
+          42,
+          42
+        ],
+        [
+          78,
+          78
+        ],
+        [
+          44,
+          44
+        ]
+      ],
+      "readerSQLite": "3.54.1",
+      "writerSQLiteNumber": 3054000
+    },
+    {
+      "label": "receipt integer-width boundary",
+      "seq": "2147483648",
+      "pages": [
+        291,
+        291,
+        291
+      ],
+      "opens": [
+        1,
+        47,
+        5
+      ],
+      "ownerPages": [
+        3,
+        3,
+        3
+      ],
+      "rawDifferentPages": [
+        "1",
+        "3"
+      ],
+      "canonicalDifferentPages": [],
+      "headerCounters": [
+        [
+          42,
+          42
+        ],
+        [
+          78,
+          78
+        ],
+        [
+          44,
+          44
+        ]
+      ],
+      "readerSQLite": "3.54.1",
+      "writerSQLiteNumber": 3054000
+    },
+    {
+      "label": "receipt integer-width boundary",
+      "seq": "140737488355327",
+      "pages": [
+        291,
+        291,
+        291
+      ],
+      "opens": [
+        1,
+        48,
+        5
+      ],
+      "ownerPages": [
+        3,
+        3,
+        3
+      ],
+      "rawDifferentPages": [
+        "1",
+        "3"
+      ],
+      "canonicalDifferentPages": [],
+      "headerCounters": [
+        [
+          42,
+          42
+        ],
+        [
+          78,
+          78
+        ],
+        [
+          44,
+          44
+        ]
+      ],
+      "readerSQLite": "3.54.1",
+      "writerSQLiteNumber": 3054000
+    },
+    {
+      "label": "receipt integer-width boundary",
+      "seq": "140737488355328",
+      "pages": [
+        291,
+        291,
+        291
+      ],
+      "opens": [
+        1,
+        49,
+        5
+      ],
+      "ownerPages": [
+        3,
+        3,
+        3
+      ],
+      "rawDifferentPages": [
+        "1",
+        "3"
+      ],
+      "canonicalDifferentPages": [],
+      "headerCounters": [
+        [
+          42,
+          42
+        ],
+        [
+          78,
+          78
+        ],
+        [
+          44,
+          44
+        ]
+      ],
+      "readerSQLite": "3.54.1",
+      "writerSQLiteNumber": 3054000
+    }
+  ],
+  "heldSnapshotSeq": "41",
+  "replicas": [
+    {
+      "id": "persistent",
+      "opens": 1,
+      "restarts": 0,
+      "checkpoints": 56,
+      "rolledBackItems": 40,
+      "settings": {
+        "journal_mode": "wal",
+        "synchronous": "2",
+        "secure_delete": "0",
+        "auto_vacuum": "0",
+        "cache_size": "-2048",
+        "wal_autocheckpoint": "0"
+      },
+      "integrity": [
+        {
+          "integrity_check": "ok"
+        }
+      ]
+    },
+    {
+      "id": "frequent",
+      "opens": 49,
+      "restarts": 48,
+      "checkpoints": 0,
+      "rolledBackItems": 40,
+      "settings": {
+        "journal_mode": "wal",
+        "synchronous": "2",
+        "secure_delete": "0",
+        "auto_vacuum": "0",
+        "cache_size": "8",
+        "wal_autocheckpoint": "1"
+      },
+      "integrity": [
+        {
+          "integrity_check": "ok"
+        }
+      ]
+    },
+    {
+      "id": "staggered",
+      "opens": 5,
+      "restarts": 4,
+      "checkpoints": 21,
+      "rolledBackItems": 40,
+      "settings": {
+        "journal_mode": "wal",
+        "synchronous": "2",
+        "secure_delete": "0",
+        "auto_vacuum": "0",
+        "cache_size": "64",
+        "wal_autocheckpoint": "7"
+      },
+      "integrity": [
+        {
+          "integrity_check": "ok"
+        }
+      ]
+    }
+  ],
+  "status": "passed"
+}

@@ -1,0 +1,4211 @@
+{
+  "runtime": {
+    "sqlite": "3.54.1",
+    "sourceId": "2026-10-16 14:45:20 555e07ef33f69a0957d24d8e555b702464a131d6f1607f4c3c1e4551e8e6ca76",
+    "library": "/private/tmp/monsterft-db2-repro/libsqlite3.dylib",
+    "compileOptions": [
+      "ATOMIC_INTRINSICS=1",
+      "COMPILER=clang-21.0.0",
+      "DEFAULT_AUTOVACUUM",
+      "DEFAULT_CACHE_SIZE=-2000",
+      "DEFAULT_FILE_FORMAT=4",
+      "DEFAULT_JOURNAL_SIZE_LIMIT=-1",
+      "DEFAULT_MMAP_SIZE=0",
+      "DEFAULT_PAGE_SIZE=4096",
+      "DEFAULT_PCACHE_INITSZ=20",
+      "DEFAULT_RECURSIVE_TRIGGERS",
+      "DEFAULT_SECTOR_SIZE=4096",
+      "DEFAULT_SYNCHRONOUS=2",
+      "DEFAULT_WAL_AUTOCHECKPOINT=1000",
+      "DEFAULT_WAL_SYNCHRONOUS=2",
+      "DEFAULT_WORKER_THREADS=0",
+      "DIRECT_OVERFLOW_READ",
+      "ENABLE_DBPAGE_VTAB",
+      "ENABLE_PREUPDATE_HOOK",
+      "ENABLE_SESSION",
+      "MALLOC_SOFT_LIMIT=1024",
+      "MAX_ATTACHED=10",
+      "MAX_COLUMN=2000",
+      "MAX_COMPOUND_SELECT=500",
+      "MAX_DEFAULT_PAGE_SIZE=8192",
+      "MAX_EXPR_DEPTH=1000",
+      "MAX_FUNCTION_ARG=1000",
+      "MAX_LENGTH=1000000000",
+      "MAX_LIKE_PATTERN_LENGTH=50000",
+      "MAX_MMAP_SIZE=0x7fff0000",
+      "MAX_PAGE_COUNT=0xfffffffe",
+      "MAX_PAGE_SIZE=65536",
+      "MAX_SCHEMA=10000000",
+      "MAX_SQL_LENGTH=1000000000",
+      "MAX_TRIGGER_DEPTH=1000",
+      "MAX_VARIABLE_NUMBER=32766",
+      "MAX_VDBE_OP=250000000",
+      "MAX_WORKER_THREADS=8",
+      "MUTEX_PTHREADS",
+      "SYSTEM_MALLOC",
+      "TEMP_STORE=1",
+      "THREADSAFE=2"
+    ],
+    "settings": {
+      "journal_mode": "wal",
+      "synchronous": 2,
+      "page_size": 4096,
+      "auto_vacuum": 0,
+      "secure_delete": 0,
+      "cache_size": -2000,
+      "cache_spill": 483,
+      "wal_autocheckpoint": 0
+    }
+  },
+  "workDir": "/var/folders/y9/8f6p1d1n41g9gx0jfkbl4wp00000gn/T/monsterft-grouped-repair-01giyy0e",
+  "scope": "SQLite storage and simulated messages; no Raft, lifecycle, or interruption recovery",
+  "cases": [
+    {
+      "case": "ordinary_corruption",
+      "groupSize": 4,
+      "writeProfile": "prepared_ascending",
+      "fullCopyFallback": false,
+      "targetOwnerBefore": 2,
+      "targetPagesBefore": 79,
+      "donorPages": 79,
+      "partialFinalGroup": 3,
+      "groupCount": 20,
+      "requestedGroups": [
+        9
+      ],
+      "modeledTargetSubmissionCount": 1,
+      "modeledFollowerCheckRequestCount": 1,
+      "followerDisagreements": [],
+      "aborted": false,
+      "pagesExpectedToWrite": 4,
+      "pagesWritten": 4,
+      "targetMainBytesAfterInstallerClose": 323584,
+      "integrityAfterRepair": [
+        "ok"
+      ],
+      "canonicalEqualAfterReopen": true,
+      "recipientOwnerAfter": 2,
+      "continuedCommandCheckpoints": 30,
+      "restartCounts": [
+        0,
+        10,
+        6
+      ],
+      "integrityAfterContinuedCommands": [
+        [
+          "ok"
+        ],
+        [
+          "ok"
+        ],
+        [
+          "ok"
+        ]
+      ],
+      "pass": true
+    },
+    {
+      "case": "index_corruption",
+      "groupSize": 4,
+      "writeProfile": "prepared_ascending",
+      "fullCopyFallback": false,
+      "targetOwnerBefore": 2,
+      "targetPagesBefore": 79,
+      "donorPages": 79,
+      "partialFinalGroup": 3,
+      "groupCount": 20,
+      "requestedGroups": [
+        5
+      ],
+      "modeledTargetSubmissionCount": 1,
+      "modeledFollowerCheckRequestCount": 1,
+      "followerDisagreements": [],
+      "aborted": false,
+      "pagesExpectedToWrite": 4,
+      "pagesWritten": 4,
+      "targetMainBytesAfterInstallerClose": 323584,
+      "integrityAfterRepair": [
+        "ok"
+      ],
+      "canonicalEqualAfterReopen": true,
+      "recipientOwnerAfter": 2,
+      "continuedCommandCheckpoints": 30,
+      "restartCounts": [
+        0,
+        10,
+        6
+      ],
+      "integrityAfterContinuedCommands": [
+        [
+          "ok"
+        ],
+        [
+          "ok"
+        ],
+        [
+          "ok"
+        ]
+      ],
+      "pass": true
+    },
+    {
+      "case": "wrong_free_classification",
+      "groupSize": 4,
+      "writeProfile": "prepared_ascending",
+      "misclassifiedActivePage": 11,
+      "fullCopyFallback": false,
+      "targetOwnerBefore": 2,
+      "targetPagesBefore": 79,
+      "donorPages": 79,
+      "partialFinalGroup": 3,
+      "groupCount": 20,
+      "requestedGroups": [
+        9,
+        13
+      ],
+      "modeledTargetSubmissionCount": 1,
+      "modeledFollowerCheckRequestCount": 1,
+      "byteOnlyHashWouldMatch": true,
+      "followerDisagreements": [],
+      "aborted": false,
+      "pagesExpectedToWrite": 8,
+      "pagesWritten": 8,
+      "targetMainBytesAfterInstallerClose": 323584,
+      "integrityAfterRepair": [
+        "ok"
+      ],
+      "canonicalEqualAfterReopen": true,
+      "recipientOwnerAfter": 2,
+      "continuedCommandCheckpoints": 30,
+      "restartCounts": [
+        0,
+        10,
+        6
+      ],
+      "integrityAfterContinuedCommands": [
+        [
+          "ok"
+        ],
+        [
+          "ok"
+        ],
+        [
+          "ok"
+        ]
+      ],
+      "pass": true
+    },
+    {
+      "case": "schema_growth",
+      "groupSize": 4,
+      "writeProfile": "prepared_ascending",
+      "fullCopyFallback": false,
+      "targetOwnerBefore": 2,
+      "targetPagesBefore": 79,
+      "donorPages": 283,
+      "partialFinalGroup": 3,
+      "groupCount": 71,
+      "requestedGroups": [
+        1,
+        13,
+        17,
+        21,
+        25,
+        29,
+        33,
+        37,
+        41,
+        45,
+        49,
+        53,
+        57,
+        61,
+        65,
+        69,
+        73,
+        77,
+        81,
+        85,
+        89,
+        93,
+        97,
+        101,
+        105,
+        109,
+        113,
+        117,
+        121,
+        125,
+        129,
+        133,
+        137,
+        141,
+        145,
+        149,
+        153,
+        157,
+        161,
+        165,
+        169,
+        173,
+        177,
+        181,
+        185,
+        189,
+        193,
+        197,
+        201,
+        205,
+        209,
+        213,
+        217,
+        221,
+        225,
+        229,
+        233,
+        237,
+        241,
+        245,
+        249,
+        253,
+        257,
+        261,
+        265,
+        269,
+        273,
+        277,
+        281
+      ],
+      "modeledTargetSubmissionCount": 1,
+      "modeledFollowerCheckRequestCount": 1,
+      "followerDisagreements": [],
+      "aborted": false,
+      "pagesExpectedToWrite": 275,
+      "pagesWritten": 275,
+      "targetMainBytesAfterInstallerClose": 1159168,
+      "integrityAfterRepair": [
+        "ok"
+      ],
+      "canonicalEqualAfterReopen": true,
+      "recipientOwnerAfter": 2,
+      "continuedCommandCheckpoints": 30,
+      "restartCounts": [
+        0,
+        10,
+        6
+      ],
+      "integrityAfterContinuedCommands": [
+        [
+          "ok"
+        ],
+        [
+          "ok"
+        ],
+        [
+          "ok"
+        ]
+      ],
+      "pass": true
+    },
+    {
+      "case": "target_extra_pages",
+      "writeProfile": "prepared_ascending",
+      "pass": false,
+      "error": "RuntimeError(('write page', 2, 11, 'database disk image is malformed'))"
+    },
+    {
+      "case": "owner_root_change",
+      "writeProfile": "prepared_ascending",
+      "pass": false,
+      "error": "RuntimeError(('write page', 2, 11, 'database disk image is malformed'))"
+    },
+    {
+      "case": "bad_owner_fallback",
+      "writeProfile": "prepared_ascending",
+      "pass": false,
+      "error": "RuntimeError(('write page', 2, 11, 'malformed database schema (monsterft_local_owner) - invalid rootpage'))"
+    },
+    {
+      "case": "bad_freelist_fallback",
+      "writeProfile": "prepared_ascending",
+      "pass": false,
+      "error": "RuntimeError(('write page', 2, 11, 'malformed database schema (monsterft_local_owner) - invalid rootpage'))"
+    },
+    {
+      "case": "bad_schema_fallback",
+      "writeProfile": "prepared_ascending",
+      "pass": false,
+      "error": "RuntimeError(('write page', 2, 11, 'malformed database schema (monsterft_local_owner) - invalid rootpage'))"
+    },
+    {
+      "case": "bad_header_fallback",
+      "writeProfile": "prepared_ascending",
+      "pass": false,
+      "error": "RuntimeError(('write page', 2, 11, 'malformed database schema (monsterft_local_owner) - invalid rootpage'))"
+    },
+    {
+      "case": "witness_disagrees",
+      "groupSize": 4,
+      "writeProfile": "prepared_ascending",
+      "fullCopyFallback": false,
+      "targetOwnerBefore": 2,
+      "targetPagesBefore": 79,
+      "donorPages": 79,
+      "partialFinalGroup": 3,
+      "groupCount": 20,
+      "requestedGroups": [
+        9
+      ],
+      "modeledTargetSubmissionCount": 1,
+      "modeledFollowerCheckRequestCount": 1,
+      "followerDisagreements": [
+        9
+      ],
+      "aborted": true,
+      "pagesWritten": 0,
+      "pass": true
+    },
+    {
+      "case": "witness_unreadable",
+      "groupSize": 4,
+      "writeProfile": "prepared_ascending",
+      "fullCopyFallback": false,
+      "targetOwnerBefore": 2,
+      "targetPagesBefore": 79,
+      "donorPages": 79,
+      "partialFinalGroup": 3,
+      "groupCount": 20,
+      "requestedGroups": [
+        9
+      ],
+      "modeledTargetSubmissionCount": 1,
+      "modeledFollowerCheckRequestCount": 1,
+      "aborted": true,
+      "pagesWritten": 0,
+      "followerReadError": "(11, 'database disk image is malformed')",
+      "pass": true
+    },
+    {
+      "case": "pinned_snapshot",
+      "groupSize": 4,
+      "writeProfile": "prepared_ascending",
+      "fullCopyFallback": false,
+      "targetOwnerBefore": 2,
+      "targetPagesBefore": 79,
+      "donorPages": 79,
+      "partialFinalGroup": 3,
+      "groupCount": 20,
+      "requestedGroups": [
+        9
+      ],
+      "modeledTargetSubmissionCount": 1,
+      "modeledFollowerCheckRequestCount": 1,
+      "followerDisagreements": [],
+      "aborted": false,
+      "healthyWritersAdvancedWhilePinned": true,
+      "pagesExpectedToWrite": 4,
+      "pagesWritten": 4,
+      "targetMainBytesAfterInstallerClose": 323584,
+      "integrityAfterRepair": [
+        "ok"
+      ],
+      "canonicalEqualAfterReopen": true,
+      "recipientOwnerAfter": 2,
+      "continuedCommandCheckpoints": 30,
+      "restartCounts": [
+        0,
+        10,
+        6
+      ],
+      "integrityAfterContinuedCommands": [
+        [
+          "ok"
+        ],
+        [
+          "ok"
+        ],
+        [
+          "ok"
+        ]
+      ],
+      "pass": true
+    },
+    {
+      "case": "ordinary_corruption",
+      "groupSize": 4,
+      "writeProfile": "prepared_page1_last",
+      "fullCopyFallback": false,
+      "targetOwnerBefore": 2,
+      "targetPagesBefore": 79,
+      "donorPages": 79,
+      "partialFinalGroup": 3,
+      "groupCount": 20,
+      "requestedGroups": [
+        9
+      ],
+      "modeledTargetSubmissionCount": 1,
+      "modeledFollowerCheckRequestCount": 1,
+      "followerDisagreements": [],
+      "aborted": false,
+      "pagesExpectedToWrite": 4,
+      "pagesWritten": 4,
+      "targetMainBytesAfterInstallerClose": 323584,
+      "integrityAfterRepair": [
+        "ok"
+      ],
+      "canonicalEqualAfterReopen": true,
+      "recipientOwnerAfter": 2,
+      "continuedCommandCheckpoints": 30,
+      "restartCounts": [
+        0,
+        10,
+        6
+      ],
+      "integrityAfterContinuedCommands": [
+        [
+          "ok"
+        ],
+        [
+          "ok"
+        ],
+        [
+          "ok"
+        ]
+      ],
+      "pass": true
+    },
+    {
+      "case": "index_corruption",
+      "groupSize": 4,
+      "writeProfile": "prepared_page1_last",
+      "fullCopyFallback": false,
+      "targetOwnerBefore": 2,
+      "targetPagesBefore": 79,
+      "donorPages": 79,
+      "partialFinalGroup": 3,
+      "groupCount": 20,
+      "requestedGroups": [
+        5
+      ],
+      "modeledTargetSubmissionCount": 1,
+      "modeledFollowerCheckRequestCount": 1,
+      "followerDisagreements": [],
+      "aborted": false,
+      "pagesExpectedToWrite": 4,
+      "pagesWritten": 4,
+      "targetMainBytesAfterInstallerClose": 323584,
+      "integrityAfterRepair": [
+        "ok"
+      ],
+      "canonicalEqualAfterReopen": true,
+      "recipientOwnerAfter": 2,
+      "continuedCommandCheckpoints": 30,
+      "restartCounts": [
+        0,
+        10,
+        6
+      ],
+      "integrityAfterContinuedCommands": [
+        [
+          "ok"
+        ],
+        [
+          "ok"
+        ],
+        [
+          "ok"
+        ]
+      ],
+      "pass": true
+    },
+    {
+      "case": "wrong_free_classification",
+      "groupSize": 4,
+      "writeProfile": "prepared_page1_last",
+      "misclassifiedActivePage": 11,
+      "fullCopyFallback": false,
+      "targetOwnerBefore": 2,
+      "targetPagesBefore": 79,
+      "donorPages": 79,
+      "partialFinalGroup": 3,
+      "groupCount": 20,
+      "requestedGroups": [
+        9,
+        13
+      ],
+      "modeledTargetSubmissionCount": 1,
+      "modeledFollowerCheckRequestCount": 1,
+      "byteOnlyHashWouldMatch": true,
+      "followerDisagreements": [],
+      "aborted": false,
+      "pagesExpectedToWrite": 8,
+      "pagesWritten": 8,
+      "targetMainBytesAfterInstallerClose": 323584,
+      "integrityAfterRepair": [
+        "ok"
+      ],
+      "canonicalEqualAfterReopen": true,
+      "recipientOwnerAfter": 2,
+      "continuedCommandCheckpoints": 30,
+      "restartCounts": [
+        0,
+        10,
+        6
+      ],
+      "integrityAfterContinuedCommands": [
+        [
+          "ok"
+        ],
+        [
+          "ok"
+        ],
+        [
+          "ok"
+        ]
+      ],
+      "pass": true
+    },
+    {
+      "case": "schema_growth",
+      "groupSize": 4,
+      "writeProfile": "prepared_page1_last",
+      "fullCopyFallback": false,
+      "targetOwnerBefore": 2,
+      "targetPagesBefore": 79,
+      "donorPages": 283,
+      "partialFinalGroup": 3,
+      "groupCount": 71,
+      "requestedGroups": [
+        1,
+        13,
+        17,
+        21,
+        25,
+        29,
+        33,
+        37,
+        41,
+        45,
+        49,
+        53,
+        57,
+        61,
+        65,
+        69,
+        73,
+        77,
+        81,
+        85,
+        89,
+        93,
+        97,
+        101,
+        105,
+        109,
+        113,
+        117,
+        121,
+        125,
+        129,
+        133,
+        137,
+        141,
+        145,
+        149,
+        153,
+        157,
+        161,
+        165,
+        169,
+        173,
+        177,
+        181,
+        185,
+        189,
+        193,
+        197,
+        201,
+        205,
+        209,
+        213,
+        217,
+        221,
+        225,
+        229,
+        233,
+        237,
+        241,
+        245,
+        249,
+        253,
+        257,
+        261,
+        265,
+        269,
+        273,
+        277,
+        281
+      ],
+      "modeledTargetSubmissionCount": 1,
+      "modeledFollowerCheckRequestCount": 1,
+      "followerDisagreements": [],
+      "aborted": false,
+      "pagesExpectedToWrite": 275,
+      "pagesWritten": 275,
+      "targetMainBytesAfterInstallerClose": 1159168,
+      "integrityAfterRepair": [
+        "ok"
+      ],
+      "canonicalEqualAfterReopen": true,
+      "recipientOwnerAfter": 2,
+      "continuedCommandCheckpoints": 30,
+      "restartCounts": [
+        0,
+        10,
+        6
+      ],
+      "integrityAfterContinuedCommands": [
+        [
+          "ok"
+        ],
+        [
+          "ok"
+        ],
+        [
+          "ok"
+        ]
+      ],
+      "pass": true
+    },
+    {
+      "case": "target_extra_pages",
+      "writeProfile": "prepared_page1_last",
+      "pass": false,
+      "error": "RuntimeError((11, 'database disk image is malformed', \"INSERT INTO main.sqlite_dbpage(pgno,data,schema) VALUES(80,NULL,'main')\"))"
+    },
+    {
+      "case": "owner_root_change",
+      "writeProfile": "prepared_page1_last",
+      "pass": false,
+      "error": "RuntimeError((11, 'database disk image is malformed', \"INSERT INTO main.sqlite_dbpage(pgno,data,schema) VALUES(80,NULL,'main')\"))"
+    },
+    {
+      "case": "bad_owner_fallback",
+      "writeProfile": "prepared_page1_last",
+      "pass": false,
+      "error": "RuntimeError((11, 'malformed database schema (monsterft_local_owner) - invalid rootpage', \"INSERT INTO main.sqlite_dbpage(pgno,data,schema) VALUES(80,NULL,'main')\"))"
+    },
+    {
+      "case": "bad_freelist_fallback",
+      "writeProfile": "prepared_page1_last",
+      "pass": false,
+      "error": "RuntimeError((11, 'malformed database schema (monsterft_local_owner) - invalid rootpage', \"INSERT INTO main.sqlite_dbpage(pgno,data,schema) VALUES(80,NULL,'main')\"))"
+    },
+    {
+      "case": "bad_schema_fallback",
+      "writeProfile": "prepared_page1_last",
+      "pass": false,
+      "error": "RuntimeError((11, 'malformed database schema (monsterft_local_owner) - invalid rootpage', \"INSERT INTO main.sqlite_dbpage(pgno,data,schema) VALUES(80,NULL,'main')\"))"
+    },
+    {
+      "case": "bad_header_fallback",
+      "writeProfile": "prepared_page1_last",
+      "pass": false,
+      "error": "RuntimeError((11, 'malformed database schema (monsterft_local_owner) - invalid rootpage', \"INSERT INTO main.sqlite_dbpage(pgno,data,schema) VALUES(80,NULL,'main')\"))"
+    },
+    {
+      "case": "witness_disagrees",
+      "groupSize": 4,
+      "writeProfile": "prepared_page1_last",
+      "fullCopyFallback": false,
+      "targetOwnerBefore": 2,
+      "targetPagesBefore": 79,
+      "donorPages": 79,
+      "partialFinalGroup": 3,
+      "groupCount": 20,
+      "requestedGroups": [
+        9
+      ],
+      "modeledTargetSubmissionCount": 1,
+      "modeledFollowerCheckRequestCount": 1,
+      "followerDisagreements": [
+        9
+      ],
+      "aborted": true,
+      "pagesWritten": 0,
+      "pass": true
+    },
+    {
+      "case": "witness_unreadable",
+      "groupSize": 4,
+      "writeProfile": "prepared_page1_last",
+      "fullCopyFallback": false,
+      "targetOwnerBefore": 2,
+      "targetPagesBefore": 79,
+      "donorPages": 79,
+      "partialFinalGroup": 3,
+      "groupCount": 20,
+      "requestedGroups": [
+        9
+      ],
+      "modeledTargetSubmissionCount": 1,
+      "modeledFollowerCheckRequestCount": 1,
+      "aborted": true,
+      "pagesWritten": 0,
+      "followerReadError": "(11, 'database disk image is malformed')",
+      "pass": true
+    },
+    {
+      "case": "pinned_snapshot",
+      "groupSize": 4,
+      "writeProfile": "prepared_page1_last",
+      "fullCopyFallback": false,
+      "targetOwnerBefore": 2,
+      "targetPagesBefore": 79,
+      "donorPages": 79,
+      "partialFinalGroup": 3,
+      "groupCount": 20,
+      "requestedGroups": [
+        9
+      ],
+      "modeledTargetSubmissionCount": 1,
+      "modeledFollowerCheckRequestCount": 1,
+      "followerDisagreements": [],
+      "aborted": false,
+      "healthyWritersAdvancedWhilePinned": true,
+      "pagesExpectedToWrite": 4,
+      "pagesWritten": 4,
+      "targetMainBytesAfterInstallerClose": 323584,
+      "integrityAfterRepair": [
+        "ok"
+      ],
+      "canonicalEqualAfterReopen": true,
+      "recipientOwnerAfter": 2,
+      "continuedCommandCheckpoints": 30,
+      "restartCounts": [
+        0,
+        10,
+        6
+      ],
+      "integrityAfterContinuedCommands": [
+        [
+          "ok"
+        ],
+        [
+          "ok"
+        ],
+        [
+          "ok"
+        ]
+      ],
+      "pass": true
+    },
+    {
+      "case": "ordinary_corruption",
+      "groupSize": 4,
+      "writeProfile": "exec_ascending",
+      "fullCopyFallback": false,
+      "targetOwnerBefore": 2,
+      "targetPagesBefore": 79,
+      "donorPages": 79,
+      "partialFinalGroup": 3,
+      "groupCount": 20,
+      "requestedGroups": [
+        9
+      ],
+      "modeledTargetSubmissionCount": 1,
+      "modeledFollowerCheckRequestCount": 1,
+      "followerDisagreements": [],
+      "aborted": false,
+      "pagesExpectedToWrite": 4,
+      "pagesWritten": 4,
+      "targetMainBytesAfterInstallerClose": 323584,
+      "integrityAfterRepair": [
+        "ok"
+      ],
+      "canonicalEqualAfterReopen": true,
+      "recipientOwnerAfter": 2,
+      "continuedCommandCheckpoints": 30,
+      "restartCounts": [
+        0,
+        10,
+        6
+      ],
+      "integrityAfterContinuedCommands": [
+        [
+          "ok"
+        ],
+        [
+          "ok"
+        ],
+        [
+          "ok"
+        ]
+      ],
+      "pass": true
+    },
+    {
+      "case": "index_corruption",
+      "groupSize": 4,
+      "writeProfile": "exec_ascending",
+      "fullCopyFallback": false,
+      "targetOwnerBefore": 2,
+      "targetPagesBefore": 79,
+      "donorPages": 79,
+      "partialFinalGroup": 3,
+      "groupCount": 20,
+      "requestedGroups": [
+        5
+      ],
+      "modeledTargetSubmissionCount": 1,
+      "modeledFollowerCheckRequestCount": 1,
+      "followerDisagreements": [],
+      "aborted": false,
+      "pagesExpectedToWrite": 4,
+      "pagesWritten": 4,
+      "targetMainBytesAfterInstallerClose": 323584,
+      "integrityAfterRepair": [
+        "ok"
+      ],
+      "canonicalEqualAfterReopen": true,
+      "recipientOwnerAfter": 2,
+      "continuedCommandCheckpoints": 30,
+      "restartCounts": [
+        0,
+        10,
+        6
+      ],
+      "integrityAfterContinuedCommands": [
+        [
+          "ok"
+        ],
+        [
+          "ok"
+        ],
+        [
+          "ok"
+        ]
+      ],
+      "pass": true
+    },
+    {
+      "case": "wrong_free_classification",
+      "groupSize": 4,
+      "writeProfile": "exec_ascending",
+      "misclassifiedActivePage": 11,
+      "fullCopyFallback": false,
+      "targetOwnerBefore": 2,
+      "targetPagesBefore": 79,
+      "donorPages": 79,
+      "partialFinalGroup": 3,
+      "groupCount": 20,
+      "requestedGroups": [
+        9,
+        13
+      ],
+      "modeledTargetSubmissionCount": 1,
+      "modeledFollowerCheckRequestCount": 1,
+      "byteOnlyHashWouldMatch": true,
+      "followerDisagreements": [],
+      "aborted": false,
+      "pagesExpectedToWrite": 8,
+      "pagesWritten": 8,
+      "targetMainBytesAfterInstallerClose": 323584,
+      "integrityAfterRepair": [
+        "ok"
+      ],
+      "canonicalEqualAfterReopen": true,
+      "recipientOwnerAfter": 2,
+      "continuedCommandCheckpoints": 30,
+      "restartCounts": [
+        0,
+        10,
+        6
+      ],
+      "integrityAfterContinuedCommands": [
+        [
+          "ok"
+        ],
+        [
+          "ok"
+        ],
+        [
+          "ok"
+        ]
+      ],
+      "pass": true
+    },
+    {
+      "case": "schema_growth",
+      "groupSize": 4,
+      "writeProfile": "exec_ascending",
+      "fullCopyFallback": false,
+      "targetOwnerBefore": 2,
+      "targetPagesBefore": 79,
+      "donorPages": 283,
+      "partialFinalGroup": 3,
+      "groupCount": 71,
+      "requestedGroups": [
+        1,
+        13,
+        17,
+        21,
+        25,
+        29,
+        33,
+        37,
+        41,
+        45,
+        49,
+        53,
+        57,
+        61,
+        65,
+        69,
+        73,
+        77,
+        81,
+        85,
+        89,
+        93,
+        97,
+        101,
+        105,
+        109,
+        113,
+        117,
+        121,
+        125,
+        129,
+        133,
+        137,
+        141,
+        145,
+        149,
+        153,
+        157,
+        161,
+        165,
+        169,
+        173,
+        177,
+        181,
+        185,
+        189,
+        193,
+        197,
+        201,
+        205,
+        209,
+        213,
+        217,
+        221,
+        225,
+        229,
+        233,
+        237,
+        241,
+        245,
+        249,
+        253,
+        257,
+        261,
+        265,
+        269,
+        273,
+        277,
+        281
+      ],
+      "modeledTargetSubmissionCount": 1,
+      "modeledFollowerCheckRequestCount": 1,
+      "followerDisagreements": [],
+      "aborted": false,
+      "pagesExpectedToWrite": 275,
+      "pagesWritten": 275,
+      "targetMainBytesAfterInstallerClose": 1159168,
+      "integrityAfterRepair": [
+        "ok"
+      ],
+      "canonicalEqualAfterReopen": true,
+      "recipientOwnerAfter": 2,
+      "continuedCommandCheckpoints": 30,
+      "restartCounts": [
+        0,
+        10,
+        6
+      ],
+      "integrityAfterContinuedCommands": [
+        [
+          "ok"
+        ],
+        [
+          "ok"
+        ],
+        [
+          "ok"
+        ]
+      ],
+      "pass": true
+    },
+    {
+      "case": "target_extra_pages",
+      "writeProfile": "exec_ascending",
+      "pass": false,
+      "error": "RuntimeError((11, 'database disk image is malformed', \"INSERT INTO main.sqlite_dbpage(pgno,data,schema) VALUES(2,x'0d000000010feb000feb0000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000\"))"
+    },
+    {
+      "case": "owner_root_change",
+      "writeProfile": "exec_ascending",
+      "pass": false,
+      "error": "RuntimeError((11, 'database disk image is malformed', \"INSERT INTO main.sqlite_dbpage(pgno,data,schema) VALUES(2,x'0d000000010feb000feb0000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000\"))"
+    },
+    {
+      "case": "bad_owner_fallback",
+      "writeProfile": "exec_ascending",
+      "pass": false,
+      "error": "RuntimeError((11, 'malformed database schema (monsterft_local_owner) - invalid rootpage', \"INSERT INTO main.sqlite_dbpage(pgno,data,schema) VALUES(2,x'0d000000010feb000feb0000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000\"))"
+    },
+    {
+      "case": "bad_freelist_fallback",
+      "writeProfile": "exec_ascending",
+      "pass": false,
+      "error": "RuntimeError((11, 'malformed database schema (monsterft_local_owner) - invalid rootpage', \"INSERT INTO main.sqlite_dbpage(pgno,data,schema) VALUES(2,x'0d000000010feb000feb0000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000\"))"
+    },
+    {
+      "case": "bad_schema_fallback",
+      "writeProfile": "exec_ascending",
+      "pass": false,
+      "error": "RuntimeError((11, 'malformed database schema (monsterft_local_owner) - invalid rootpage', \"INSERT INTO main.sqlite_dbpage(pgno,data,schema) VALUES(2,x'0d000000010feb000feb0000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000\"))"
+    },
+    {
+      "case": "bad_header_fallback",
+      "writeProfile": "exec_ascending",
+      "pass": false,
+      "error": "RuntimeError((11, 'malformed database schema (monsterft_local_owner) - invalid rootpage', \"INSERT INTO main.sqlite_dbpage(pgno,data,schema) VALUES(2,x'0d000000010feb000feb0000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000\"))"
+    },
+    {
+      "case": "witness_disagrees",
+      "groupSize": 4,
+      "writeProfile": "exec_ascending",
+      "fullCopyFallback": false,
+      "targetOwnerBefore": 2,
+      "targetPagesBefore": 79,
+      "donorPages": 79,
+      "partialFinalGroup": 3,
+      "groupCount": 20,
+      "requestedGroups": [
+        9
+      ],
+      "modeledTargetSubmissionCount": 1,
+      "modeledFollowerCheckRequestCount": 1,
+      "followerDisagreements": [
+        9
+      ],
+      "aborted": true,
+      "pagesWritten": 0,
+      "pass": true
+    },
+    {
+      "case": "witness_unreadable",
+      "groupSize": 4,
+      "writeProfile": "exec_ascending",
+      "fullCopyFallback": false,
+      "targetOwnerBefore": 2,
+      "targetPagesBefore": 79,
+      "donorPages": 79,
+      "partialFinalGroup": 3,
+      "groupCount": 20,
+      "requestedGroups": [
+        9
+      ],
+      "modeledTargetSubmissionCount": 1,
+      "modeledFollowerCheckRequestCount": 1,
+      "aborted": true,
+      "pagesWritten": 0,
+      "followerReadError": "(11, 'database disk image is malformed')",
+      "pass": true
+    },
+    {
+      "case": "pinned_snapshot",
+      "groupSize": 4,
+      "writeProfile": "exec_ascending",
+      "fullCopyFallback": false,
+      "targetOwnerBefore": 2,
+      "targetPagesBefore": 79,
+      "donorPages": 79,
+      "partialFinalGroup": 3,
+      "groupCount": 20,
+      "requestedGroups": [
+        9
+      ],
+      "modeledTargetSubmissionCount": 1,
+      "modeledFollowerCheckRequestCount": 1,
+      "followerDisagreements": [],
+      "aborted": false,
+      "healthyWritersAdvancedWhilePinned": true,
+      "pagesExpectedToWrite": 4,
+      "pagesWritten": 4,
+      "targetMainBytesAfterInstallerClose": 323584,
+      "integrityAfterRepair": [
+        "ok"
+      ],
+      "canonicalEqualAfterReopen": true,
+      "recipientOwnerAfter": 2,
+      "continuedCommandCheckpoints": 30,
+      "restartCounts": [
+        0,
+        10,
+        6
+      ],
+      "integrityAfterContinuedCommands": [
+        [
+          "ok"
+        ],
+        [
+          "ok"
+        ],
+        [
+          "ok"
+        ]
+      ],
+      "pass": true
+    },
+    {
+      "case": "ordinary_corruption",
+      "groupSize": 4,
+      "writeProfile": "exec_page1_last",
+      "fullCopyFallback": false,
+      "targetOwnerBefore": 2,
+      "targetPagesBefore": 79,
+      "donorPages": 79,
+      "partialFinalGroup": 3,
+      "groupCount": 20,
+      "requestedGroups": [
+        9
+      ],
+      "modeledTargetSubmissionCount": 1,
+      "modeledFollowerCheckRequestCount": 1,
+      "followerDisagreements": [],
+      "aborted": false,
+      "pagesExpectedToWrite": 4,
+      "pagesWritten": 4,
+      "targetMainBytesAfterInstallerClose": 323584,
+      "integrityAfterRepair": [
+        "ok"
+      ],
+      "canonicalEqualAfterReopen": true,
+      "recipientOwnerAfter": 2,
+      "continuedCommandCheckpoints": 30,
+      "restartCounts": [
+        0,
+        10,
+        6
+      ],
+      "integrityAfterContinuedCommands": [
+        [
+          "ok"
+        ],
+        [
+          "ok"
+        ],
+        [
+          "ok"
+        ]
+      ],
+      "pass": true
+    },
+    {
+      "case": "index_corruption",
+      "groupSize": 4,
+      "writeProfile": "exec_page1_last",
+      "fullCopyFallback": false,
+      "targetOwnerBefore": 2,
+      "targetPagesBefore": 79,
+      "donorPages": 79,
+      "partialFinalGroup": 3,
+      "groupCount": 20,
+      "requestedGroups": [
+        5
+      ],
+      "modeledTargetSubmissionCount": 1,
+      "modeledFollowerCheckRequestCount": 1,
+      "followerDisagreements": [],
+      "aborted": false,
+      "pagesExpectedToWrite": 4,
+      "pagesWritten": 4,
+      "targetMainBytesAfterInstallerClose": 323584,
+      "integrityAfterRepair": [
+        "ok"
+      ],
+      "canonicalEqualAfterReopen": true,
+      "recipientOwnerAfter": 2,
+      "continuedCommandCheckpoints": 30,
+      "restartCounts": [
+        0,
+        10,
+        6
+      ],
+      "integrityAfterContinuedCommands": [
+        [
+          "ok"
+        ],
+        [
+          "ok"
+        ],
+        [
+          "ok"
+        ]
+      ],
+      "pass": true
+    },
+    {
+      "case": "wrong_free_classification",
+      "groupSize": 4,
+      "writeProfile": "exec_page1_last",
+      "misclassifiedActivePage": 11,
+      "fullCopyFallback": false,
+      "targetOwnerBefore": 2,
+      "targetPagesBefore": 79,
+      "donorPages": 79,
+      "partialFinalGroup": 3,
+      "groupCount": 20,
+      "requestedGroups": [
+        9,
+        13
+      ],
+      "modeledTargetSubmissionCount": 1,
+      "modeledFollowerCheckRequestCount": 1,
+      "byteOnlyHashWouldMatch": true,
+      "followerDisagreements": [],
+      "aborted": false,
+      "pagesExpectedToWrite": 8,
+      "pagesWritten": 8,
+      "targetMainBytesAfterInstallerClose": 323584,
+      "integrityAfterRepair": [
+        "ok"
+      ],
+      "canonicalEqualAfterReopen": true,
+      "recipientOwnerAfter": 2,
+      "continuedCommandCheckpoints": 30,
+      "restartCounts": [
+        0,
+        10,
+        6
+      ],
+      "integrityAfterContinuedCommands": [
+        [
+          "ok"
+        ],
+        [
+          "ok"
+        ],
+        [
+          "ok"
+        ]
+      ],
+      "pass": true
+    },
+    {
+      "case": "schema_growth",
+      "groupSize": 4,
+      "writeProfile": "exec_page1_last",
+      "fullCopyFallback": false,
+      "targetOwnerBefore": 2,
+      "targetPagesBefore": 79,
+      "donorPages": 283,
+      "partialFinalGroup": 3,
+      "groupCount": 71,
+      "requestedGroups": [
+        1,
+        13,
+        17,
+        21,
+        25,
+        29,
+        33,
+        37,
+        41,
+        45,
+        49,
+        53,
+        57,
+        61,
+        65,
+        69,
+        73,
+        77,
+        81,
+        85,
+        89,
+        93,
+        97,
+        101,
+        105,
+        109,
+        113,
+        117,
+        121,
+        125,
+        129,
+        133,
+        137,
+        141,
+        145,
+        149,
+        153,
+        157,
+        161,
+        165,
+        169,
+        173,
+        177,
+        181,
+        185,
+        189,
+        193,
+        197,
+        201,
+        205,
+        209,
+        213,
+        217,
+        221,
+        225,
+        229,
+        233,
+        237,
+        241,
+        245,
+        249,
+        253,
+        257,
+        261,
+        265,
+        269,
+        273,
+        277,
+        281
+      ],
+      "modeledTargetSubmissionCount": 1,
+      "modeledFollowerCheckRequestCount": 1,
+      "followerDisagreements": [],
+      "aborted": false,
+      "pagesExpectedToWrite": 275,
+      "pagesWritten": 275,
+      "targetMainBytesAfterInstallerClose": 1159168,
+      "integrityAfterRepair": [
+        "ok"
+      ],
+      "canonicalEqualAfterReopen": true,
+      "recipientOwnerAfter": 2,
+      "continuedCommandCheckpoints": 30,
+      "restartCounts": [
+        0,
+        10,
+        6
+      ],
+      "integrityAfterContinuedCommands": [
+        [
+          "ok"
+        ],
+        [
+          "ok"
+        ],
+        [
+          "ok"
+        ]
+      ],
+      "pass": true
+    },
+    {
+      "case": "target_extra_pages",
+      "writeProfile": "exec_page1_last",
+      "pass": false,
+      "error": "RuntimeError((11, 'database disk image is malformed', \"INSERT INTO main.sqlite_dbpage(pgno,data,schema) VALUES(80,NULL,'main')\"))"
+    },
+    {
+      "case": "owner_root_change",
+      "writeProfile": "exec_page1_last",
+      "pass": false,
+      "error": "RuntimeError((11, 'database disk image is malformed', \"INSERT INTO main.sqlite_dbpage(pgno,data,schema) VALUES(80,NULL,'main')\"))"
+    },
+    {
+      "case": "bad_owner_fallback",
+      "writeProfile": "exec_page1_last",
+      "pass": false,
+      "error": "RuntimeError((11, 'malformed database schema (monsterft_local_owner) - invalid rootpage', \"INSERT INTO main.sqlite_dbpage(pgno,data,schema) VALUES(80,NULL,'main')\"))"
+    },
+    {
+      "case": "bad_freelist_fallback",
+      "writeProfile": "exec_page1_last",
+      "pass": false,
+      "error": "RuntimeError((11, 'malformed database schema (monsterft_local_owner) - invalid rootpage', \"INSERT INTO main.sqlite_dbpage(pgno,data,schema) VALUES(80,NULL,'main')\"))"
+    },
+    {
+      "case": "bad_schema_fallback",
+      "writeProfile": "exec_page1_last",
+      "pass": false,
+      "error": "RuntimeError((11, 'malformed database schema (monsterft_local_owner) - invalid rootpage', \"INSERT INTO main.sqlite_dbpage(pgno,data,schema) VALUES(80,NULL,'main')\"))"
+    },
+    {
+      "case": "bad_header_fallback",
+      "writeProfile": "exec_page1_last",
+      "pass": false,
+      "error": "RuntimeError((11, 'malformed database schema (monsterft_local_owner) - invalid rootpage', \"INSERT INTO main.sqlite_dbpage(pgno,data,schema) VALUES(80,NULL,'main')\"))"
+    },
+    {
+      "case": "witness_disagrees",
+      "groupSize": 4,
+      "writeProfile": "exec_page1_last",
+      "fullCopyFallback": false,
+      "targetOwnerBefore": 2,
+      "targetPagesBefore": 79,
+      "donorPages": 79,
+      "partialFinalGroup": 3,
+      "groupCount": 20,
+      "requestedGroups": [
+        9
+      ],
+      "modeledTargetSubmissionCount": 1,
+      "modeledFollowerCheckRequestCount": 1,
+      "followerDisagreements": [
+        9
+      ],
+      "aborted": true,
+      "pagesWritten": 0,
+      "pass": true
+    },
+    {
+      "case": "witness_unreadable",
+      "groupSize": 4,
+      "writeProfile": "exec_page1_last",
+      "fullCopyFallback": false,
+      "targetOwnerBefore": 2,
+      "targetPagesBefore": 79,
+      "donorPages": 79,
+      "partialFinalGroup": 3,
+      "groupCount": 20,
+      "requestedGroups": [
+        9
+      ],
+      "modeledTargetSubmissionCount": 1,
+      "modeledFollowerCheckRequestCount": 1,
+      "aborted": true,
+      "pagesWritten": 0,
+      "followerReadError": "(11, 'database disk image is malformed')",
+      "pass": true
+    },
+    {
+      "case": "pinned_snapshot",
+      "groupSize": 4,
+      "writeProfile": "exec_page1_last",
+      "fullCopyFallback": false,
+      "targetOwnerBefore": 2,
+      "targetPagesBefore": 79,
+      "donorPages": 79,
+      "partialFinalGroup": 3,
+      "groupCount": 20,
+      "requestedGroups": [
+        9
+      ],
+      "modeledTargetSubmissionCount": 1,
+      "modeledFollowerCheckRequestCount": 1,
+      "followerDisagreements": [],
+      "aborted": false,
+      "healthyWritersAdvancedWhilePinned": true,
+      "pagesExpectedToWrite": 4,
+      "pagesWritten": 4,
+      "targetMainBytesAfterInstallerClose": 323584,
+      "integrityAfterRepair": [
+        "ok"
+      ],
+      "canonicalEqualAfterReopen": true,
+      "recipientOwnerAfter": 2,
+      "continuedCommandCheckpoints": 30,
+      "restartCounts": [
+        0,
+        10,
+        6
+      ],
+      "integrityAfterContinuedCommands": [
+        [
+          "ok"
+        ],
+        [
+          "ok"
+        ],
+        [
+          "ok"
+        ]
+      ],
+      "pass": true
+    },
+    {
+      "case": "ordinary_corruption",
+      "groupSize": 4,
+      "writeProfile": "prepared_writable_ascending",
+      "fullCopyFallback": false,
+      "targetOwnerBefore": 2,
+      "targetPagesBefore": 79,
+      "donorPages": 79,
+      "partialFinalGroup": 3,
+      "groupCount": 20,
+      "requestedGroups": [
+        9
+      ],
+      "modeledTargetSubmissionCount": 1,
+      "modeledFollowerCheckRequestCount": 1,
+      "followerDisagreements": [],
+      "aborted": false,
+      "pagesExpectedToWrite": 4,
+      "pagesWritten": 4,
+      "targetMainBytesAfterInstallerClose": 323584,
+      "integrityAfterRepair": [
+        "ok"
+      ],
+      "canonicalEqualAfterReopen": true,
+      "recipientOwnerAfter": 2,
+      "continuedCommandCheckpoints": 30,
+      "restartCounts": [
+        0,
+        10,
+        6
+      ],
+      "integrityAfterContinuedCommands": [
+        [
+          "ok"
+        ],
+        [
+          "ok"
+        ],
+        [
+          "ok"
+        ]
+      ],
+      "pass": true
+    },
+    {
+      "case": "index_corruption",
+      "groupSize": 4,
+      "writeProfile": "prepared_writable_ascending",
+      "fullCopyFallback": false,
+      "targetOwnerBefore": 2,
+      "targetPagesBefore": 79,
+      "donorPages": 79,
+      "partialFinalGroup": 3,
+      "groupCount": 20,
+      "requestedGroups": [
+        5
+      ],
+      "modeledTargetSubmissionCount": 1,
+      "modeledFollowerCheckRequestCount": 1,
+      "followerDisagreements": [],
+      "aborted": false,
+      "pagesExpectedToWrite": 4,
+      "pagesWritten": 4,
+      "targetMainBytesAfterInstallerClose": 323584,
+      "integrityAfterRepair": [
+        "ok"
+      ],
+      "canonicalEqualAfterReopen": true,
+      "recipientOwnerAfter": 2,
+      "continuedCommandCheckpoints": 30,
+      "restartCounts": [
+        0,
+        10,
+        6
+      ],
+      "integrityAfterContinuedCommands": [
+        [
+          "ok"
+        ],
+        [
+          "ok"
+        ],
+        [
+          "ok"
+        ]
+      ],
+      "pass": true
+    },
+    {
+      "case": "wrong_free_classification",
+      "groupSize": 4,
+      "writeProfile": "prepared_writable_ascending",
+      "misclassifiedActivePage": 11,
+      "fullCopyFallback": false,
+      "targetOwnerBefore": 2,
+      "targetPagesBefore": 79,
+      "donorPages": 79,
+      "partialFinalGroup": 3,
+      "groupCount": 20,
+      "requestedGroups": [
+        9,
+        13
+      ],
+      "modeledTargetSubmissionCount": 1,
+      "modeledFollowerCheckRequestCount": 1,
+      "byteOnlyHashWouldMatch": true,
+      "followerDisagreements": [],
+      "aborted": false,
+      "pagesExpectedToWrite": 8,
+      "pagesWritten": 8,
+      "targetMainBytesAfterInstallerClose": 323584,
+      "integrityAfterRepair": [
+        "ok"
+      ],
+      "canonicalEqualAfterReopen": true,
+      "recipientOwnerAfter": 2,
+      "continuedCommandCheckpoints": 30,
+      "restartCounts": [
+        0,
+        10,
+        6
+      ],
+      "integrityAfterContinuedCommands": [
+        [
+          "ok"
+        ],
+        [
+          "ok"
+        ],
+        [
+          "ok"
+        ]
+      ],
+      "pass": true
+    },
+    {
+      "case": "schema_growth",
+      "groupSize": 4,
+      "writeProfile": "prepared_writable_ascending",
+      "fullCopyFallback": false,
+      "targetOwnerBefore": 2,
+      "targetPagesBefore": 79,
+      "donorPages": 283,
+      "partialFinalGroup": 3,
+      "groupCount": 71,
+      "requestedGroups": [
+        1,
+        13,
+        17,
+        21,
+        25,
+        29,
+        33,
+        37,
+        41,
+        45,
+        49,
+        53,
+        57,
+        61,
+        65,
+        69,
+        73,
+        77,
+        81,
+        85,
+        89,
+        93,
+        97,
+        101,
+        105,
+        109,
+        113,
+        117,
+        121,
+        125,
+        129,
+        133,
+        137,
+        141,
+        145,
+        149,
+        153,
+        157,
+        161,
+        165,
+        169,
+        173,
+        177,
+        181,
+        185,
+        189,
+        193,
+        197,
+        201,
+        205,
+        209,
+        213,
+        217,
+        221,
+        225,
+        229,
+        233,
+        237,
+        241,
+        245,
+        249,
+        253,
+        257,
+        261,
+        265,
+        269,
+        273,
+        277,
+        281
+      ],
+      "modeledTargetSubmissionCount": 1,
+      "modeledFollowerCheckRequestCount": 1,
+      "followerDisagreements": [],
+      "aborted": false,
+      "pagesExpectedToWrite": 275,
+      "pagesWritten": 275,
+      "targetMainBytesAfterInstallerClose": 1159168,
+      "integrityAfterRepair": [
+        "ok"
+      ],
+      "canonicalEqualAfterReopen": true,
+      "recipientOwnerAfter": 2,
+      "continuedCommandCheckpoints": 30,
+      "restartCounts": [
+        0,
+        10,
+        6
+      ],
+      "integrityAfterContinuedCommands": [
+        [
+          "ok"
+        ],
+        [
+          "ok"
+        ],
+        [
+          "ok"
+        ]
+      ],
+      "pass": true
+    },
+    {
+      "case": "target_extra_pages",
+      "writeProfile": "prepared_writable_ascending",
+      "pass": false,
+      "error": "RuntimeError(('write page', 2, 11, 'database disk image is malformed'))"
+    },
+    {
+      "case": "owner_root_change",
+      "writeProfile": "prepared_writable_ascending",
+      "pass": false,
+      "error": "RuntimeError(('write page', 2, 11, 'database disk image is malformed'))"
+    },
+    {
+      "case": "bad_owner_fallback",
+      "groupSize": 4,
+      "writeProfile": "prepared_writable_ascending",
+      "fullCopyFallback": true,
+      "targetReadError": "(11, 'database disk image is malformed')",
+      "donorPages": 79,
+      "partialFinalGroup": 3,
+      "groupCount": 20,
+      "requestedGroups": [
+        1,
+        5,
+        9,
+        13,
+        17,
+        21,
+        25,
+        29,
+        33,
+        37,
+        41,
+        45,
+        49,
+        53,
+        57,
+        61,
+        65,
+        69,
+        73,
+        77
+      ],
+      "modeledTargetSubmissionCount": 1,
+      "modeledFollowerCheckRequestCount": 1,
+      "followerDisagreements": [],
+      "aborted": false,
+      "pagesExpectedToWrite": 79,
+      "pagesWritten": 79,
+      "targetMainBytesAfterInstallerClose": 323584,
+      "integrityAfterRepair": [
+        "ok"
+      ],
+      "canonicalEqualAfterReopen": true,
+      "recipientOwnerAfter": 2,
+      "continuedCommandCheckpoints": 30,
+      "restartCounts": [
+        0,
+        10,
+        6
+      ],
+      "integrityAfterContinuedCommands": [
+        [
+          "ok"
+        ],
+        [
+          "ok"
+        ],
+        [
+          "ok"
+        ]
+      ],
+      "pass": true
+    },
+    {
+      "case": "bad_freelist_fallback",
+      "groupSize": 4,
+      "writeProfile": "prepared_writable_ascending",
+      "fullCopyFallback": true,
+      "targetReadError": "",
+      "donorPages": 79,
+      "partialFinalGroup": 3,
+      "groupCount": 20,
+      "requestedGroups": [
+        1,
+        5,
+        9,
+        13,
+        17,
+        21,
+        25,
+        29,
+        33,
+        37,
+        41,
+        45,
+        49,
+        53,
+        57,
+        61,
+        65,
+        69,
+        73,
+        77
+      ],
+      "modeledTargetSubmissionCount": 1,
+      "modeledFollowerCheckRequestCount": 1,
+      "followerDisagreements": [],
+      "aborted": false,
+      "pagesExpectedToWrite": 79,
+      "pagesWritten": 79,
+      "targetMainBytesAfterInstallerClose": 323584,
+      "integrityAfterRepair": [
+        "ok"
+      ],
+      "canonicalEqualAfterReopen": true,
+      "recipientOwnerAfter": 2,
+      "continuedCommandCheckpoints": 30,
+      "restartCounts": [
+        0,
+        10,
+        6
+      ],
+      "integrityAfterContinuedCommands": [
+        [
+          "ok"
+        ],
+        [
+          "ok"
+        ],
+        [
+          "ok"
+        ]
+      ],
+      "pass": true
+    },
+    {
+      "case": "bad_schema_fallback",
+      "groupSize": 4,
+      "writeProfile": "prepared_writable_ascending",
+      "fullCopyFallback": true,
+      "targetReadError": "(11, 'database disk image is malformed', 'SELECT pgno,data FROM sqlite_dbpage ORDER BY pgno')",
+      "donorPages": 79,
+      "partialFinalGroup": 3,
+      "groupCount": 20,
+      "requestedGroups": [
+        1,
+        5,
+        9,
+        13,
+        17,
+        21,
+        25,
+        29,
+        33,
+        37,
+        41,
+        45,
+        49,
+        53,
+        57,
+        61,
+        65,
+        69,
+        73,
+        77
+      ],
+      "modeledTargetSubmissionCount": 1,
+      "modeledFollowerCheckRequestCount": 1,
+      "followerDisagreements": [],
+      "aborted": false,
+      "pagesExpectedToWrite": 79,
+      "pagesWritten": 79,
+      "targetMainBytesAfterInstallerClose": 323584,
+      "integrityAfterRepair": [
+        "ok"
+      ],
+      "canonicalEqualAfterReopen": true,
+      "recipientOwnerAfter": 2,
+      "continuedCommandCheckpoints": 30,
+      "restartCounts": [
+        0,
+        10,
+        6
+      ],
+      "integrityAfterContinuedCommands": [
+        [
+          "ok"
+        ],
+        [
+          "ok"
+        ],
+        [
+          "ok"
+        ]
+      ],
+      "pass": true
+    },
+    {
+      "case": "bad_header_fallback",
+      "groupSize": 4,
+      "writeProfile": "prepared_writable_ascending",
+      "fullCopyFallback": true,
+      "targetReadError": "(26, 'file is not a database', 'SELECT pgno,data FROM sqlite_dbpage ORDER BY pgno')",
+      "donorPages": 79,
+      "partialFinalGroup": 3,
+      "groupCount": 20,
+      "requestedGroups": [
+        1,
+        5,
+        9,
+        13,
+        17,
+        21,
+        25,
+        29,
+        33,
+        37,
+        41,
+        45,
+        49,
+        53,
+        57,
+        61,
+        65,
+        69,
+        73,
+        77
+      ],
+      "modeledTargetSubmissionCount": 1,
+      "modeledFollowerCheckRequestCount": 1,
+      "followerDisagreements": [],
+      "aborted": false,
+      "pagesExpectedToWrite": 79,
+      "pagesWritten": 79,
+      "targetMainBytesAfterInstallerClose": 323584,
+      "integrityAfterRepair": [
+        "ok"
+      ],
+      "canonicalEqualAfterReopen": true,
+      "recipientOwnerAfter": 2,
+      "continuedCommandCheckpoints": 30,
+      "restartCounts": [
+        0,
+        10,
+        6
+      ],
+      "integrityAfterContinuedCommands": [
+        [
+          "ok"
+        ],
+        [
+          "ok"
+        ],
+        [
+          "ok"
+        ]
+      ],
+      "pass": true
+    },
+    {
+      "case": "witness_disagrees",
+      "groupSize": 4,
+      "writeProfile": "prepared_writable_ascending",
+      "fullCopyFallback": false,
+      "targetOwnerBefore": 2,
+      "targetPagesBefore": 79,
+      "donorPages": 79,
+      "partialFinalGroup": 3,
+      "groupCount": 20,
+      "requestedGroups": [
+        9
+      ],
+      "modeledTargetSubmissionCount": 1,
+      "modeledFollowerCheckRequestCount": 1,
+      "followerDisagreements": [
+        9
+      ],
+      "aborted": true,
+      "pagesWritten": 0,
+      "pass": true
+    },
+    {
+      "case": "witness_unreadable",
+      "groupSize": 4,
+      "writeProfile": "prepared_writable_ascending",
+      "fullCopyFallback": false,
+      "targetOwnerBefore": 2,
+      "targetPagesBefore": 79,
+      "donorPages": 79,
+      "partialFinalGroup": 3,
+      "groupCount": 20,
+      "requestedGroups": [
+        9
+      ],
+      "modeledTargetSubmissionCount": 1,
+      "modeledFollowerCheckRequestCount": 1,
+      "aborted": true,
+      "pagesWritten": 0,
+      "followerReadError": "(11, 'database disk image is malformed')",
+      "pass": true
+    },
+    {
+      "case": "pinned_snapshot",
+      "groupSize": 4,
+      "writeProfile": "prepared_writable_ascending",
+      "fullCopyFallback": false,
+      "targetOwnerBefore": 2,
+      "targetPagesBefore": 79,
+      "donorPages": 79,
+      "partialFinalGroup": 3,
+      "groupCount": 20,
+      "requestedGroups": [
+        9
+      ],
+      "modeledTargetSubmissionCount": 1,
+      "modeledFollowerCheckRequestCount": 1,
+      "followerDisagreements": [],
+      "aborted": false,
+      "healthyWritersAdvancedWhilePinned": true,
+      "pagesExpectedToWrite": 4,
+      "pagesWritten": 4,
+      "targetMainBytesAfterInstallerClose": 323584,
+      "integrityAfterRepair": [
+        "ok"
+      ],
+      "canonicalEqualAfterReopen": true,
+      "recipientOwnerAfter": 2,
+      "continuedCommandCheckpoints": 30,
+      "restartCounts": [
+        0,
+        10,
+        6
+      ],
+      "integrityAfterContinuedCommands": [
+        [
+          "ok"
+        ],
+        [
+          "ok"
+        ],
+        [
+          "ok"
+        ]
+      ],
+      "pass": true
+    },
+    {
+      "case": "ordinary_corruption",
+      "groupSize": 4,
+      "writeProfile": "prepared_aligncookie_ascending",
+      "fullCopyFallback": false,
+      "targetOwnerBefore": 2,
+      "targetPagesBefore": 79,
+      "donorPages": 79,
+      "partialFinalGroup": 3,
+      "groupCount": 20,
+      "requestedGroups": [
+        9
+      ],
+      "modeledTargetSubmissionCount": 1,
+      "modeledFollowerCheckRequestCount": 1,
+      "followerDisagreements": [],
+      "aborted": false,
+      "pagesExpectedToWrite": 4,
+      "pagesWritten": 4,
+      "targetMainBytesAfterInstallerClose": 323584,
+      "integrityAfterRepair": [
+        "ok"
+      ],
+      "canonicalEqualAfterReopen": true,
+      "recipientOwnerAfter": 2,
+      "continuedCommandCheckpoints": 30,
+      "restartCounts": [
+        0,
+        10,
+        6
+      ],
+      "integrityAfterContinuedCommands": [
+        [
+          "ok"
+        ],
+        [
+          "ok"
+        ],
+        [
+          "ok"
+        ]
+      ],
+      "pass": true
+    },
+    {
+      "case": "index_corruption",
+      "groupSize": 4,
+      "writeProfile": "prepared_aligncookie_ascending",
+      "fullCopyFallback": false,
+      "targetOwnerBefore": 2,
+      "targetPagesBefore": 79,
+      "donorPages": 79,
+      "partialFinalGroup": 3,
+      "groupCount": 20,
+      "requestedGroups": [
+        5
+      ],
+      "modeledTargetSubmissionCount": 1,
+      "modeledFollowerCheckRequestCount": 1,
+      "followerDisagreements": [],
+      "aborted": false,
+      "pagesExpectedToWrite": 4,
+      "pagesWritten": 4,
+      "targetMainBytesAfterInstallerClose": 323584,
+      "integrityAfterRepair": [
+        "ok"
+      ],
+      "canonicalEqualAfterReopen": true,
+      "recipientOwnerAfter": 2,
+      "continuedCommandCheckpoints": 30,
+      "restartCounts": [
+        0,
+        10,
+        6
+      ],
+      "integrityAfterContinuedCommands": [
+        [
+          "ok"
+        ],
+        [
+          "ok"
+        ],
+        [
+          "ok"
+        ]
+      ],
+      "pass": true
+    },
+    {
+      "case": "wrong_free_classification",
+      "groupSize": 4,
+      "writeProfile": "prepared_aligncookie_ascending",
+      "misclassifiedActivePage": 11,
+      "fullCopyFallback": false,
+      "targetOwnerBefore": 2,
+      "targetPagesBefore": 79,
+      "donorPages": 79,
+      "partialFinalGroup": 3,
+      "groupCount": 20,
+      "requestedGroups": [
+        9,
+        13
+      ],
+      "modeledTargetSubmissionCount": 1,
+      "modeledFollowerCheckRequestCount": 1,
+      "byteOnlyHashWouldMatch": true,
+      "followerDisagreements": [],
+      "aborted": false,
+      "pagesExpectedToWrite": 8,
+      "pagesWritten": 8,
+      "targetMainBytesAfterInstallerClose": 323584,
+      "integrityAfterRepair": [
+        "ok"
+      ],
+      "canonicalEqualAfterReopen": true,
+      "recipientOwnerAfter": 2,
+      "continuedCommandCheckpoints": 30,
+      "restartCounts": [
+        0,
+        10,
+        6
+      ],
+      "integrityAfterContinuedCommands": [
+        [
+          "ok"
+        ],
+        [
+          "ok"
+        ],
+        [
+          "ok"
+        ]
+      ],
+      "pass": true
+    },
+    {
+      "case": "schema_growth",
+      "groupSize": 4,
+      "writeProfile": "prepared_aligncookie_ascending",
+      "fullCopyFallback": false,
+      "targetOwnerBefore": 2,
+      "targetPagesBefore": 79,
+      "donorPages": 283,
+      "partialFinalGroup": 3,
+      "groupCount": 71,
+      "requestedGroups": [
+        1,
+        13,
+        17,
+        21,
+        25,
+        29,
+        33,
+        37,
+        41,
+        45,
+        49,
+        53,
+        57,
+        61,
+        65,
+        69,
+        73,
+        77,
+        81,
+        85,
+        89,
+        93,
+        97,
+        101,
+        105,
+        109,
+        113,
+        117,
+        121,
+        125,
+        129,
+        133,
+        137,
+        141,
+        145,
+        149,
+        153,
+        157,
+        161,
+        165,
+        169,
+        173,
+        177,
+        181,
+        185,
+        189,
+        193,
+        197,
+        201,
+        205,
+        209,
+        213,
+        217,
+        221,
+        225,
+        229,
+        233,
+        237,
+        241,
+        245,
+        249,
+        253,
+        257,
+        261,
+        265,
+        269,
+        273,
+        277,
+        281
+      ],
+      "modeledTargetSubmissionCount": 1,
+      "modeledFollowerCheckRequestCount": 1,
+      "followerDisagreements": [],
+      "aborted": false,
+      "pagesExpectedToWrite": 275,
+      "pagesWritten": 275,
+      "targetMainBytesAfterInstallerClose": 1159168,
+      "integrityAfterRepair": [
+        "ok"
+      ],
+      "canonicalEqualAfterReopen": true,
+      "recipientOwnerAfter": 2,
+      "continuedCommandCheckpoints": 30,
+      "restartCounts": [
+        0,
+        10,
+        6
+      ],
+      "integrityAfterContinuedCommands": [
+        [
+          "ok"
+        ],
+        [
+          "ok"
+        ],
+        [
+          "ok"
+        ]
+      ],
+      "pass": true
+    },
+    {
+      "case": "target_extra_pages",
+      "groupSize": 4,
+      "writeProfile": "prepared_aligncookie_ascending",
+      "fullCopyFallback": false,
+      "targetOwnerBefore": 2,
+      "targetPagesBefore": 283,
+      "donorPages": 79,
+      "partialFinalGroup": 3,
+      "groupCount": 20,
+      "requestedGroups": [
+        1,
+        13,
+        17,
+        21,
+        25,
+        29,
+        33,
+        37,
+        41,
+        45,
+        49,
+        53,
+        57,
+        61,
+        65,
+        69,
+        73,
+        77
+      ],
+      "modeledTargetSubmissionCount": 1,
+      "modeledFollowerCheckRequestCount": 1,
+      "followerDisagreements": [],
+      "aborted": false,
+      "pagesExpectedToWrite": 71,
+      "pagesWritten": 71,
+      "targetMainBytesAfterInstallerClose": 323584,
+      "integrityAfterRepair": [
+        "ok"
+      ],
+      "canonicalEqualAfterReopen": true,
+      "recipientOwnerAfter": 2,
+      "continuedCommandCheckpoints": 30,
+      "restartCounts": [
+        0,
+        10,
+        6
+      ],
+      "integrityAfterContinuedCommands": [
+        [
+          "ok"
+        ],
+        [
+          "ok"
+        ],
+        [
+          "ok"
+        ]
+      ],
+      "pass": true
+    },
+    {
+      "case": "owner_root_change",
+      "groupSize": 4,
+      "writeProfile": "prepared_aligncookie_ascending",
+      "fullCopyFallback": false,
+      "targetOwnerBefore": 3,
+      "targetPagesBefore": 80,
+      "donorPages": 79,
+      "partialFinalGroup": 3,
+      "groupCount": 20,
+      "requestedGroups": [
+        1,
+        5,
+        9,
+        13,
+        77
+      ],
+      "modeledTargetSubmissionCount": 1,
+      "modeledFollowerCheckRequestCount": 1,
+      "followerDisagreements": [],
+      "aborted": false,
+      "pagesExpectedToWrite": 19,
+      "pagesWritten": 19,
+      "targetMainBytesAfterInstallerClose": 323584,
+      "integrityAfterRepair": [
+        "ok"
+      ],
+      "canonicalEqualAfterReopen": true,
+      "recipientOwnerAfter": 2,
+      "continuedCommandCheckpoints": 30,
+      "restartCounts": [
+        0,
+        10,
+        6
+      ],
+      "integrityAfterContinuedCommands": [
+        [
+          "ok"
+        ],
+        [
+          "ok"
+        ],
+        [
+          "ok"
+        ]
+      ],
+      "pass": true
+    },
+    {
+      "case": "bad_owner_fallback",
+      "groupSize": 4,
+      "writeProfile": "prepared_aligncookie_ascending",
+      "fullCopyFallback": true,
+      "targetReadError": "(11, 'database disk image is malformed')",
+      "donorPages": 79,
+      "partialFinalGroup": 3,
+      "groupCount": 20,
+      "requestedGroups": [
+        1,
+        5,
+        9,
+        13,
+        17,
+        21,
+        25,
+        29,
+        33,
+        37,
+        41,
+        45,
+        49,
+        53,
+        57,
+        61,
+        65,
+        69,
+        73,
+        77
+      ],
+      "modeledTargetSubmissionCount": 1,
+      "modeledFollowerCheckRequestCount": 1,
+      "followerDisagreements": [],
+      "aborted": false,
+      "pagesExpectedToWrite": 79,
+      "pagesWritten": 79,
+      "targetMainBytesAfterInstallerClose": 323584,
+      "integrityAfterRepair": [
+        "ok"
+      ],
+      "canonicalEqualAfterReopen": true,
+      "recipientOwnerAfter": 2,
+      "continuedCommandCheckpoints": 30,
+      "restartCounts": [
+        0,
+        10,
+        6
+      ],
+      "integrityAfterContinuedCommands": [
+        [
+          "ok"
+        ],
+        [
+          "ok"
+        ],
+        [
+          "ok"
+        ]
+      ],
+      "pass": true
+    },
+    {
+      "case": "bad_freelist_fallback",
+      "groupSize": 4,
+      "writeProfile": "prepared_aligncookie_ascending",
+      "fullCopyFallback": true,
+      "targetReadError": "",
+      "donorPages": 79,
+      "partialFinalGroup": 3,
+      "groupCount": 20,
+      "requestedGroups": [
+        1,
+        5,
+        9,
+        13,
+        17,
+        21,
+        25,
+        29,
+        33,
+        37,
+        41,
+        45,
+        49,
+        53,
+        57,
+        61,
+        65,
+        69,
+        73,
+        77
+      ],
+      "modeledTargetSubmissionCount": 1,
+      "modeledFollowerCheckRequestCount": 1,
+      "followerDisagreements": [],
+      "aborted": false,
+      "pagesExpectedToWrite": 79,
+      "pagesWritten": 79,
+      "targetMainBytesAfterInstallerClose": 323584,
+      "integrityAfterRepair": [
+        "ok"
+      ],
+      "canonicalEqualAfterReopen": true,
+      "recipientOwnerAfter": 2,
+      "continuedCommandCheckpoints": 30,
+      "restartCounts": [
+        0,
+        10,
+        6
+      ],
+      "integrityAfterContinuedCommands": [
+        [
+          "ok"
+        ],
+        [
+          "ok"
+        ],
+        [
+          "ok"
+        ]
+      ],
+      "pass": true
+    },
+    {
+      "case": "bad_schema_fallback",
+      "groupSize": 4,
+      "writeProfile": "prepared_aligncookie_ascending",
+      "fullCopyFallback": true,
+      "targetReadError": "(11, 'database disk image is malformed', 'SELECT pgno,data FROM sqlite_dbpage ORDER BY pgno')",
+      "donorPages": 79,
+      "partialFinalGroup": 3,
+      "groupCount": 20,
+      "requestedGroups": [
+        1,
+        5,
+        9,
+        13,
+        17,
+        21,
+        25,
+        29,
+        33,
+        37,
+        41,
+        45,
+        49,
+        53,
+        57,
+        61,
+        65,
+        69,
+        73,
+        77
+      ],
+      "modeledTargetSubmissionCount": 1,
+      "modeledFollowerCheckRequestCount": 1,
+      "followerDisagreements": [],
+      "aborted": false,
+      "pagesExpectedToWrite": 79,
+      "pagesWritten": 79,
+      "targetMainBytesAfterInstallerClose": 323584,
+      "integrityAfterRepair": [
+        "ok"
+      ],
+      "canonicalEqualAfterReopen": true,
+      "recipientOwnerAfter": 2,
+      "continuedCommandCheckpoints": 30,
+      "restartCounts": [
+        0,
+        10,
+        6
+      ],
+      "integrityAfterContinuedCommands": [
+        [
+          "ok"
+        ],
+        [
+          "ok"
+        ],
+        [
+          "ok"
+        ]
+      ],
+      "pass": true
+    },
+    {
+      "case": "bad_header_fallback",
+      "groupSize": 4,
+      "writeProfile": "prepared_aligncookie_ascending",
+      "fullCopyFallback": true,
+      "targetReadError": "(26, 'file is not a database', 'SELECT pgno,data FROM sqlite_dbpage ORDER BY pgno')",
+      "donorPages": 79,
+      "partialFinalGroup": 3,
+      "groupCount": 20,
+      "requestedGroups": [
+        1,
+        5,
+        9,
+        13,
+        17,
+        21,
+        25,
+        29,
+        33,
+        37,
+        41,
+        45,
+        49,
+        53,
+        57,
+        61,
+        65,
+        69,
+        73,
+        77
+      ],
+      "modeledTargetSubmissionCount": 1,
+      "modeledFollowerCheckRequestCount": 1,
+      "followerDisagreements": [],
+      "aborted": false,
+      "pagesExpectedToWrite": 79,
+      "pagesWritten": 79,
+      "targetMainBytesAfterInstallerClose": 323584,
+      "integrityAfterRepair": [
+        "ok"
+      ],
+      "canonicalEqualAfterReopen": true,
+      "recipientOwnerAfter": 2,
+      "continuedCommandCheckpoints": 30,
+      "restartCounts": [
+        0,
+        10,
+        6
+      ],
+      "integrityAfterContinuedCommands": [
+        [
+          "ok"
+        ],
+        [
+          "ok"
+        ],
+        [
+          "ok"
+        ]
+      ],
+      "pass": true
+    },
+    {
+      "case": "witness_disagrees",
+      "groupSize": 4,
+      "writeProfile": "prepared_aligncookie_ascending",
+      "fullCopyFallback": false,
+      "targetOwnerBefore": 2,
+      "targetPagesBefore": 79,
+      "donorPages": 79,
+      "partialFinalGroup": 3,
+      "groupCount": 20,
+      "requestedGroups": [
+        9
+      ],
+      "modeledTargetSubmissionCount": 1,
+      "modeledFollowerCheckRequestCount": 1,
+      "followerDisagreements": [
+        9
+      ],
+      "aborted": true,
+      "pagesWritten": 0,
+      "pass": true
+    },
+    {
+      "case": "witness_unreadable",
+      "groupSize": 4,
+      "writeProfile": "prepared_aligncookie_ascending",
+      "fullCopyFallback": false,
+      "targetOwnerBefore": 2,
+      "targetPagesBefore": 79,
+      "donorPages": 79,
+      "partialFinalGroup": 3,
+      "groupCount": 20,
+      "requestedGroups": [
+        9
+      ],
+      "modeledTargetSubmissionCount": 1,
+      "modeledFollowerCheckRequestCount": 1,
+      "aborted": true,
+      "pagesWritten": 0,
+      "followerReadError": "(11, 'database disk image is malformed')",
+      "pass": true
+    },
+    {
+      "case": "pinned_snapshot",
+      "groupSize": 4,
+      "writeProfile": "prepared_aligncookie_ascending",
+      "fullCopyFallback": false,
+      "targetOwnerBefore": 2,
+      "targetPagesBefore": 79,
+      "donorPages": 79,
+      "partialFinalGroup": 3,
+      "groupCount": 20,
+      "requestedGroups": [
+        9
+      ],
+      "modeledTargetSubmissionCount": 1,
+      "modeledFollowerCheckRequestCount": 1,
+      "followerDisagreements": [],
+      "aborted": false,
+      "healthyWritersAdvancedWhilePinned": true,
+      "pagesExpectedToWrite": 4,
+      "pagesWritten": 4,
+      "targetMainBytesAfterInstallerClose": 323584,
+      "integrityAfterRepair": [
+        "ok"
+      ],
+      "canonicalEqualAfterReopen": true,
+      "recipientOwnerAfter": 2,
+      "continuedCommandCheckpoints": 30,
+      "restartCounts": [
+        0,
+        10,
+        6
+      ],
+      "integrityAfterContinuedCommands": [
+        [
+          "ok"
+        ],
+        [
+          "ok"
+        ],
+        [
+          "ok"
+        ]
+      ],
+      "pass": true
+    },
+    {
+      "case": "ordinary_corruption",
+      "groupSize": 4,
+      "writeProfile": "attached_ascending",
+      "fullCopyFallback": false,
+      "targetOwnerBefore": 2,
+      "targetPagesBefore": 79,
+      "donorPages": 79,
+      "partialFinalGroup": 3,
+      "groupCount": 20,
+      "requestedGroups": [
+        9
+      ],
+      "modeledTargetSubmissionCount": 1,
+      "modeledFollowerCheckRequestCount": 1,
+      "followerDisagreements": [],
+      "aborted": false,
+      "pagesExpectedToWrite": 4,
+      "pagesWritten": 4,
+      "targetMainBytesAfterInstallerClose": 323584,
+      "integrityAfterRepair": [
+        "ok"
+      ],
+      "canonicalEqualAfterReopen": true,
+      "recipientOwnerAfter": 2,
+      "continuedCommandCheckpoints": 30,
+      "restartCounts": [
+        0,
+        10,
+        6
+      ],
+      "integrityAfterContinuedCommands": [
+        [
+          "ok"
+        ],
+        [
+          "ok"
+        ],
+        [
+          "ok"
+        ]
+      ],
+      "pass": true
+    },
+    {
+      "case": "index_corruption",
+      "groupSize": 4,
+      "writeProfile": "attached_ascending",
+      "fullCopyFallback": false,
+      "targetOwnerBefore": 2,
+      "targetPagesBefore": 79,
+      "donorPages": 79,
+      "partialFinalGroup": 3,
+      "groupCount": 20,
+      "requestedGroups": [
+        5
+      ],
+      "modeledTargetSubmissionCount": 1,
+      "modeledFollowerCheckRequestCount": 1,
+      "followerDisagreements": [],
+      "aborted": false,
+      "pagesExpectedToWrite": 4,
+      "pagesWritten": 4,
+      "targetMainBytesAfterInstallerClose": 323584,
+      "integrityAfterRepair": [
+        "ok"
+      ],
+      "canonicalEqualAfterReopen": true,
+      "recipientOwnerAfter": 2,
+      "continuedCommandCheckpoints": 30,
+      "restartCounts": [
+        0,
+        10,
+        6
+      ],
+      "integrityAfterContinuedCommands": [
+        [
+          "ok"
+        ],
+        [
+          "ok"
+        ],
+        [
+          "ok"
+        ]
+      ],
+      "pass": true
+    },
+    {
+      "case": "wrong_free_classification",
+      "groupSize": 4,
+      "writeProfile": "attached_ascending",
+      "misclassifiedActivePage": 11,
+      "fullCopyFallback": false,
+      "targetOwnerBefore": 2,
+      "targetPagesBefore": 79,
+      "donorPages": 79,
+      "partialFinalGroup": 3,
+      "groupCount": 20,
+      "requestedGroups": [
+        9,
+        13
+      ],
+      "modeledTargetSubmissionCount": 1,
+      "modeledFollowerCheckRequestCount": 1,
+      "byteOnlyHashWouldMatch": true,
+      "followerDisagreements": [],
+      "aborted": false,
+      "pagesExpectedToWrite": 8,
+      "pagesWritten": 8,
+      "targetMainBytesAfterInstallerClose": 323584,
+      "integrityAfterRepair": [
+        "ok"
+      ],
+      "canonicalEqualAfterReopen": true,
+      "recipientOwnerAfter": 2,
+      "continuedCommandCheckpoints": 30,
+      "restartCounts": [
+        0,
+        10,
+        6
+      ],
+      "integrityAfterContinuedCommands": [
+        [
+          "ok"
+        ],
+        [
+          "ok"
+        ],
+        [
+          "ok"
+        ]
+      ],
+      "pass": true
+    },
+    {
+      "case": "schema_growth",
+      "groupSize": 4,
+      "writeProfile": "attached_ascending",
+      "fullCopyFallback": false,
+      "targetOwnerBefore": 2,
+      "targetPagesBefore": 79,
+      "donorPages": 283,
+      "partialFinalGroup": 3,
+      "groupCount": 71,
+      "requestedGroups": [
+        1,
+        13,
+        17,
+        21,
+        25,
+        29,
+        33,
+        37,
+        41,
+        45,
+        49,
+        53,
+        57,
+        61,
+        65,
+        69,
+        73,
+        77,
+        81,
+        85,
+        89,
+        93,
+        97,
+        101,
+        105,
+        109,
+        113,
+        117,
+        121,
+        125,
+        129,
+        133,
+        137,
+        141,
+        145,
+        149,
+        153,
+        157,
+        161,
+        165,
+        169,
+        173,
+        177,
+        181,
+        185,
+        189,
+        193,
+        197,
+        201,
+        205,
+        209,
+        213,
+        217,
+        221,
+        225,
+        229,
+        233,
+        237,
+        241,
+        245,
+        249,
+        253,
+        257,
+        261,
+        265,
+        269,
+        273,
+        277,
+        281
+      ],
+      "modeledTargetSubmissionCount": 1,
+      "modeledFollowerCheckRequestCount": 1,
+      "followerDisagreements": [],
+      "aborted": false,
+      "pagesExpectedToWrite": 275,
+      "pagesWritten": 275,
+      "targetMainBytesAfterInstallerClose": 1159168,
+      "integrityAfterRepair": [
+        "ok"
+      ],
+      "canonicalEqualAfterReopen": true,
+      "recipientOwnerAfter": 2,
+      "continuedCommandCheckpoints": 30,
+      "restartCounts": [
+        0,
+        10,
+        6
+      ],
+      "integrityAfterContinuedCommands": [
+        [
+          "ok"
+        ],
+        [
+          "ok"
+        ],
+        [
+          "ok"
+        ]
+      ],
+      "pass": true
+    },
+    {
+      "case": "target_extra_pages",
+      "groupSize": 4,
+      "writeProfile": "attached_ascending",
+      "fullCopyFallback": false,
+      "targetOwnerBefore": 2,
+      "targetPagesBefore": 283,
+      "donorPages": 79,
+      "partialFinalGroup": 3,
+      "groupCount": 20,
+      "requestedGroups": [
+        1,
+        13,
+        17,
+        21,
+        25,
+        29,
+        33,
+        37,
+        41,
+        45,
+        49,
+        53,
+        57,
+        61,
+        65,
+        69,
+        73,
+        77
+      ],
+      "modeledTargetSubmissionCount": 1,
+      "modeledFollowerCheckRequestCount": 1,
+      "followerDisagreements": [],
+      "aborted": false,
+      "pagesExpectedToWrite": 71,
+      "pagesWritten": 71,
+      "targetMainBytesAfterInstallerClose": 323584,
+      "integrityAfterRepair": [
+        "ok"
+      ],
+      "canonicalEqualAfterReopen": true,
+      "recipientOwnerAfter": 2,
+      "continuedCommandCheckpoints": 30,
+      "restartCounts": [
+        0,
+        10,
+        6
+      ],
+      "integrityAfterContinuedCommands": [
+        [
+          "ok"
+        ],
+        [
+          "ok"
+        ],
+        [
+          "ok"
+        ]
+      ],
+      "pass": true
+    },
+    {
+      "case": "owner_root_change",
+      "groupSize": 4,
+      "writeProfile": "attached_ascending",
+      "fullCopyFallback": false,
+      "targetOwnerBefore": 3,
+      "targetPagesBefore": 80,
+      "donorPages": 79,
+      "partialFinalGroup": 3,
+      "groupCount": 20,
+      "requestedGroups": [
+        1,
+        5,
+        9,
+        13,
+        77
+      ],
+      "modeledTargetSubmissionCount": 1,
+      "modeledFollowerCheckRequestCount": 1,
+      "followerDisagreements": [],
+      "aborted": false,
+      "pagesExpectedToWrite": 19,
+      "pagesWritten": 19,
+      "targetMainBytesAfterInstallerClose": 323584,
+      "integrityAfterRepair": [
+        "ok"
+      ],
+      "canonicalEqualAfterReopen": true,
+      "recipientOwnerAfter": 2,
+      "continuedCommandCheckpoints": 30,
+      "restartCounts": [
+        0,
+        10,
+        6
+      ],
+      "integrityAfterContinuedCommands": [
+        [
+          "ok"
+        ],
+        [
+          "ok"
+        ],
+        [
+          "ok"
+        ]
+      ],
+      "pass": true
+    },
+    {
+      "case": "bad_owner_fallback",
+      "groupSize": 4,
+      "writeProfile": "attached_ascending",
+      "fullCopyFallback": true,
+      "targetReadError": "(11, 'database disk image is malformed')",
+      "donorPages": 79,
+      "partialFinalGroup": 3,
+      "groupCount": 20,
+      "requestedGroups": [
+        1,
+        5,
+        9,
+        13,
+        17,
+        21,
+        25,
+        29,
+        33,
+        37,
+        41,
+        45,
+        49,
+        53,
+        57,
+        61,
+        65,
+        69,
+        73,
+        77
+      ],
+      "modeledTargetSubmissionCount": 1,
+      "modeledFollowerCheckRequestCount": 1,
+      "followerDisagreements": [],
+      "aborted": false,
+      "pagesExpectedToWrite": 79,
+      "pagesWritten": 79,
+      "targetMainBytesAfterInstallerClose": 323584,
+      "integrityAfterRepair": [
+        "ok"
+      ],
+      "canonicalEqualAfterReopen": true,
+      "recipientOwnerAfter": 2,
+      "continuedCommandCheckpoints": 30,
+      "restartCounts": [
+        0,
+        10,
+        6
+      ],
+      "integrityAfterContinuedCommands": [
+        [
+          "ok"
+        ],
+        [
+          "ok"
+        ],
+        [
+          "ok"
+        ]
+      ],
+      "pass": true
+    },
+    {
+      "case": "bad_freelist_fallback",
+      "groupSize": 4,
+      "writeProfile": "attached_ascending",
+      "fullCopyFallback": true,
+      "targetReadError": "",
+      "donorPages": 79,
+      "partialFinalGroup": 3,
+      "groupCount": 20,
+      "requestedGroups": [
+        1,
+        5,
+        9,
+        13,
+        17,
+        21,
+        25,
+        29,
+        33,
+        37,
+        41,
+        45,
+        49,
+        53,
+        57,
+        61,
+        65,
+        69,
+        73,
+        77
+      ],
+      "modeledTargetSubmissionCount": 1,
+      "modeledFollowerCheckRequestCount": 1,
+      "followerDisagreements": [],
+      "aborted": false,
+      "pagesExpectedToWrite": 79,
+      "pagesWritten": 79,
+      "targetMainBytesAfterInstallerClose": 323584,
+      "integrityAfterRepair": [
+        "ok"
+      ],
+      "canonicalEqualAfterReopen": true,
+      "recipientOwnerAfter": 2,
+      "continuedCommandCheckpoints": 30,
+      "restartCounts": [
+        0,
+        10,
+        6
+      ],
+      "integrityAfterContinuedCommands": [
+        [
+          "ok"
+        ],
+        [
+          "ok"
+        ],
+        [
+          "ok"
+        ]
+      ],
+      "pass": true
+    },
+    {
+      "case": "bad_schema_fallback",
+      "groupSize": 4,
+      "writeProfile": "attached_ascending",
+      "fullCopyFallback": true,
+      "targetReadError": "(11, 'database disk image is malformed', 'SELECT pgno,data FROM sqlite_dbpage ORDER BY pgno')",
+      "donorPages": 79,
+      "partialFinalGroup": 3,
+      "groupCount": 20,
+      "requestedGroups": [
+        1,
+        5,
+        9,
+        13,
+        17,
+        21,
+        25,
+        29,
+        33,
+        37,
+        41,
+        45,
+        49,
+        53,
+        57,
+        61,
+        65,
+        69,
+        73,
+        77
+      ],
+      "modeledTargetSubmissionCount": 1,
+      "modeledFollowerCheckRequestCount": 1,
+      "followerDisagreements": [],
+      "aborted": false,
+      "pagesExpectedToWrite": 79,
+      "pagesWritten": 79,
+      "targetMainBytesAfterInstallerClose": 323584,
+      "integrityAfterRepair": [
+        "ok"
+      ],
+      "canonicalEqualAfterReopen": true,
+      "recipientOwnerAfter": 2,
+      "continuedCommandCheckpoints": 30,
+      "restartCounts": [
+        0,
+        10,
+        6
+      ],
+      "integrityAfterContinuedCommands": [
+        [
+          "ok"
+        ],
+        [
+          "ok"
+        ],
+        [
+          "ok"
+        ]
+      ],
+      "pass": true
+    },
+    {
+      "case": "bad_header_fallback",
+      "groupSize": 4,
+      "writeProfile": "attached_ascending",
+      "fullCopyFallback": true,
+      "targetReadError": "(26, 'file is not a database', 'SELECT pgno,data FROM sqlite_dbpage ORDER BY pgno')",
+      "donorPages": 79,
+      "partialFinalGroup": 3,
+      "groupCount": 20,
+      "requestedGroups": [
+        1,
+        5,
+        9,
+        13,
+        17,
+        21,
+        25,
+        29,
+        33,
+        37,
+        41,
+        45,
+        49,
+        53,
+        57,
+        61,
+        65,
+        69,
+        73,
+        77
+      ],
+      "modeledTargetSubmissionCount": 1,
+      "modeledFollowerCheckRequestCount": 1,
+      "followerDisagreements": [],
+      "aborted": false,
+      "pagesExpectedToWrite": 79,
+      "pagesWritten": 79,
+      "targetMainBytesAfterInstallerClose": 323584,
+      "integrityAfterRepair": [
+        "ok"
+      ],
+      "canonicalEqualAfterReopen": true,
+      "recipientOwnerAfter": 2,
+      "continuedCommandCheckpoints": 30,
+      "restartCounts": [
+        0,
+        10,
+        6
+      ],
+      "integrityAfterContinuedCommands": [
+        [
+          "ok"
+        ],
+        [
+          "ok"
+        ],
+        [
+          "ok"
+        ]
+      ],
+      "pass": true
+    },
+    {
+      "case": "witness_disagrees",
+      "groupSize": 4,
+      "writeProfile": "attached_ascending",
+      "fullCopyFallback": false,
+      "targetOwnerBefore": 2,
+      "targetPagesBefore": 79,
+      "donorPages": 79,
+      "partialFinalGroup": 3,
+      "groupCount": 20,
+      "requestedGroups": [
+        9
+      ],
+      "modeledTargetSubmissionCount": 1,
+      "modeledFollowerCheckRequestCount": 1,
+      "followerDisagreements": [
+        9
+      ],
+      "aborted": true,
+      "pagesWritten": 0,
+      "pass": true
+    },
+    {
+      "case": "witness_unreadable",
+      "groupSize": 4,
+      "writeProfile": "attached_ascending",
+      "fullCopyFallback": false,
+      "targetOwnerBefore": 2,
+      "targetPagesBefore": 79,
+      "donorPages": 79,
+      "partialFinalGroup": 3,
+      "groupCount": 20,
+      "requestedGroups": [
+        9
+      ],
+      "modeledTargetSubmissionCount": 1,
+      "modeledFollowerCheckRequestCount": 1,
+      "aborted": true,
+      "pagesWritten": 0,
+      "followerReadError": "(11, 'database disk image is malformed')",
+      "pass": true
+    },
+    {
+      "case": "pinned_snapshot",
+      "groupSize": 4,
+      "writeProfile": "attached_ascending",
+      "fullCopyFallback": false,
+      "targetOwnerBefore": 2,
+      "targetPagesBefore": 79,
+      "donorPages": 79,
+      "partialFinalGroup": 3,
+      "groupCount": 20,
+      "requestedGroups": [
+        9
+      ],
+      "modeledTargetSubmissionCount": 1,
+      "modeledFollowerCheckRequestCount": 1,
+      "followerDisagreements": [],
+      "aborted": false,
+      "healthyWritersAdvancedWhilePinned": true,
+      "pagesExpectedToWrite": 4,
+      "pagesWritten": 4,
+      "targetMainBytesAfterInstallerClose": 323584,
+      "integrityAfterRepair": [
+        "ok"
+      ],
+      "canonicalEqualAfterReopen": true,
+      "recipientOwnerAfter": 2,
+      "continuedCommandCheckpoints": 30,
+      "restartCounts": [
+        0,
+        10,
+        6
+      ],
+      "integrityAfterContinuedCommands": [
+        [
+          "ok"
+        ],
+        [
+          "ok"
+        ],
+        [
+          "ok"
+        ]
+      ],
+      "pass": true
+    },
+    {
+      "case": "ordinary_corruption",
+      "groupSize": 4,
+      "writeProfile": "attached_page1_last",
+      "fullCopyFallback": false,
+      "targetOwnerBefore": 2,
+      "targetPagesBefore": 79,
+      "donorPages": 79,
+      "partialFinalGroup": 3,
+      "groupCount": 20,
+      "requestedGroups": [
+        9
+      ],
+      "modeledTargetSubmissionCount": 1,
+      "modeledFollowerCheckRequestCount": 1,
+      "followerDisagreements": [],
+      "aborted": false,
+      "pagesExpectedToWrite": 4,
+      "pagesWritten": 4,
+      "targetMainBytesAfterInstallerClose": 323584,
+      "integrityAfterRepair": [
+        "ok"
+      ],
+      "canonicalEqualAfterReopen": true,
+      "recipientOwnerAfter": 2,
+      "continuedCommandCheckpoints": 30,
+      "restartCounts": [
+        0,
+        10,
+        6
+      ],
+      "integrityAfterContinuedCommands": [
+        [
+          "ok"
+        ],
+        [
+          "ok"
+        ],
+        [
+          "ok"
+        ]
+      ],
+      "pass": true
+    },
+    {
+      "case": "index_corruption",
+      "groupSize": 4,
+      "writeProfile": "attached_page1_last",
+      "fullCopyFallback": false,
+      "targetOwnerBefore": 2,
+      "targetPagesBefore": 79,
+      "donorPages": 79,
+      "partialFinalGroup": 3,
+      "groupCount": 20,
+      "requestedGroups": [
+        5
+      ],
+      "modeledTargetSubmissionCount": 1,
+      "modeledFollowerCheckRequestCount": 1,
+      "followerDisagreements": [],
+      "aborted": false,
+      "pagesExpectedToWrite": 4,
+      "pagesWritten": 4,
+      "targetMainBytesAfterInstallerClose": 323584,
+      "integrityAfterRepair": [
+        "ok"
+      ],
+      "canonicalEqualAfterReopen": true,
+      "recipientOwnerAfter": 2,
+      "continuedCommandCheckpoints": 30,
+      "restartCounts": [
+        0,
+        10,
+        6
+      ],
+      "integrityAfterContinuedCommands": [
+        [
+          "ok"
+        ],
+        [
+          "ok"
+        ],
+        [
+          "ok"
+        ]
+      ],
+      "pass": true
+    },
+    {
+      "case": "wrong_free_classification",
+      "groupSize": 4,
+      "writeProfile": "attached_page1_last",
+      "misclassifiedActivePage": 11,
+      "fullCopyFallback": false,
+      "targetOwnerBefore": 2,
+      "targetPagesBefore": 79,
+      "donorPages": 79,
+      "partialFinalGroup": 3,
+      "groupCount": 20,
+      "requestedGroups": [
+        9,
+        13
+      ],
+      "modeledTargetSubmissionCount": 1,
+      "modeledFollowerCheckRequestCount": 1,
+      "byteOnlyHashWouldMatch": true,
+      "followerDisagreements": [],
+      "aborted": false,
+      "pagesExpectedToWrite": 8,
+      "pagesWritten": 8,
+      "targetMainBytesAfterInstallerClose": 323584,
+      "integrityAfterRepair": [
+        "ok"
+      ],
+      "canonicalEqualAfterReopen": true,
+      "recipientOwnerAfter": 2,
+      "continuedCommandCheckpoints": 30,
+      "restartCounts": [
+        0,
+        10,
+        6
+      ],
+      "integrityAfterContinuedCommands": [
+        [
+          "ok"
+        ],
+        [
+          "ok"
+        ],
+        [
+          "ok"
+        ]
+      ],
+      "pass": true
+    },
+    {
+      "case": "schema_growth",
+      "groupSize": 4,
+      "writeProfile": "attached_page1_last",
+      "fullCopyFallback": false,
+      "targetOwnerBefore": 2,
+      "targetPagesBefore": 79,
+      "donorPages": 283,
+      "partialFinalGroup": 3,
+      "groupCount": 71,
+      "requestedGroups": [
+        1,
+        13,
+        17,
+        21,
+        25,
+        29,
+        33,
+        37,
+        41,
+        45,
+        49,
+        53,
+        57,
+        61,
+        65,
+        69,
+        73,
+        77,
+        81,
+        85,
+        89,
+        93,
+        97,
+        101,
+        105,
+        109,
+        113,
+        117,
+        121,
+        125,
+        129,
+        133,
+        137,
+        141,
+        145,
+        149,
+        153,
+        157,
+        161,
+        165,
+        169,
+        173,
+        177,
+        181,
+        185,
+        189,
+        193,
+        197,
+        201,
+        205,
+        209,
+        213,
+        217,
+        221,
+        225,
+        229,
+        233,
+        237,
+        241,
+        245,
+        249,
+        253,
+        257,
+        261,
+        265,
+        269,
+        273,
+        277,
+        281
+      ],
+      "modeledTargetSubmissionCount": 1,
+      "modeledFollowerCheckRequestCount": 1,
+      "followerDisagreements": [],
+      "aborted": false,
+      "pagesExpectedToWrite": 275,
+      "pagesWritten": 275,
+      "targetMainBytesAfterInstallerClose": 1159168,
+      "integrityAfterRepair": [
+        "ok"
+      ],
+      "canonicalEqualAfterReopen": true,
+      "recipientOwnerAfter": 2,
+      "continuedCommandCheckpoints": 30,
+      "restartCounts": [
+        0,
+        10,
+        6
+      ],
+      "integrityAfterContinuedCommands": [
+        [
+          "ok"
+        ],
+        [
+          "ok"
+        ],
+        [
+          "ok"
+        ]
+      ],
+      "pass": true
+    },
+    {
+      "case": "target_extra_pages",
+      "groupSize": 4,
+      "writeProfile": "attached_page1_last",
+      "fullCopyFallback": false,
+      "targetOwnerBefore": 2,
+      "targetPagesBefore": 283,
+      "donorPages": 79,
+      "partialFinalGroup": 3,
+      "groupCount": 20,
+      "requestedGroups": [
+        1,
+        13,
+        17,
+        21,
+        25,
+        29,
+        33,
+        37,
+        41,
+        45,
+        49,
+        53,
+        57,
+        61,
+        65,
+        69,
+        73,
+        77
+      ],
+      "modeledTargetSubmissionCount": 1,
+      "modeledFollowerCheckRequestCount": 1,
+      "followerDisagreements": [],
+      "aborted": false,
+      "pagesExpectedToWrite": 71,
+      "pagesWritten": 71,
+      "targetMainBytesAfterInstallerClose": 323584,
+      "integrityAfterRepair": [
+        "ok"
+      ],
+      "canonicalEqualAfterReopen": true,
+      "recipientOwnerAfter": 2,
+      "continuedCommandCheckpoints": 30,
+      "restartCounts": [
+        0,
+        10,
+        6
+      ],
+      "integrityAfterContinuedCommands": [
+        [
+          "ok"
+        ],
+        [
+          "ok"
+        ],
+        [
+          "ok"
+        ]
+      ],
+      "pass": true
+    },
+    {
+      "case": "owner_root_change",
+      "groupSize": 4,
+      "writeProfile": "attached_page1_last",
+      "fullCopyFallback": false,
+      "targetOwnerBefore": 3,
+      "targetPagesBefore": 80,
+      "donorPages": 79,
+      "partialFinalGroup": 3,
+      "groupCount": 20,
+      "requestedGroups": [
+        1,
+        5,
+        9,
+        13,
+        77
+      ],
+      "modeledTargetSubmissionCount": 1,
+      "modeledFollowerCheckRequestCount": 1,
+      "followerDisagreements": [],
+      "aborted": false,
+      "pagesExpectedToWrite": 19,
+      "pagesWritten": 19,
+      "targetMainBytesAfterInstallerClose": 323584,
+      "integrityAfterRepair": [
+        "ok"
+      ],
+      "canonicalEqualAfterReopen": true,
+      "recipientOwnerAfter": 2,
+      "continuedCommandCheckpoints": 30,
+      "restartCounts": [
+        0,
+        10,
+        6
+      ],
+      "integrityAfterContinuedCommands": [
+        [
+          "ok"
+        ],
+        [
+          "ok"
+        ],
+        [
+          "ok"
+        ]
+      ],
+      "pass": true
+    },
+    {
+      "case": "bad_owner_fallback",
+      "groupSize": 4,
+      "writeProfile": "attached_page1_last",
+      "fullCopyFallback": true,
+      "targetReadError": "(11, 'database disk image is malformed')",
+      "donorPages": 79,
+      "partialFinalGroup": 3,
+      "groupCount": 20,
+      "requestedGroups": [
+        1,
+        5,
+        9,
+        13,
+        17,
+        21,
+        25,
+        29,
+        33,
+        37,
+        41,
+        45,
+        49,
+        53,
+        57,
+        61,
+        65,
+        69,
+        73,
+        77
+      ],
+      "modeledTargetSubmissionCount": 1,
+      "modeledFollowerCheckRequestCount": 1,
+      "followerDisagreements": [],
+      "aborted": false,
+      "pagesExpectedToWrite": 79,
+      "pagesWritten": 79,
+      "targetMainBytesAfterInstallerClose": 323584,
+      "integrityAfterRepair": [
+        "ok"
+      ],
+      "canonicalEqualAfterReopen": true,
+      "recipientOwnerAfter": 2,
+      "continuedCommandCheckpoints": 30,
+      "restartCounts": [
+        0,
+        10,
+        6
+      ],
+      "integrityAfterContinuedCommands": [
+        [
+          "ok"
+        ],
+        [
+          "ok"
+        ],
+        [
+          "ok"
+        ]
+      ],
+      "pass": true
+    },
+    {
+      "case": "bad_freelist_fallback",
+      "groupSize": 4,
+      "writeProfile": "attached_page1_last",
+      "fullCopyFallback": true,
+      "targetReadError": "",
+      "donorPages": 79,
+      "partialFinalGroup": 3,
+      "groupCount": 20,
+      "requestedGroups": [
+        1,
+        5,
+        9,
+        13,
+        17,
+        21,
+        25,
+        29,
+        33,
+        37,
+        41,
+        45,
+        49,
+        53,
+        57,
+        61,
+        65,
+        69,
+        73,
+        77
+      ],
+      "modeledTargetSubmissionCount": 1,
+      "modeledFollowerCheckRequestCount": 1,
+      "followerDisagreements": [],
+      "aborted": false,
+      "pagesExpectedToWrite": 79,
+      "pagesWritten": 79,
+      "targetMainBytesAfterInstallerClose": 323584,
+      "integrityAfterRepair": [
+        "ok"
+      ],
+      "canonicalEqualAfterReopen": true,
+      "recipientOwnerAfter": 2,
+      "continuedCommandCheckpoints": 30,
+      "restartCounts": [
+        0,
+        10,
+        6
+      ],
+      "integrityAfterContinuedCommands": [
+        [
+          "ok"
+        ],
+        [
+          "ok"
+        ],
+        [
+          "ok"
+        ]
+      ],
+      "pass": true
+    },
+    {
+      "case": "bad_schema_fallback",
+      "groupSize": 4,
+      "writeProfile": "attached_page1_last",
+      "fullCopyFallback": true,
+      "targetReadError": "(11, 'database disk image is malformed', 'SELECT pgno,data FROM sqlite_dbpage ORDER BY pgno')",
+      "donorPages": 79,
+      "partialFinalGroup": 3,
+      "groupCount": 20,
+      "requestedGroups": [
+        1,
+        5,
+        9,
+        13,
+        17,
+        21,
+        25,
+        29,
+        33,
+        37,
+        41,
+        45,
+        49,
+        53,
+        57,
+        61,
+        65,
+        69,
+        73,
+        77
+      ],
+      "modeledTargetSubmissionCount": 1,
+      "modeledFollowerCheckRequestCount": 1,
+      "followerDisagreements": [],
+      "aborted": false,
+      "pagesExpectedToWrite": 79,
+      "pagesWritten": 79,
+      "targetMainBytesAfterInstallerClose": 323584,
+      "integrityAfterRepair": [
+        "ok"
+      ],
+      "canonicalEqualAfterReopen": true,
+      "recipientOwnerAfter": 2,
+      "continuedCommandCheckpoints": 30,
+      "restartCounts": [
+        0,
+        10,
+        6
+      ],
+      "integrityAfterContinuedCommands": [
+        [
+          "ok"
+        ],
+        [
+          "ok"
+        ],
+        [
+          "ok"
+        ]
+      ],
+      "pass": true
+    },
+    {
+      "case": "bad_header_fallback",
+      "groupSize": 4,
+      "writeProfile": "attached_page1_last",
+      "fullCopyFallback": true,
+      "targetReadError": "(26, 'file is not a database', 'SELECT pgno,data FROM sqlite_dbpage ORDER BY pgno')",
+      "donorPages": 79,
+      "partialFinalGroup": 3,
+      "groupCount": 20,
+      "requestedGroups": [
+        1,
+        5,
+        9,
+        13,
+        17,
+        21,
+        25,
+        29,
+        33,
+        37,
+        41,
+        45,
+        49,
+        53,
+        57,
+        61,
+        65,
+        69,
+        73,
+        77
+      ],
+      "modeledTargetSubmissionCount": 1,
+      "modeledFollowerCheckRequestCount": 1,
+      "followerDisagreements": [],
+      "aborted": false,
+      "pagesExpectedToWrite": 79,
+      "pagesWritten": 79,
+      "targetMainBytesAfterInstallerClose": 323584,
+      "integrityAfterRepair": [
+        "ok"
+      ],
+      "canonicalEqualAfterReopen": true,
+      "recipientOwnerAfter": 2,
+      "continuedCommandCheckpoints": 30,
+      "restartCounts": [
+        0,
+        10,
+        6
+      ],
+      "integrityAfterContinuedCommands": [
+        [
+          "ok"
+        ],
+        [
+          "ok"
+        ],
+        [
+          "ok"
+        ]
+      ],
+      "pass": true
+    },
+    {
+      "case": "witness_disagrees",
+      "groupSize": 4,
+      "writeProfile": "attached_page1_last",
+      "fullCopyFallback": false,
+      "targetOwnerBefore": 2,
+      "targetPagesBefore": 79,
+      "donorPages": 79,
+      "partialFinalGroup": 3,
+      "groupCount": 20,
+      "requestedGroups": [
+        9
+      ],
+      "modeledTargetSubmissionCount": 1,
+      "modeledFollowerCheckRequestCount": 1,
+      "followerDisagreements": [
+        9
+      ],
+      "aborted": true,
+      "pagesWritten": 0,
+      "pass": true
+    },
+    {
+      "case": "witness_unreadable",
+      "groupSize": 4,
+      "writeProfile": "attached_page1_last",
+      "fullCopyFallback": false,
+      "targetOwnerBefore": 2,
+      "targetPagesBefore": 79,
+      "donorPages": 79,
+      "partialFinalGroup": 3,
+      "groupCount": 20,
+      "requestedGroups": [
+        9
+      ],
+      "modeledTargetSubmissionCount": 1,
+      "modeledFollowerCheckRequestCount": 1,
+      "aborted": true,
+      "pagesWritten": 0,
+      "followerReadError": "(11, 'database disk image is malformed')",
+      "pass": true
+    },
+    {
+      "case": "pinned_snapshot",
+      "groupSize": 4,
+      "writeProfile": "attached_page1_last",
+      "fullCopyFallback": false,
+      "targetOwnerBefore": 2,
+      "targetPagesBefore": 79,
+      "donorPages": 79,
+      "partialFinalGroup": 3,
+      "groupCount": 20,
+      "requestedGroups": [
+        9
+      ],
+      "modeledTargetSubmissionCount": 1,
+      "modeledFollowerCheckRequestCount": 1,
+      "followerDisagreements": [],
+      "aborted": false,
+      "healthyWritersAdvancedWhilePinned": true,
+      "pagesExpectedToWrite": 4,
+      "pagesWritten": 4,
+      "targetMainBytesAfterInstallerClose": 323584,
+      "integrityAfterRepair": [
+        "ok"
+      ],
+      "canonicalEqualAfterReopen": true,
+      "recipientOwnerAfter": 2,
+      "continuedCommandCheckpoints": 30,
+      "restartCounts": [
+        0,
+        10,
+        6
+      ],
+      "integrityAfterContinuedCommands": [
+        [
+          "ok"
+        ],
+        [
+          "ok"
+        ],
+        [
+          "ok"
+        ]
+      ],
+      "pass": true
+    }
+  ]
+}
