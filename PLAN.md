@@ -15,14 +15,16 @@ we rely on the proposed DB2 page-equality rules.
   formats may require fresh databases. Do not build migration or old-format
   compatibility machinery for this work.
 - **Never apply patchsets or changesets.** Normal execution captures and hashes
-  patchsets. Repair transfers physical database pages. Nothing in this plan
-  introduces patchset/changeset application.
+  patchsets. Repair transfers SQLite pages read through `sqlite_dbpage`.
+  Nothing in this plan introduces patchset/changeset application.
 - The **leader is always the repair donor**. DB1 donation is verified by the
   leader's three local Procs. DB2 replacement groups require agreement from
   distinct cluster members.
-- Replace logical local DB1 adoption with physical reconciliation so the local
-  copies can produce matching page-transfer RPCs.
-- Canonicalize the two SQLite page-1 counters for both hashing and RPC payloads.
+- Replace logical local DB1 adoption with transactional `sqlite_dbpage`
+  reconciliation. Require matching canonical local page views so the copies
+  can produce matching page-transfer RPCs.
+- Canonicalize the two SQLite page-1 counters in both DB1 and DB2 for hashing
+  and RPC payloads. Raw equality of those counters is not required.
 - Move DB2's local generation into a dedicated singleton ownership table/page.
   Keep the token local and preserve the existing transaction-scoped fence.
 - Add periodic committed scrub commands that compare subsets of DB2 pages
@@ -75,11 +77,25 @@ Read pages through `sqlite_dbpage`, which exposes the transaction's pager view,
 including visible WAL content. Do not compare only the main database file while
 ignoring its WAL.
 
-Use one versioned canonicalization rule for comparisons, group hashes, scrub
-results, and repair RPC payloads. Raw outgoing payload differences would still
-fail Gate verification even if a separate comparison hash ignored them.
+For local DB1 agreement and cross-member DB2 agreement, require matching page
+size, page count, and canonicalized bytes at corresponding page numbers in the
+agreed snapshot. It is equality through the `sqlite_dbpage` read interface, not
+byte identity of the main database file, WAL, shared-memory file, or filesystem
+layout. Different checkpoint placement and WAL bookkeeping are permitted.
 
-### Page 1
+`sqlite_dbpage` still returns SQLite page bytes, including B-tree layout and free
+space. It does not turn equal SQL rows into a canonical serialization. The
+earlier layout/history differences were observed through this same read
+interface and remain relevant. The exceptions explicitly defined below are
+applied to that page view before comparison.
+
+Use one versioned canonicalization rule per database for comparisons, group
+hashes, scrub results, and repair RPC payloads. Raw outgoing payload differences
+would still fail Gate verification even if a separate comparison hash ignored
+them. Both databases normalize page-1 counters; only DB2 substitutes its local
+ownership page. DB1 does not need cross-member page equality.
+
+### Page 1 in DB1 and DB2
 
 In copies of page 1 used for hashing or RPC encoding, replace these zero-based
 byte ranges with zeros:
@@ -157,17 +173,41 @@ correct local participants. Local agreement does not itself establish current
 leadership or which entries are committed; the snapshot must bind those facts
 separately.
 
+Use **transactional `sqlite_dbpage` writes** for local DB1 replacement, retaining
+WAL mode and FULL. This fits the existing transactional adoption flow and avoids
+coordinating filesystem replacement and all three connection lifetimes solely
+to preserve identical page-1 counters. SQLite manages the destination's WAL and
+transaction commit/rollback; counter differences are handled by canonicalization.
+
 Preferred startup/reconciliation sequence:
 
-1. Pin comparable local DB1 snapshots and compare their complete canonical page
-   manifests, including page count and snapshot identity.
-2. If two copies agree and the third is an outlier, physically replace the
-   outlier from an agreeing copy. Use a coherent SQLite snapshot and a safe
-   filesystem replacement or transactional DBPAGE installation.
-3. Verify the repaired image and restore matching local state before normal
-   operation and donation.
-4. During donation, each Proc independently reads/verifies the selected pages
+1. Quiesce local protocol work, pin comparable DB1 snapshots, and compare their
+   complete canonical page manifests, including page count and snapshot
+   identity. Select an agreeing pair before replacing an outlier; keep those
+   supporting snapshots pinned during copying.
+2. Begin an IMMEDIATE transaction on the outlier and check its current local
+   generation. Verify both supporting snapshots carry that same startup token.
+3. Install the selected donor image through `sqlite_dbpage`, including exact
+   page-count growth or truncation, and commit. Use valid source page bytes for
+   local copying; the counter mask defines comparison/encoding, not a requirement
+   to store zero counters in the live database. No logical row replay is involved.
+4. Refresh affected SQLite schema/prepared-statement state and application log
+   caches. Verify the committed canonical image and ownership, then complete
+   receipt reconciliation consistently. Require matching complete canonical
+   manifests at the common checkpoint before resuming operation and donation.
+5. During donation, each Proc independently reads/verifies its selected pages
    and produces matching canonical repair output through Gate.
+
+Current `ProtocolStore.open()` claims generation before capture, and `adopt()`
+already guards its write transaction and reads both supporting donor snapshots.
+Preserve those ownership checks while replacing the logical copy and summary
+comparison with page installation and complete-manifest verification. All local
+copies share the startup token, so this local copy must not change ownership.
+
+Page-count handling, valid header installation, and schema/cache refresh still
+need tests against the pinned SQLite build. If refreshing the destination safely
+requires reopening it, allow that without requiring A/B/C to share identical
+connection lifetimes.
 
 Current startup `stateDigest()` compares election state, metadata, and log head;
 it does not certify every retained log row or page. It is insufficient by itself
@@ -177,14 +217,17 @@ from different checkpoint snapshots.
 Current Gate requires all three outgoing results to agree. Two-of-three source
 selection for local reconciliation does not silently change Gate into a
 two-of-three outgoing-RPC mechanism. Repair the outlier, then use the established
-matching-output path. Normalize page 1 in the actual repair encoding as well as
-in the local manifest.
+matching-output path. Normalize page 1 in both the local manifests and the actual
+DB1 donation RPC payloads, so allowed counter differences cannot break Gate
+agreement.
 
-The target installs the donated DB1 image into its local copies and claims its
-own fresh local generation consistently. That intentional local change needs a
-defined place in verification/activation. Installing an image must not roll
-back required recipient term/vote protections. The exact rejoin rules remain
-to be specified.
+The target verifies the received canonical DB1 bytes against the donated manifest.
+Installation and fresh generation claims can change its headers; do not require
+post-activation raw equality with the donor. Require canonical page equality
+among the target's own A/B/C copies after startup. These intentional local
+changes need a defined place in verification/activation. Installing an image
+must not roll back required recipient term/vote protections. The exact remote
+installation and rejoin rules remain to be specified.
 
 ## DB2 grouped comparison and transfer
 
@@ -371,7 +414,7 @@ patchset/changeset application.
   mapping, interrupted installation, and claiming the recipient token before
   activation.
 
-### Then: DB2 physical equality and possible new rules
+### Then: DB2 canonical page-view equality and possible new rules
 
 - Start from common physical images and execute the same ordered commands under
   the pinned runtime and settings. Compare at agreed receipt checkpoints.
@@ -390,7 +433,11 @@ patchset/changeset application.
 ### Then: reconciliation, repair, scrub, and lifecycle
 
 - Repair each possible local DB1 outlier, including corruption away from the log
-  head, and verify complete local manifests plus matching Gate RPCs afterward.
+  head, through transactional `sqlite_dbpage` replacement. Verify page-count
+  growth/truncation, rollback on interruption, ownership checks, and schema/log
+  cache refresh. Compare complete canonical manifests after commit, receipt
+  reconciliation, and continued ordered inputs, plus matching Gate RPCs despite
+  differing raw page-1 counters.
 - Test group comparisons with missing/extra pages, partial groups, independently
   differing corruption patterns, unavailable voters, and a suspect leader.
 - Verify only accepted disagreement groups are transferred and measure actual
@@ -409,8 +456,9 @@ patchset/changeset application.
 1. Add the pinned Nix runtime and startup/CI capability probes for DBPAGE and
    session capture, retaining WAL/FULL.
 2. Prototype the DB2 ownership page and canonicalization. Establish the tests
-   and required physical-equality rules before treating page hashes as authority.
-3. Implement physical local DB1 reconciliation and complete-image verification.
+   and required page-view equality rules before treating page hashes as authority.
+3. Implement transactional local DB1 page reconciliation and complete-image
+   verification.
 4. Define shared checkpoint capture, snapshot lifetime, and repair-only startup.
 5. Implement grouped DB2 verification and leader-only transfer, then crash-safe
    installation and the explicit completion/rejoin path.
